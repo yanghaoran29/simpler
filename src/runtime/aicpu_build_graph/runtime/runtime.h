@@ -124,7 +124,7 @@ struct Handshake {
 struct TensorPair {
     void* host_ptr;
     void* dev_ptr;
-    size_t size;
+    uint64_t size;
 };
 
 /**
@@ -161,7 +161,7 @@ struct AicpuBuildApi {
         Runtime* runtime, uint64_t* args, int num_args, int func_id, CoreType core_type, uint64_t function_bin_addr);
     void (*add_successor_conditional)(Runtime* runtime, int from_task, int to_task);
     void (*publish_task)(Runtime* runtime, int task_id);
-    void* (*device_malloc)(size_t size);
+    void* (*device_malloc)(uint64_t size);
     void (*device_free)(void* ptr);
 };
 
@@ -170,11 +170,11 @@ struct AicpuBuildApi {
  * Allows runtime to use pluggable device memory backends.
  */
 struct HostApi {
-    void* (*device_malloc)(size_t size);
+    void* (*device_malloc)(uint64_t size);
     void (*device_free)(void* dev_ptr);
-    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, size_t size);
-    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, size_t size);
-    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, size_t bin_size);
+    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, uint64_t size);
+    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, uint64_t size);
+    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, uint64_t bin_size);
 };
 
 /**
@@ -286,16 +286,16 @@ public:
      * orchestration plugin `.so` (instead of relinking/reuploading the full runtime).
      */
     uint8_t aicpu_orch_so_storage[RUNTIME_MAX_AICPU_ORCH_SO_SIZE];
-    uint32_t aicpu_orch_so_size;
+    uint64_t aicpu_orch_so_size;
     char aicpu_orch_func_name[64];
 
     // Attempt to embed AICPU orchestration plugin bytes into Runtime.
     // Returns false on invalid input or if the plugin is larger than the
     // built-in storage.
-    bool try_set_aicpu_orch_so(const void* data, size_t size);
-    void set_aicpu_orch_so(const void* data, size_t size);
+    bool try_set_aicpu_orch_so(const void* data, uint64_t size);
+    void set_aicpu_orch_so(const void* data, uint64_t size);
     const void* get_aicpu_orch_so_data() const;
-    size_t get_aicpu_orch_so_size() const;
+    uint64_t get_aicpu_orch_so_size() const;
 
     /**
      * Build mode:
@@ -465,7 +465,7 @@ public:
      * @param dev_ptr   Device memory pointer (source for copy-back)
      * @param size     Size of tensor in bytes
      */
-    void record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size);
+    void record_tensor_pair(void* host_ptr, void* dev_ptr, uint64_t size);
 
     /**
      * Record a device allocation for cleanup during finalize.

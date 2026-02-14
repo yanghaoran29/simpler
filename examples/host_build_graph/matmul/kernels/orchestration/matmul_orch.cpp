@@ -37,10 +37,10 @@ int build_matmul_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     void* host_w1 = reinterpret_cast<void*>(args[1]);
     void* host_w2 = reinterpret_cast<void*>(args[2]);
     void* host_f  = reinterpret_cast<void*>(args[3]);
-    size_t size_a  = static_cast<size_t>(args[4]);
-    size_t size_w1 = static_cast<size_t>(args[5]);
-    size_t size_w2 = static_cast<size_t>(args[6]);
-    size_t size_f  = static_cast<size_t>(args[7]);
+    uint64_t size_a  = static_cast<uint64_t>(args[4]);
+    uint64_t size_w1 = static_cast<uint64_t>(args[5]);
+    uint64_t size_w2 = static_cast<uint64_t>(args[6]);
+    uint64_t size_f  = static_cast<uint64_t>(args[7]);
     int SIZE = static_cast<int>(args[8]);
 
     std::cout << "\n=== build_matmul_graph: Creating Task Runtime ===" << '\n';
@@ -92,8 +92,8 @@ int build_matmul_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     // Allocate intermediate tensors (b, c, d)
     // dev_b is half precision (output of log_sqrt kernel, input to matmul)
     // dev_c, dev_d are float precision (output of matmul kernels)
-    size_t BYTES_HALF = SIZE * sizeof(uint16_t);   // half = 2 bytes
-    size_t BYTES_FLOAT = SIZE * sizeof(float);     // float = 4 bytes
+    uint64_t BYTES_HALF = SIZE * sizeof(uint16_t);   // half = 2 bytes
+    uint64_t BYTES_FLOAT = SIZE * sizeof(float);     // float = 4 bytes
     void* dev_b = runtime->host_api.device_malloc(BYTES_HALF);   // sqrt(log(A)) - half output
     void* dev_c = runtime->host_api.device_malloc(BYTES_FLOAT);  // B @ W1 - float output
     void* dev_d = runtime->host_api.device_malloc(BYTES_FLOAT);  // B @ W2 - float output

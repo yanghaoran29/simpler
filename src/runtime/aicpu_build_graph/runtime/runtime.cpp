@@ -49,7 +49,7 @@ Runtime::Runtime() {
     aicpu_build_api = {};
 }
 
-bool Runtime::try_set_aicpu_orch_so(const void* data, size_t size) {
+bool Runtime::try_set_aicpu_orch_so(const void* data, uint64_t size) {
     if (data == nullptr || size == 0) {
         aicpu_orch_so_size = 0;
         return false;
@@ -63,15 +63,15 @@ bool Runtime::try_set_aicpu_orch_so(const void* data, size_t size) {
         return false;
     }
     memcpy(aicpu_orch_so_storage, data, size);
-    aicpu_orch_so_size = static_cast<uint32_t>(size);
+    aicpu_orch_so_size = size;
     return true;
 }
 
-void Runtime::set_aicpu_orch_so(const void* data, size_t size) { (void)try_set_aicpu_orch_so(data, size); }
+void Runtime::set_aicpu_orch_so(const void* data, uint64_t size) { (void)try_set_aicpu_orch_so(data, size); }
 
 const void* Runtime::get_aicpu_orch_so_data() const { return aicpu_orch_so_size > 0 ? aicpu_orch_so_storage : nullptr; }
 
-size_t Runtime::get_aicpu_orch_so_size() const { return static_cast<size_t>(aicpu_orch_so_size); }
+uint64_t Runtime::get_aicpu_orch_so_size() const { return aicpu_orch_so_size; }
 
 // =============================================================================
 // Task Management
@@ -255,7 +255,7 @@ void Runtime::print_runtime() const {
 // Tensor Pair Management
 // =============================================================================
 
-void Runtime::record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size) {
+void Runtime::record_tensor_pair(void* host_ptr, void* dev_ptr, uint64_t size) {
     if (tensor_pair_count >= RUNTIME_MAX_TENSOR_PAIRS) {
         fprintf(stderr, "[Runtime] ERROR: Tensor pairs full (max=%d)\n", RUNTIME_MAX_TENSOR_PAIRS);
         return;

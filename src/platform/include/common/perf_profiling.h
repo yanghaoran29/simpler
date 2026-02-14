@@ -199,7 +199,7 @@ extern "C" {
  * @param num_cores Number of cores (block_dim × PLATFORM_CORES_PER_BLOCKDIM)
  * @return Total bytes
  */
-inline size_t calc_perf_data_size(int num_cores) {
+inline uint64_t calc_perf_data_size(int num_cores) {
     return sizeof(PerfDataHeader) + num_cores * sizeof(DoubleBuffer);
 }
 

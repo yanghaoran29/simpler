@@ -408,9 +408,9 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
     DEV_INFO("Thread %d: task_descriptors=%p, dep_list_pool=%p",
              thread_idx, (void*)task_descriptors, (void*)dep_list_pool);
 
-    int32_t window_size = header->task_window_size;
-    if (window_size <= 0 || window_size > PTO2_MAX_SLOTS) window_size = PTO2_MAX_SLOTS;
-    int32_t window_mask = window_size - 1;
+    uint64_t window_size = header->task_window_size;
+    if (window_size == 0 || window_size > PTO2_MAX_SLOTS) window_size = PTO2_MAX_SLOTS;
+    uint64_t window_mask = window_size - 1;
 
     Handshake* hank = static_cast<Handshake*>(runtime->workers);
     DEV_INFO("Thread %d: hank=%p, window_size=%d",
@@ -734,7 +734,7 @@ int AicpuExecutor::run(Runtime* runtime) {
 
             // Get SO binary from runtime
             const void* so_data = runtime->get_device_orch_so_data();
-            size_t so_size = runtime->get_device_orch_so_size();
+            uint64_t so_size = runtime->get_device_orch_so_size();
 
             if (so_data == nullptr || so_size == 0) {
                 DEV_ERROR("Thread 3: Device orchestration SO not set");
@@ -768,7 +768,7 @@ int AicpuExecutor::run(Runtime* runtime) {
                 }
                 ssize_t written = write(fd, so_data, so_size);
                 close(fd);
-                if (written != static_cast<ssize_t>(so_size)) {
+                if (written < 0 || static_cast<uint64_t>(written) != so_size) {
                     DEV_INFO("Thread 3: Cannot write SO to %s (errno=%d), trying next path",
                              so_path, errno);
                     unlink(so_path);
@@ -825,9 +825,9 @@ int AicpuExecutor::run(Runtime* runtime) {
             }
 
             // Read config from orchestration SO (or use defaults)
-            int32_t task_window_size = PTO2_TASK_WINDOW_SIZE;
-            int32_t dep_list_pool_size = PTO2_DEP_LIST_POOL_SIZE;
-            int32_t heap_size = PTO2_HEAP_SIZE;
+            uint64_t task_window_size = PTO2_TASK_WINDOW_SIZE;
+            uint64_t dep_list_pool_size = PTO2_DEP_LIST_POOL_SIZE;
+            uint64_t heap_size = PTO2_HEAP_SIZE;
             int expected_arg_count = 0;
             if (config_func) {
                 PTO2OrchestrationConfig cfg = config_func(args, arg_count);
@@ -850,7 +850,7 @@ int AicpuExecutor::run(Runtime* runtime) {
             void* gm_heap = runtime->get_pto2_gm_heap_ptr();
 
             // Create shared memory handle and runtime (ops table populated inside)
-            int32_t sm_size = pto2_sm_calculate_size(task_window_size, dep_list_pool_size);
+            uint64_t sm_size = pto2_sm_calculate_size(task_window_size, dep_list_pool_size);
             PTO2SharedMemoryHandle* sm_handle =
                 pto2_sm_create_from_buffer(sm_ptr, sm_size, task_window_size,
                                             heap_size, dep_list_pool_size);
@@ -880,8 +880,8 @@ int AicpuExecutor::run(Runtime* runtime) {
             }
 
             // Set orchestrator's aicpu parallel mode pointers
-            int32_t ws = header->task_window_size;
-            if (ws <= 0 || ws > PTO2_MAX_SLOTS) ws = PTO2_MAX_SLOTS;
+            uint64_t ws = header->task_window_size;
+            if (ws == 0 || ws > PTO2_MAX_SLOTS) ws = PTO2_MAX_SLOTS;
             rt->orchestrator.aicpu_fanin_refcount = s_pto2_fanin_refcount;
             rt->orchestrator.aicpu_task_completed = s_pto2_task_completed;
             rt->orchestrator.aicpu_window_mask = ws - 1;

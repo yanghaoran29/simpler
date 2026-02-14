@@ -19,7 +19,7 @@
 namespace {
 void* g_hal_handle = nullptr;
 
-using HalHostRegisterFn = int (*)(void* dev_ptr, size_t size, unsigned int flags, int device_id, void** host_ptr);
+using HalHostRegisterFn = int (*)(void* dev_ptr, uint64_t size, unsigned int flags, int device_id, void** host_ptr);
 using HalHostUnregisterFn = int (*)(void* host_ptr, int device_id);
 
 int load_hal_if_needed() {
@@ -57,8 +57,8 @@ int KernelArgsHelper::init_device_args(const DeviceArgs& host_device_args, Memor
 
     // Allocate device memory for device_args
     if (args.device_args == nullptr) {
-        uint64_t device_args_size = sizeof(DeviceArgs);
-        void* device_args_dev = allocator_->alloc(device_args_size);
+        uint64_t device_args_size = static_cast<uint64_t>(sizeof(DeviceArgs));
+        void* device_args_dev = allocator_->alloc(static_cast<size_t>(device_args_size));
         if (device_args_dev == nullptr) {
             LOG_ERROR("Alloc for device_args failed");
             return -1;
@@ -90,8 +90,8 @@ int KernelArgsHelper::init_runtime_args(const Runtime& host_runtime, MemoryAlloc
     allocator_ = &allocator;
 
     if (args.runtime_args == nullptr) {
-        uint64_t runtime_size = sizeof(Runtime);
-        void* runtime_dev = allocator_->alloc(runtime_size);
+        uint64_t runtime_size = static_cast<uint64_t>(sizeof(Runtime));
+        void* runtime_dev = allocator_->alloc(static_cast<size_t>(runtime_size));
         if (runtime_dev == nullptr) {
             LOG_ERROR("Alloc for runtime_args failed");
             return -1;
@@ -129,8 +129,8 @@ int AicpuSoInfo::init(const std::vector<uint8_t>& aicpu_so_binary, MemoryAllocat
         return -1;
     }
 
-    size_t file_size = aicpu_so_binary.size();
-    void* d_aicpu_data = allocator_->alloc(file_size);
+    uint64_t file_size = static_cast<uint64_t>(aicpu_so_binary.size());
+    void* d_aicpu_data = allocator_->alloc(static_cast<size_t>(file_size));
     if (d_aicpu_data == nullptr) {
         LOG_ERROR("Alloc failed for AICPU SO");
         return -1;
@@ -256,7 +256,7 @@ int DeviceRunner::ensure_binaries_loaded(
     return 0;
 }
 
-void* DeviceRunner::allocate_tensor(size_t bytes) { return mem_alloc_.alloc(bytes); }
+void* DeviceRunner::allocate_tensor(uint64_t bytes) { return mem_alloc_.alloc(bytes); }
 
 void DeviceRunner::free_tensor(void* dev_ptr) {
     if (dev_ptr != nullptr) {
@@ -264,11 +264,11 @@ void DeviceRunner::free_tensor(void* dev_ptr) {
     }
 }
 
-int DeviceRunner::copy_to_device(void* dev_ptr, const void* host_ptr, size_t bytes) {
+int DeviceRunner::copy_to_device(void* dev_ptr, const void* host_ptr, uint64_t bytes) {
     return rtMemcpy(dev_ptr, bytes, host_ptr, bytes, RT_MEMCPY_HOST_TO_DEVICE);
 }
 
-int DeviceRunner::copy_from_device(void* host_ptr, const void* dev_ptr, size_t bytes) {
+int DeviceRunner::copy_from_device(void* host_ptr, const void* dev_ptr, uint64_t bytes) {
     return rtMemcpy(host_ptr, bytes, dev_ptr, bytes, RT_MEMCPY_DEVICE_TO_HOST);
 }
 
@@ -436,7 +436,7 @@ void DeviceRunner::print_handshake_results() {
 
     // Allocate temporary buffer to read handshake data from device
     std::vector<Handshake> workers(worker_count_);
-    size_t total_size = sizeof(Handshake) * worker_count_;
+    uint64_t total_size = sizeof(Handshake) * worker_count_;
     rtMemcpy(workers.data(), total_size, kernel_args_.args.runtime_args->workers, total_size, RT_MEMCPY_DEVICE_TO_HOST);
 
     LOG_DEBUG("Handshake results for %d cores:", worker_count_);
@@ -537,7 +537,7 @@ int DeviceRunner::launch_aicore_kernel(rtStream_t stream, Runtime* runtime) {
         return -1;
     }
 
-    size_t bin_size = aicore_kernel_binary_.size();
+    uint64_t bin_size = static_cast<uint64_t>(aicore_kernel_binary_.size());
     const void* bin_data = aicore_kernel_binary_.data();
 
     rtDevBinary_t binary;
@@ -579,7 +579,7 @@ int DeviceRunner::launch_aicore_kernel(rtStream_t stream, Runtime* runtime) {
 // Kernel Binary Upload (returns device address for caller to store in Runtime)
 // =============================================================================
 
-uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data, size_t bin_size) {
+uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data, uint64_t bin_size) {
     if (bin_data == nullptr || bin_size == 0) {
         LOG_ERROR("Invalid kernel binary data");
         return 0;
@@ -602,7 +602,7 @@ uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data
 
     // Allocate device GM memory (size field + binary data)
     uint64_t alloc_size = sizeof(uint64_t) + bin_size;
-    void* gm_addr = mem_alloc_.alloc(alloc_size);
+    void* gm_addr = mem_alloc_.alloc(static_cast<size_t>(alloc_size));
     if (gm_addr == nullptr) {
         LOG_ERROR("Failed to allocate device GM memory for kernel func_id=%d", func_id);
         return 0;
@@ -612,7 +612,7 @@ uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data
     std::vector<uint8_t> host_buf(alloc_size);
     uint64_t* size_ptr = reinterpret_cast<uint64_t*>(host_buf.data());
     *size_ptr = bin_size;
-    std::memcpy(host_buf.data() + sizeof(uint64_t), bin_data, bin_size);
+    std::memcpy(host_buf.data() + sizeof(uint64_t), bin_data, static_cast<size_t>(bin_size));
 
     // Copy to device
     int rc = rtMemcpy(gm_addr, alloc_size, host_buf.data(), alloc_size, RT_MEMCPY_HOST_TO_DEVICE);
@@ -635,13 +635,13 @@ uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data
 
 int DeviceRunner::init_performance_profiling(Runtime& runtime, int num_aicore, int device_id) {
     // Define allocation callback (a2a3: use MemoryAllocator)
-    auto alloc_cb = [](size_t size, void* user_data) -> void* {
+    auto alloc_cb = [](uint64_t size, void* user_data) -> void* {
         auto* allocator = static_cast<MemoryAllocator*>(user_data);
-        return allocator->alloc(size);
+        return allocator->alloc(static_cast<size_t>(size));
     };
 
     // Define registration callback (a2a3: use halHostRegister for shared memory)
-    auto register_cb = [](void* dev_ptr, size_t size, int device_id,
+    auto register_cb = [](void* dev_ptr, uint64_t size, int device_id,
                           void* user_data, void** host_ptr) -> int {
         (void)user_data;  // Not needed for registration
         if (load_hal_if_needed() != 0) {

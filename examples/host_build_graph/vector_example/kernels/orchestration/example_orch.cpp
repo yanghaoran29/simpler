@@ -29,9 +29,9 @@ int build_example_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     void* host_a = reinterpret_cast<void*>(args[0]);
     void* host_b = reinterpret_cast<void*>(args[1]);
     void* host_f = reinterpret_cast<void*>(args[2]);
-    size_t size_a = static_cast<size_t>(args[3]);
-    size_t size_b = static_cast<size_t>(args[4]);
-    size_t size_f = static_cast<size_t>(args[5]);
+    uint64_t size_a = static_cast<uint64_t>(args[3]);
+    uint64_t size_b = static_cast<uint64_t>(args[4]);
+    uint64_t size_f = static_cast<uint64_t>(args[5]);
     int SIZE = static_cast<int>(args[6]);
 
     std::cout << "\n=== build_example_graph: Creating Task Runtime ===" << '\n';
@@ -70,7 +70,7 @@ int build_example_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     std::cout << "Tensor f (output): " << size_f << " bytes allocated\n";
 
     // Allocate intermediate tensors (c, d, e)
-    size_t BYTES = SIZE * sizeof(float);
+    uint64_t BYTES = SIZE * sizeof(float);
     void* dev_c = runtime->host_api.device_malloc(BYTES);
     void* dev_d = runtime->host_api.device_malloc(BYTES);
     void* dev_e = runtime->host_api.device_malloc(BYTES);

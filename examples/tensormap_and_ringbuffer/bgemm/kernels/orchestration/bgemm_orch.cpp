@@ -69,9 +69,9 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     void* dev_A = (void*)(uintptr_t)args[ARG_PTR_A];
     void* dev_B = (void*)(uintptr_t)args[ARG_PTR_B];
     void* dev_C = (void*)(uintptr_t)args[ARG_PTR_C];
-    size_t size_A = (size_t)args[ARG_SIZE_A];
-    size_t size_B = (size_t)args[ARG_SIZE_B];
-    size_t size_C = (size_t)args[ARG_SIZE_C];
+    uint64_t size_A = (uint64_t)args[ARG_SIZE_A];
+    uint64_t size_B = (uint64_t)args[ARG_SIZE_B];
+    uint64_t size_C = (uint64_t)args[ARG_SIZE_C];
 
     printf("[bgemm_orch] Grid: %dx%dx%d, Batch: %d, Tile: %d\n",
            GRID_M, GRID_K, GRID_N, BATCH, TILE);

@@ -74,7 +74,7 @@ public:
      * @param bytes  Size of tensor in bytes
      * @return Pointer on success, nullptr on failure
      */
-    void* allocate_tensor(size_t bytes);
+    void* allocate_tensor(uint64_t bytes);
 
     /**
      * Free tensor memory
@@ -91,7 +91,7 @@ public:
      * @param bytes     Number of bytes to copy
      * @return 0 on success
      */
-    int copy_to_device(void* dev_ptr, const void* host_ptr, size_t bytes);
+    int copy_to_device(void* dev_ptr, const void* host_ptr, uint64_t bytes);
 
     /**
      * Copy data (memcpy in simulation)
@@ -101,7 +101,7 @@ public:
      * @param bytes     Number of bytes to copy
      * @return 0 on success
      */
-    int copy_from_device(void* host_ptr, const void* dev_ptr, size_t bytes);
+    int copy_from_device(void* host_ptr, const void* dev_ptr, uint64_t bytes);
 
     /**
      * Execute a runtime using threads
@@ -179,7 +179,7 @@ public:
      * @param bin_size     Size of binary data in bytes
      * @return Function pointer address on success, 0 on error
      */
-    uint64_t upload_kernel_binary(int func_id, const uint8_t* bin_data, size_t bin_size);
+    uint64_t upload_kernel_binary(int func_id, const uint8_t* bin_data, uint64_t bin_size);
 
 private:
     DeviceRunner() = default;

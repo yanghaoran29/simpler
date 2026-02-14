@@ -27,7 +27,7 @@
 // Initialization and Destruction
 // =============================================================================
 
-bool pto2_tensormap_init(PTO2TensorMap* tm, int32_t num_buckets, int32_t pool_size) {
+bool pto2_tensormap_init(PTO2TensorMap* tm, uint64_t num_buckets, uint64_t pool_size) {
     // Validate power of 2 for fast modulo
     if ((num_buckets & (num_buckets - 1)) != 0) {
         return false;  // num_buckets must be power of 2
@@ -40,7 +40,7 @@ bool pto2_tensormap_init(PTO2TensorMap* tm, int32_t num_buckets, int32_t pool_si
     }
 
     // Initialize all buckets to empty (-1)
-    for (int32_t i = 0; i < num_buckets; i++) {
+    for (uint64_t i = 0; i < num_buckets; i++) {
         tm->buckets[i] = -1;
     }
 
@@ -58,7 +58,7 @@ bool pto2_tensormap_init(PTO2TensorMap* tm, int32_t num_buckets, int32_t pool_si
     tm->pool_head = 0;
 
     // Initialize all entries as not in bucket
-    for (int32_t i = 0; i < pool_size; i++) {
+    for (uint64_t i = 0; i < pool_size; i++) {
         tm->entry_pool[i].in_bucket = false;
         tm->entry_pool[i].next_in_bucket = -1;
         tm->entry_pool[i].prev_in_bucket = -1;
@@ -110,12 +110,12 @@ void pto2_tensormap_destroy(PTO2TensorMap* tm) {
 
 void pto2_tensormap_reset(PTO2TensorMap* tm) {
     // Reset all buckets to empty
-    for (int32_t i = 0; i < tm->num_buckets; i++) {
+    for (uint64_t i = 0; i < tm->num_buckets; i++) {
         tm->buckets[i] = -1;
     }
 
     // Reset all entries
-    for (int32_t i = 0; i < tm->pool_size; i++) {
+    for (uint64_t i = 0; i < tm->pool_size; i++) {
         tm->entry_pool[i].in_bucket = false;
         tm->entry_pool[i].next_in_bucket = -1;
         tm->entry_pool[i].prev_in_bucket = -1;
@@ -155,7 +155,7 @@ uint32_t pto2_tensormap_hash(PTO2TensorMap* tm, Tensor* tensor) {
     //   Region A: base=X, offset=0   → bucket 5
     //   Region B: base=X, offset=128 → bucket 5   (CORRECT! Same bucket)
     //
-    uint64_t key = (uint64_t)(uintptr_t)tensor->buffer.addr;
+    uint64_t key = tensor->buffer.addr;
 
     // Improve distribution by mixing bits (pointers often have aligned low bits)
     key = key ^ (key >> 16);
@@ -298,13 +298,13 @@ void pto2_tensormap_lookup(PTO2TensorMap* tm, Tensor* tensor, PTO2LookupResult* 
 
 void pto2_tensormap_insert(PTO2TensorMap* tm, Tensor* tensor, int32_t producer_task_id, bool with_alloc) {
     // Allocate entry from ring buffer pool
-    int32_t entry_offset = tm->pool_head;
+    uint64_t entry_offset = tm->pool_head;
     PTO2TensorMapEntry* entry = &tm->entry_pool[entry_offset];
 
     // Advance pool head (wrap around)
     tm->pool_head = (tm->pool_head + 1) % tm->pool_size;
 
-    size_t wait_count = 0;
+    uint64_t wait_count = 0;
     while (entry->in_bucket) {
         pto2_orchestrator_sync_tensormap(tm);
         always_assert(wait_count++ <= 1000000000UL);
@@ -321,9 +321,9 @@ void pto2_tensormap_insert(PTO2TensorMap* tm, Tensor* tensor, int32_t producer_t
     entry->prev_in_bucket = -1;  // New head has no predecessor
     // Update old head's prev pointer
     if (entry->next_in_bucket >= 0) {
-        tm->entry_pool[entry->next_in_bucket].prev_in_bucket = entry_offset;
+        tm->entry_pool[entry->next_in_bucket].prev_in_bucket = (int32_t)entry_offset;
     }
-    tm->buckets[bucket] = entry_offset;
+    tm->buckets[bucket] = (int32_t)entry_offset;
     entry->in_bucket = true;
 
     // Link to task's entry list (for cleanup)
@@ -332,9 +332,9 @@ void pto2_tensormap_insert(PTO2TensorMap* tm, Tensor* tensor, int32_t producer_t
     entry->prev_in_task = -1;  // New head has no predecessor
     // Update old head's prev pointer
     if (entry->next_in_task >= 0) {
-        tm->entry_pool[entry->next_in_task].prev_in_task = entry_offset;
+        tm->entry_pool[entry->next_in_task].prev_in_task = (int32_t)entry_offset;
     }
-    tm->task_entry_head[task_slot] = entry_offset;
+    tm->task_entry_head[task_slot] = (int32_t)entry_offset;
 }
 
 // =============================================================================
@@ -350,7 +350,7 @@ void pto2_tensormap_print_stats(PTO2TensorMap* tm) {
     int32_t non_empty_buckets = 0;
 
     // Count entries
-    for (int32_t i = 0; i < tm->pool_size; i++) {
+    for (uint64_t i = 0; i < tm->pool_size; i++) {
         if (tm->entry_pool[i].in_bucket) {
             if (pto2_tensormap_entry_valid(tm, &tm->entry_pool[i])) {
                 valid++;
@@ -361,7 +361,7 @@ void pto2_tensormap_print_stats(PTO2TensorMap* tm) {
     }
 
     // Count bucket stats
-    for (int32_t b = 0; b < tm->num_buckets; b++) {
+    for (uint64_t b = 0; b < tm->num_buckets; b++) {
         int32_t chain_len = 0;
         int32_t offset = tm->buckets[b];
 
@@ -382,9 +382,9 @@ void pto2_tensormap_print_stats(PTO2TensorMap* tm) {
     }
 
     printf("=== TensorMap Statistics ===\n");
-    printf("Pool size:       %d\n", tm->pool_size);
-    printf("Pool head:       %d\n", tm->pool_head);
-    printf("Num buckets:     %d\n", tm->num_buckets);
+    printf("Pool size:       %zu\n", tm->pool_size);
+    printf("Pool head:       %zu\n", tm->pool_head);
+    printf("Num buckets:     %zu\n", tm->num_buckets);
     printf("Valid entries:   %d\n", valid);
     printf("Stale entries:   %d\n", stale);
     printf("Empty buckets:   %d\n", empty_buckets);
@@ -397,7 +397,7 @@ void pto2_tensormap_print_stats(PTO2TensorMap* tm) {
 int32_t pto2_tensormap_valid_count(PTO2TensorMap* tm) {
     int32_t count = 0;
 
-    for (int32_t i = 0; i < tm->pool_size; i++) {
+    for (uint64_t i = 0; i < tm->pool_size; i++) {
         if (tm->entry_pool[i].in_bucket && pto2_tensormap_entry_valid(tm, &tm->entry_pool[i])) {
             count++;
         }

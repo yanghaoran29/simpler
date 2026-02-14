@@ -187,7 +187,7 @@ uint64_t Tensor::offset_ndim_to_1d(const std::vector<uint64_t>& offset_ndims) co
 }
 
 bool Tensor::valid_view(const uint64_t shapes[], const uint64_t offsets[]) const {
-    for (size_t i = 0; i < ndims; i++) {
+    for (uint64_t i = 0; i < ndims; i++) {
         if (shapes[i] + offsets[i] > repeats[i]) {
             return false;
         }
@@ -199,7 +199,7 @@ Tensor Tensor::view(const uint64_t shapes[], const uint64_t offsets[]) const {
     debug_assert(valid_view(shapes, offsets));
     Tensor result(*this);
     result.start_offset = start_offset + offset_ndim_to_1d(offsets);
-    for (size_t i = 0; i < ndims; i++) {
+    for (uint64_t i = 0; i < ndims; i++) {
         result.repeats[i] = shapes[i];
     }
     return result;
@@ -208,7 +208,7 @@ Tensor Tensor::view(const uint64_t shapes[], const uint64_t offsets[]) const {
 Tensor Tensor::view(const std::vector<uint64_t>& shapes, const std::vector<uint64_t>& offsets) const {
     Tensor result(*this);
     result.start_offset = start_offset + offset_ndim_to_1d(offsets);
-    for (size_t i = 0; i < ndims; i++) {
+    for (uint64_t i = 0; i < ndims; i++) {
         result.repeats[i] = shapes[i];
     }
     return result;
@@ -231,11 +231,11 @@ bool Tensor::is_contiguous() const {
 
 bool Tensor::valid_reshape(const uint64_t shapes[], uint64_t new_ndims) const {
     uint64_t x = 1;
-    for (size_t i = 0; i < ndims; i++) {
+    for (uint64_t i = 0; i < ndims; i++) {
         x *= repeats[i];
     }
     uint64_t y = 1;
-    for (size_t i = 0; i < new_ndims; i++) {
+    for (uint64_t i = 0; i < new_ndims; i++) {
         y *= shapes[i];
     }
     return x == y;

@@ -38,19 +38,19 @@ extern "C" void aicpu_runtime_publish_task(Runtime* runtime, int task_id);
 namespace {
 using AicpuBuilderFunc = int (*)(Runtime*);
 
-int write_bytes_to_file(const char* path, const uint8_t* data, size_t size) {
+int write_bytes_to_file(const char* path, const uint8_t* data, uint64_t size) {
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
     if (fd < 0) {
         return -1;
     }
-    size_t off = 0;
+    uint64_t off = 0;
     while (off < size) {
-        ssize_t n = ::write(fd, data + off, size - off);
+        ssize_t n = ::write(fd, data + off, static_cast<size_t>(size - off));
         if (n <= 0) {
             ::close(fd);
             return -1;
         }
-        off += static_cast<size_t>(n);
+        off += static_cast<uint64_t>(n);
     }
     ::close(fd);
     return 0;
@@ -81,7 +81,7 @@ int build_graph_via_aicpu_plugin(Runtime* runtime, int thread_idx) {
     }
 
     const void* so_data_v = runtime->get_aicpu_orch_so_data();
-    size_t so_size = runtime->get_aicpu_orch_so_size();
+    uint64_t so_size = runtime->get_aicpu_orch_so_size();
     if (so_data_v == nullptr || so_size == 0) {
         DEV_ERROR("Thread %d: AICPU orch plugin not embedded (size=0). Host orchestration must embed plugin bytes.",
             thread_idx);
@@ -116,7 +116,7 @@ int build_graph_via_aicpu_plugin(Runtime* runtime, int thread_idx) {
         DEV_INFO("Thread %d: Trying AICPU orch plugin path %s (bytes=%lu, sym=%s)",
             thread_idx,
             so_path,
-            static_cast<uint64_t>(so_size),
+            so_size,
             sym);
 
         if (write_bytes_to_file(so_path, so_data, so_size) != 0) {

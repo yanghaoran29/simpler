@@ -23,7 +23,7 @@ extern "C" {
  */
 int init_runtime_impl(Runtime* runtime,
                     const uint8_t* orch_so_binary,
-                    size_t orch_so_size,
+                    uint64_t orch_so_size,
                     const char* orch_func_name,
                     uint64_t* func_args,
                     int func_args_count,
@@ -31,29 +31,29 @@ int init_runtime_impl(Runtime* runtime,
                     uint64_t* arg_sizes,
                     const int* kernel_func_ids,
                     const uint8_t* const* kernel_binaries,
-                    const size_t* kernel_sizes,
+                    const uint64_t* kernel_sizes,
                     int kernel_count);
 int validate_runtime_impl(Runtime* runtime);
 
 /* Forward declarations */
-void* device_malloc(size_t size);
+void* device_malloc(uint64_t size);
 void device_free(void* dev_ptr);
-int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size);
-int copy_from_device(void* host_ptr, const void* dev_ptr, size_t size);
-uint64_t upload_kernel_binary_wrapper(int func_id, const uint8_t* bin_data, size_t bin_size);
+int copy_to_device(void* dev_ptr, const void* host_ptr, uint64_t size);
+int copy_from_device(void* host_ptr, const void* dev_ptr, uint64_t size);
+uint64_t upload_kernel_binary_wrapper(int func_id, const uint8_t* bin_data, uint64_t bin_size);
 
 /* ===========================================================================
  * Runtime API Implementation
  * ===========================================================================
  */
 
-size_t get_runtime_size(void) {
+uint64_t get_runtime_size(void) {
     return sizeof(Runtime);
 }
 
 int init_runtime(RuntimeHandle runtime,
                 const uint8_t* orch_so_binary,
-                size_t orch_so_size,
+                uint64_t orch_so_size,
                 const char* orch_func_name,
                 uint64_t* func_args,
                 int func_args_count,
@@ -61,7 +61,7 @@ int init_runtime(RuntimeHandle runtime,
                 uint64_t* arg_sizes,
                 const int* kernel_func_ids,
                 const uint8_t* const* kernel_binaries,
-                const size_t* kernel_sizes,
+                const uint64_t* kernel_sizes,
                 int kernel_count) {
     if (runtime == NULL) {
         return -1;
@@ -102,7 +102,7 @@ int init_runtime(RuntimeHandle runtime,
  * ===========================================================================
  */
 
-void* device_malloc(size_t size) {
+void* device_malloc(uint64_t size) {
     try {
         DeviceRunner& runner = DeviceRunner::get();
         return runner.allocate_tensor(size);
@@ -123,7 +123,7 @@ void device_free(void* dev_ptr) {
     }
 }
 
-int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size) {
+int copy_to_device(void* dev_ptr, const void* host_ptr, uint64_t size) {
     if (dev_ptr == NULL || host_ptr == NULL) {
         return -1;
     }
@@ -135,7 +135,7 @@ int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size) {
     }
 }
 
-int copy_from_device(void* host_ptr, const void* dev_ptr, size_t size) {
+int copy_from_device(void* host_ptr, const void* dev_ptr, uint64_t size) {
     if (host_ptr == NULL || dev_ptr == NULL) {
         return -1;
     }
@@ -147,7 +147,7 @@ int copy_from_device(void* host_ptr, const void* dev_ptr, size_t size) {
     }
 }
 
-uint64_t upload_kernel_binary_wrapper(int func_id, const uint8_t* bin_data, size_t bin_size) {
+uint64_t upload_kernel_binary_wrapper(int func_id, const uint8_t* bin_data, uint64_t bin_size) {
     try {
         DeviceRunner& runner = DeviceRunner::get();
         return runner.upload_kernel_binary(func_id, bin_data, bin_size);
@@ -161,9 +161,9 @@ int launch_runtime(RuntimeHandle runtime,
                    int block_dim,
                    int device_id,
                    const uint8_t* aicpu_binary,
-                   size_t aicpu_size,
+                   uint64_t aicpu_size,
                    const uint8_t* aicore_binary,
-                   size_t aicore_size) {
+                   uint64_t aicore_size) {
     if (runtime == NULL) {
         return -1;
     }
@@ -235,7 +235,7 @@ int enable_runtime_profiling(RuntimeHandle runtime, int enabled) {
 void record_tensor_pair(RuntimeHandle runtime,
                        void* host_ptr,
                        void* dev_ptr,
-                       size_t size) {
+                       uint64_t size) {
     if (runtime == NULL) {
         return;
     }

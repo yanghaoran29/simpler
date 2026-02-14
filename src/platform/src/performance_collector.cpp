@@ -41,10 +41,10 @@ int PerformanceCollector::initialize(Runtime& runtime,
     device_id_ = device_id;
 
     // Step 1: Calculate total memory size
-    size_t total_size = calc_perf_data_size(num_aicore);
-    size_t header_size = sizeof(PerfDataHeader);
-    size_t single_db_size = sizeof(DoubleBuffer);
-    size_t buffers_size = num_aicore * single_db_size;
+    uint64_t total_size = calc_perf_data_size(num_aicore);
+    uint64_t header_size = sizeof(PerfDataHeader);
+    uint64_t single_db_size = sizeof(DoubleBuffer);
+    uint64_t buffers_size = num_aicore * single_db_size;
 
     LOG_DEBUG("Memory allocation plan:");
     LOG_DEBUG("  Number of cores:      %d", num_aicore);
@@ -297,7 +297,7 @@ int PerformanceCollector::export_swimlane_json(const std::string& output_path) {
     outfile << "  \"version\": 1,\n";
     outfile << "  \"tasks\": [\n";
 
-    for (size_t i = 0; i < sorted_records.size(); ++i) {
+    for (uint64_t i = 0; i < sorted_records.size(); ++i) {
         const auto& record = sorted_records[i];
 
         // Convert times to microseconds

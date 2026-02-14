@@ -65,7 +65,7 @@ typedef void* RuntimeHandle;
  *
  * @return Size of Runtime structure in bytes
  */
-size_t get_runtime_size(void);
+uint64_t get_runtime_size(void);
 
 /**
  * Initialize a runtime with dynamic orchestration and kernel binaries.
@@ -94,7 +94,7 @@ size_t get_runtime_size(void);
  */
 int init_runtime(RuntimeHandle runtime,
                 const uint8_t* orch_so_binary,
-                size_t orch_so_size,
+                uint64_t orch_so_size,
                 const char* orch_func_name,
                 uint64_t* func_args,
                 int func_args_count,
@@ -102,7 +102,7 @@ int init_runtime(RuntimeHandle runtime,
                 uint64_t* arg_sizes,
                 const int* kernel_func_ids,
                 const uint8_t* const* kernel_binaries,
-                const size_t* kernel_sizes,
+                const uint64_t* kernel_sizes,
                 int kernel_count);
 
 /* ===========================================================================
@@ -116,7 +116,7 @@ int init_runtime(RuntimeHandle runtime,
  * @param size  Size in bytes to allocate
  * @return Device pointer on success, NULL on failure
  */
-void* device_malloc(size_t size);
+void* device_malloc(uint64_t size);
 
 /**
  * Free device memory.
@@ -133,7 +133,7 @@ void device_free(void* dev_ptr);
  * @param size     Size in bytes to copy
  * @return 0 on success, error code on failure
  */
-int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size);
+int copy_to_device(void* dev_ptr, const void* host_ptr, uint64_t size);
 
 /**
  * Copy data from device to host.
@@ -143,7 +143,7 @@ int copy_to_device(void* dev_ptr, const void* host_ptr, size_t size);
  * @param size     Size in bytes to copy
  * @return 0 on success, error code on failure
  */
-int copy_from_device(void* host_ptr, const void* dev_ptr, size_t size);
+int copy_from_device(void* host_ptr, const void* dev_ptr, uint64_t size);
 
 /**
  * Execute a runtime on the device.
@@ -167,9 +167,9 @@ int launch_runtime(RuntimeHandle runtime,
     int block_dim,
     int device_id,
     const uint8_t* aicpu_binary,
-    size_t aicpu_size,
+    uint64_t aicpu_size,
     const uint8_t* aicore_binary,
-    size_t aicore_size);
+    uint64_t aicore_size);
 
 /**
  * Finalize and cleanup a runtime instance.
@@ -217,7 +217,7 @@ int set_device(int device_id);
 void record_tensor_pair(RuntimeHandle runtime,
                        void* host_ptr,
                        void* dev_ptr,
-                       size_t size);
+                       uint64_t size);
 
 
 /**

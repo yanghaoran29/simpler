@@ -30,7 +30,7 @@
  * @param user_data User-provided context pointer
  * @return Allocated device memory pointer, or nullptr on failure
  */
-using PerfAllocCallback = void* (*)(size_t size, void* user_data);
+using PerfAllocCallback = void* (*)(uint64_t size, void* user_data);
 
 /**
  * Memory registration callback (for Host-Device shared memory)
@@ -42,7 +42,7 @@ using PerfAllocCallback = void* (*)(size_t size, void* user_data);
  * @param[out] host_ptr Host-mapped pointer
  * @return 0 on success, error code on failure
  */
-using PerfRegisterCallback = int (*)(void* dev_ptr, size_t size, int device_id,
+using PerfRegisterCallback = int (*)(void* dev_ptr, uint64_t size, int device_id,
                                       void* user_data, void** host_ptr);
 
 /**

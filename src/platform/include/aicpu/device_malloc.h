@@ -14,7 +14,7 @@
 #ifndef PLATFORM_DEVICE_MALLOC_H_
 #define PLATFORM_DEVICE_MALLOC_H_
 
-#include <cstddef>
+#include <cstdint>
 
 /**
  * Allocate device memory (HBM on real hardware, heap on simulation).
@@ -29,7 +29,7 @@
  * @param size  Number of bytes to allocate
  * @return Pointer to allocated memory, or nullptr on failure
  */
-void* aicpu_device_malloc(size_t size);
+void* aicpu_device_malloc(uint64_t size);
 
 /**
  * Free device memory previously allocated by aicpu_device_malloc().

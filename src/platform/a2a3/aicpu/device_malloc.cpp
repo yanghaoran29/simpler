@@ -34,7 +34,7 @@ static void resolve_hal_mem_functions() {
     g_hal_resolved = true;
 }
 
-void* aicpu_device_malloc(size_t size) {
+void* aicpu_device_malloc(uint64_t size) {
     resolve_hal_mem_functions();
 
     if (g_halMemAlloc == nullptr) {
@@ -49,9 +49,9 @@ void* aicpu_device_malloc(size_t size) {
     //   bit14~16: phy mem type  (MEM_TYPE_HBM=0x1 << 14)
     constexpr unsigned long long MEM_TYPE_HBM = 0x1ULL << 14;
     unsigned long long flag = MEM_TYPE_HBM;
-    int rc = g_halMemAlloc(&ptr, static_cast<unsigned long long>(size), flag);
+    int rc = g_halMemAlloc(&ptr, size, flag);
     if (rc != 0 || ptr == nullptr) {
-        DEV_ERROR("halMemAlloc failed: rc=%d size=%zu flag=0x%llx", rc, size, flag);
+        DEV_ERROR("halMemAlloc failed: rc=%d size=%llu flag=0x%llx", rc, size, flag);
         return nullptr;
     }
     return ptr;

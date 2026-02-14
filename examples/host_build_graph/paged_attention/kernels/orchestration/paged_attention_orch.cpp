@@ -37,13 +37,13 @@ int build_paged_attention_graph(Runtime* runtime, uint64_t* args, int arg_count)
     void* host_out = reinterpret_cast<void*>(args[5]);
     int64_t* host_config = reinterpret_cast<int64_t*>(args[6]);
 
-    size_t query_size = static_cast<size_t>(args[7]);
-    size_t key_cache_size = static_cast<size_t>(args[8]);
-    size_t value_cache_size = static_cast<size_t>(args[9]);
-    size_t block_table_size = static_cast<size_t>(args[10]);
-    size_t context_lens_size = static_cast<size_t>(args[11]);
-    size_t out_size = static_cast<size_t>(args[12]);
-    size_t config_size = static_cast<size_t>(args[13]);
+    uint64_t query_size = static_cast<uint64_t>(args[7]);
+    uint64_t key_cache_size = static_cast<uint64_t>(args[8]);
+    uint64_t value_cache_size = static_cast<uint64_t>(args[9]);
+    uint64_t block_table_size = static_cast<uint64_t>(args[10]);
+    uint64_t context_lens_size = static_cast<uint64_t>(args[11]);
+    uint64_t out_size = static_cast<uint64_t>(args[12]);
+    uint64_t config_size = static_cast<uint64_t>(args[13]);
 
     int batch = static_cast<int>(host_config[0]);
     int num_heads = static_cast<int>(host_config[1]);
@@ -79,11 +79,11 @@ int build_paged_attention_graph(Runtime* runtime, uint64_t* args, int arg_count)
     runtime->record_tensor_pair(host_out, dev_out, out_size);
 
     // Buffer sizes depend on q_tile_size and block_size
-    size_t sij_size    = static_cast<size_t>(q_tile_size) * block_size * sizeof(float);
-    size_t pij_size    = static_cast<size_t>(q_tile_size) * block_size * sizeof(uint16_t);
-    size_t mij_size    = static_cast<size_t>(q_tile_size) * sizeof(float);
-    size_t lij_size    = mij_size;
-    size_t oi_new_size = static_cast<size_t>(q_tile_size) * head_dim * sizeof(float);
+    uint64_t sij_size    = static_cast<uint64_t>(q_tile_size) * block_size * sizeof(float);
+    uint64_t pij_size    = static_cast<uint64_t>(q_tile_size) * block_size * sizeof(uint16_t);
+    uint64_t mij_size    = static_cast<uint64_t>(q_tile_size) * sizeof(float);
+    uint64_t lij_size    = mij_size;
+    uint64_t oi_new_size = static_cast<uint64_t>(q_tile_size) * head_dim * sizeof(float);
 
     // Per-batch-per-block intermediate buffers
     int total_buffers = batch * max_num_blocks;
@@ -103,9 +103,9 @@ int build_paged_attention_graph(Runtime* runtime, uint64_t* args, int arg_count)
 
     // Per-(batch, head_tile) accumulators
     int total_accums = batch * num_head_tiles;
-    size_t mi_size = static_cast<size_t>(q_tile_size) * sizeof(float);
-    size_t li_size = mi_size;
-    size_t oi_size = static_cast<size_t>(q_tile_size) * head_dim * sizeof(float);
+    uint64_t mi_size = static_cast<uint64_t>(q_tile_size) * sizeof(float);
+    uint64_t li_size = mi_size;
+    uint64_t oi_size = static_cast<uint64_t>(q_tile_size) * head_dim * sizeof(float);
 
     void** dev_mi_arr = new void*[total_accums];
     void** dev_li_arr = new void*[total_accums];

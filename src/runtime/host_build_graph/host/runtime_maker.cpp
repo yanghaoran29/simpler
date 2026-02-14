@@ -61,7 +61,7 @@ extern "C" {
  */
 int init_runtime_impl(Runtime *runtime,
                     const uint8_t* orch_so_binary,
-                    size_t orch_so_size,
+                    uint64_t orch_so_size,
                     const char* orch_func_name,
                     uint64_t* func_args,
                     int func_args_count,
@@ -69,7 +69,7 @@ int init_runtime_impl(Runtime *runtime,
                     uint64_t* arg_sizes,
                     const int* kernel_func_ids,
                     const uint8_t* const* kernel_binaries,
-                    const size_t* kernel_sizes,
+                    const uint64_t* kernel_sizes,
                     int kernel_count) {
     // Unused parameters for host orchestration
     (void)arg_types;
@@ -111,7 +111,7 @@ int init_runtime_impl(Runtime *runtime,
     }
 
     ssize_t written = write(fd, orch_so_binary, orch_so_size);
-    if (written < 0 || static_cast<size_t>(written) != orch_so_size) {
+    if (written < 0 || static_cast<uint64_t>(written) != orch_so_size) {
         LOG_ERROR("Failed to write orchestration SO to temp file");
         close(fd);
         unlink(fd_path);

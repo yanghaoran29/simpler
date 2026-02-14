@@ -114,7 +114,7 @@ struct Handshake {
 struct TensorPair {
     void* host_ptr;
     void* dev_ptr;
-    size_t size;
+    uint64_t size;
 };
 
 /**
@@ -122,11 +122,11 @@ struct TensorPair {
  * Allows runtime to use pluggable device memory backends.
  */
 struct HostApi {
-    void* (*device_malloc)(size_t size);
+    void* (*device_malloc)(uint64_t size);
     void (*device_free)(void* dev_ptr);
-    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, size_t size);
-    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, size_t size);
-    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, size_t bin_size);
+    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, uint64_t size);
+    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, uint64_t size);
+    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, uint64_t bin_size);
 };
 
 /**
@@ -287,7 +287,7 @@ public:
      * @param dev_ptr   Device memory pointer (source for copy-back)
      * @param size     Size of tensor in bytes
      */
-    void record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size);
+    void record_tensor_pair(void* host_ptr, void* dev_ptr, uint64_t size);
 
     /**
      * Get pointer to tensor pairs array.

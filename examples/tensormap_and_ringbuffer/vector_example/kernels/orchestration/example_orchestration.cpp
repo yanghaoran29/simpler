@@ -88,14 +88,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     void* arg_a_ptr = (void*)(uintptr_t)args[ARG_PTR_A];
     void* arg_b_ptr = (void*)(uintptr_t)args[ARG_PTR_B];
     void* arg_f_ptr = (void*)(uintptr_t)args[ARG_PTR_F];
-    size_t size_a = (size_t)args[ARG_SIZE_A];
-    size_t size_b = (size_t)args[ARG_SIZE_B];
-    size_t size_f = (size_t)args[ARG_SIZE_F];
+    uint64_t size_a = (uint64_t)args[ARG_SIZE_A];
+    uint64_t size_b = (uint64_t)args[ARG_SIZE_B];
+    uint64_t size_f = (uint64_t)args[ARG_SIZE_F];
     int SIZE = (int)(args[ARG_SIZE] & 0x7FFFFFFF);
 
     printf("===============SIZE=%d\n", SIZE);
 
-    size_t BYTES = (size_t)SIZE * sizeof(float);
+    uint64_t BYTES = (uint64_t)SIZE * sizeof(float);
 
     Tensor ext_a = make_tensor_external(arg_a_ptr, size_a);
     Tensor ext_b = make_tensor_external(arg_b_ptr, size_b);

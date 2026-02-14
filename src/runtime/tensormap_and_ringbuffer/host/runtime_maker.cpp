@@ -59,7 +59,7 @@ static long long _now_ms() {
  */
 extern "C" int init_runtime_impl(Runtime *runtime,
                     const uint8_t* orch_so_binary,
-                    size_t orch_so_size,
+                    uint64_t orch_so_size,
                     const char* orch_func_name,
                     uint64_t* func_args,
                     int func_args_count,
@@ -67,7 +67,7 @@ extern "C" int init_runtime_impl(Runtime *runtime,
                     uint64_t* arg_sizes,
                     const int* kernel_func_ids,
                     const uint8_t* const* kernel_binaries,
-                    const size_t* kernel_sizes,
+                    const uint64_t* kernel_sizes,
                     int kernel_count) {
     // Suppress unused parameter warning
     (void)orch_func_name;
@@ -127,7 +127,7 @@ extern "C" int init_runtime_impl(Runtime *runtime,
             case ARG_INPUT_PTR: {
                 // Input pointer: allocate device memory, copy data
                 void* host_ptr = reinterpret_cast<void*>(func_args[i]);
-                size_t size = arg_sizes[i];
+                uint64_t size = arg_sizes[i];
 
                 void* dev_ptr = runtime->host_api.device_malloc(size);
                 if (dev_ptr == nullptr) {
@@ -152,7 +152,7 @@ extern "C" int init_runtime_impl(Runtime *runtime,
             case ARG_OUTPUT_PTR: {
                 // Output pointer: allocate device memory, record for copy-back
                 void* host_ptr = reinterpret_cast<void*>(func_args[i]);
-                size_t size = arg_sizes[i];
+                uint64_t size = arg_sizes[i];
 
                 void* dev_ptr = runtime->host_api.device_malloc(size);
                 if (dev_ptr == nullptr) {
@@ -170,7 +170,7 @@ extern "C" int init_runtime_impl(Runtime *runtime,
             case ARG_INOUT_PTR: {
                 // Input/output pointer: allocate, copy, record for copy-back
                 void* host_ptr = reinterpret_cast<void*>(func_args[i]);
-                size_t size = arg_sizes[i];
+                uint64_t size = arg_sizes[i];
 
                 void* dev_ptr = runtime->host_api.device_malloc(size);
                 if (dev_ptr == nullptr) {
@@ -233,15 +233,15 @@ extern "C" int init_runtime_impl(Runtime *runtime,
 
     // Allocate PTO2 shared memory
     long long t_sm_start = _now_ms();
-    int32_t sm_size = pto2_sm_calculate_size(PTO2_TASK_WINDOW_SIZE, PTO2_DEP_LIST_POOL_SIZE);
-    void* sm_ptr = runtime->host_api.device_malloc(static_cast<size_t>(sm_size));
+    uint64_t sm_size = pto2_sm_calculate_size(PTO2_TASK_WINDOW_SIZE, PTO2_DEP_LIST_POOL_SIZE);
+    void* sm_ptr = runtime->host_api.device_malloc(sm_size);
     long long t_sm_end = _now_ms();
     if (sm_ptr == nullptr) {
         std::cerr << "Error: Failed to allocate PTO2 shared memory\n";
         return -1;
     }
     runtime->set_pto2_gm_sm_ptr(sm_ptr);
-    runtime->record_tensor_pair(nullptr, sm_ptr, static_cast<size_t>(sm_size));
+    runtime->record_tensor_pair(nullptr, sm_ptr, sm_size);
 
     // Set up device orchestration state
     runtime->set_orch_built_on_host(false);
@@ -289,7 +289,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime) {
     // PTO2 (device orchestration): graph output may be in packed buffer
     void* pto2_sm = runtime->get_pto2_gm_sm_ptr();
     uint64_t graph_out_ptr = 0;
-    int32_t graph_out_size = 0;
+    uint64_t graph_out_size = 0;
 
     if (pto2_sm != nullptr) {
         // Copy header from device to host to read graph_output_ptr/size
@@ -324,12 +324,12 @@ extern "C" int validate_runtime_impl(Runtime *runtime) {
         }
 
         void* src_ptr = pair.dev_ptr;
-        size_t copy_size = pair.size;
+        uint64_t copy_size = pair.size;
 
         // Use graph_output_ptr for the first output tensor if available
         if (first_output_tensor && graph_out_ptr != 0 && graph_out_size > 0) {
             src_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(graph_out_ptr));
-            copy_size = static_cast<size_t>(graph_out_size);
+            copy_size = graph_out_size;
             std::cout << "Using packed output buffer for tensor " << i << "\n";
             first_output_tensor = false;
         }

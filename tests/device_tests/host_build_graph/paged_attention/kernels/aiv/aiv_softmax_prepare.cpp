@@ -60,7 +60,7 @@ static __aicore__ void softmax_prepare_impl(__gm__ uint8_t* sij_raw, float scale
     using TileScalarDN = Tile<TileType::Vec, float, kAlignedRows, 1, BLayout::ColMajor, M, 1>;
 
     TileVecMxN sijTile;
-    TileSijDyn sijDynTile(static_cast<size_t>(valid_len));
+    TileSijDyn sijDynTile(static_cast<uint64_t>(valid_len));
     TileSijPad sijPadTile;
     TileVecMxN pijTile;
     TileVecMxN tmpTile;

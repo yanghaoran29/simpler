@@ -10,7 +10,7 @@
 
 #include <cstdlib>
 
-void* aicpu_device_malloc(size_t size) {
+void* aicpu_device_malloc(uint64_t size) {
     return malloc(size);
 }
 

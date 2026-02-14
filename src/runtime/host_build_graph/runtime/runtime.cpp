@@ -192,7 +192,7 @@ void Runtime::print_runtime() const {
 // Tensor Pair Management
 // =============================================================================
 
-void Runtime::record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size) {
+void Runtime::record_tensor_pair(void* host_ptr, void* dev_ptr, uint64_t size) {
     if (tensor_pair_count >= RUNTIME_MAX_TENSOR_PAIRS) {
         LOG_ERROR("[Runtime] Tensor pairs full (max=%d)", RUNTIME_MAX_TENSOR_PAIRS);
         return;

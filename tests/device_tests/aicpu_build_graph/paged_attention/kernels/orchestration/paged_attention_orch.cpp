@@ -95,11 +95,11 @@ extern "C" int orchestration(Runtime* runtime) {
     int num_head_tiles  = (num_heads + q_tile_size - 1) / q_tile_size;
 
     // Buffer sizes for per-block intermediates
-    size_t sij_size    = static_cast<size_t>(q_tile_size) * block_size * sizeof(float);
-    size_t pij_size    = static_cast<size_t>(q_tile_size) * block_size * sizeof(uint16_t);
-    size_t mij_size    = static_cast<size_t>(q_tile_size) * sizeof(float);
-    size_t lij_size    = mij_size;
-    size_t oi_new_size = static_cast<size_t>(q_tile_size) * head_dim * sizeof(float);
+    uint64_t sij_size    = static_cast<uint64_t>(q_tile_size) * block_size * sizeof(float);
+    uint64_t pij_size    = static_cast<uint64_t>(q_tile_size) * block_size * sizeof(uint16_t);
+    uint64_t mij_size    = static_cast<uint64_t>(q_tile_size) * sizeof(float);
+    uint64_t lij_size    = mij_size;
+    uint64_t oi_new_size = static_cast<uint64_t>(q_tile_size) * head_dim * sizeof(float);
 
     // Allocate per-block intermediate buffers on device (HBM)
     int total_buffers = batch * max_num_blocks;
@@ -119,9 +119,9 @@ extern "C" int orchestration(Runtime* runtime) {
 
     // Per-(batch, head_tile) accumulators
     int total_accums = batch * num_head_tiles;
-    size_t mi_size = static_cast<size_t>(q_tile_size) * sizeof(float);
-    size_t li_size = mi_size;
-    size_t oi_size = static_cast<size_t>(q_tile_size) * head_dim * sizeof(float);
+    uint64_t mi_size = static_cast<uint64_t>(q_tile_size) * sizeof(float);
+    uint64_t li_size = mi_size;
+    uint64_t oi_size = static_cast<uint64_t>(q_tile_size) * head_dim * sizeof(float);
 
     void** dev_mi_arr = new void*[total_accums];
     void** dev_li_arr = new void*[total_accums];

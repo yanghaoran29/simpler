@@ -89,7 +89,7 @@ struct Handshake {
 struct TensorPair {
     void* host_ptr;
     void* dev_ptr;
-    size_t size;
+    uint64_t size;
 };
 
 /**
@@ -97,11 +97,11 @@ struct TensorPair {
  * Allows runtime to use pluggable device memory backends.
  */
 struct HostApi {
-    void* (*device_malloc)(size_t size);
+    void* (*device_malloc)(uint64_t size);
     void (*device_free)(void* dev_ptr);
-    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, size_t size);
-    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, size_t size);
-    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, size_t bin_size);
+    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, uint64_t size);
+    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, uint64_t size);
+    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, uint64_t bin_size);
 };
 
 /**
@@ -160,7 +160,7 @@ private:
     // Device orchestration SO binary (for dlopen on AICPU thread 3)
     // Stored as a copy to avoid lifetime issues with Python ctypes arrays
     uint8_t device_orch_so_storage_[RUNTIME_MAX_ORCH_SO_SIZE];
-    size_t device_orch_so_size_;
+    uint64_t device_orch_so_size_;
 
 public:
     /**
@@ -175,7 +175,7 @@ public:
     /**
      * Record a host-device tensor pair for copy-back during finalize.
      */
-    void record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size);
+    void record_tensor_pair(void* host_ptr, void* dev_ptr, uint64_t size);
 
     /**
      * Get pointer to tensor pairs array.
@@ -207,9 +207,9 @@ public:
     void set_orch_args(uint64_t* args, int count);
 
     // Device orchestration SO binary (for dlopen on AICPU thread 3)
-    void set_device_orch_so(const void* data, size_t size);
+    void set_device_orch_so(const void* data, uint64_t size);
     const void* get_device_orch_so_data() const;
-    size_t get_device_orch_so_size() const;
+    uint64_t get_device_orch_so_size() const;
 
     uint64_t get_function_bin_addr(int func_id) const;
     void set_function_bin_addr(int func_id, uint64_t addr);

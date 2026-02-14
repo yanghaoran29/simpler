@@ -63,7 +63,7 @@ extern "C" int orchestration(Runtime* runtime) {
 
     // Allocate intermediate tensors on device (HBM, accessible by AIV cores).
     // Note: malloc() on AICPU returns AICPU-local memory which AIV cores cannot access.
-    size_t bytes = static_cast<size_t>(size) * sizeof(float);
+    uint64_t bytes = static_cast<uint64_t>(size) * sizeof(float);
     void* dev_c = api.device_malloc(bytes);
     void* dev_d = api.device_malloc(bytes);
     void* dev_e = api.device_malloc(bytes);

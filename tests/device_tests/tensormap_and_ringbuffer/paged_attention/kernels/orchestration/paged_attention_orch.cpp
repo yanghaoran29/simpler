@@ -73,13 +73,13 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(PTO2Runtim
     int64_t* host_config = reinterpret_cast<int64_t*>(args[6]);
 
     // Extract sizes (next 7)
-    size_t query_size = static_cast<size_t>(args[7]);
-    size_t key_cache_size = static_cast<size_t>(args[8]);
-    size_t value_cache_size = static_cast<size_t>(args[9]);
-    size_t block_table_size = static_cast<size_t>(args[10]);
-    size_t context_lens_size = static_cast<size_t>(args[11]);
-    size_t out_size = static_cast<size_t>(args[12]);
-    size_t config_size = static_cast<size_t>(args[13]);
+    uint64_t query_size = static_cast<uint64_t>(args[7]);
+    uint64_t key_cache_size = static_cast<uint64_t>(args[8]);
+    uint64_t value_cache_size = static_cast<uint64_t>(args[9]);
+    uint64_t block_table_size = static_cast<uint64_t>(args[10]);
+    uint64_t context_lens_size = static_cast<uint64_t>(args[11]);
+    uint64_t out_size = static_cast<uint64_t>(args[12]);
+    uint64_t config_size = static_cast<uint64_t>(args[13]);
 
     // Extract config parameters
     uint64_t batch = static_cast<uint64_t>(static_cast<int>(host_config[0]));

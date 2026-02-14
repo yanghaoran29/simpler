@@ -100,7 +100,7 @@ int DeviceRunner::ensure_binaries_loaded(const std::vector<uint8_t>& aicpu_so_bi
     return 0;
 }
 
-void* DeviceRunner::allocate_tensor(size_t bytes) {
+void* DeviceRunner::allocate_tensor(uint64_t bytes) {
     return mem_alloc_.alloc(bytes);
 }
 
@@ -110,15 +110,15 @@ void DeviceRunner::free_tensor(void* dev_ptr) {
     }
 }
 
-int DeviceRunner::copy_to_device(void* dev_ptr, const void* host_ptr, size_t bytes) {
+int DeviceRunner::copy_to_device(void* dev_ptr, const void* host_ptr, uint64_t bytes) {
     // In simulation, this is just a memcpy
-    std::memcpy(dev_ptr, host_ptr, bytes);
+    std::memcpy(dev_ptr, host_ptr, static_cast<size_t>(bytes));
     return 0;
 }
 
-int DeviceRunner::copy_from_device(void* host_ptr, const void* dev_ptr, size_t bytes) {
+int DeviceRunner::copy_from_device(void* host_ptr, const void* dev_ptr, uint64_t bytes) {
     // In simulation, this is just a memcpy
-    std::memcpy(host_ptr, dev_ptr, bytes);
+    std::memcpy(host_ptr, dev_ptr, static_cast<size_t>(bytes));
     return 0;
 }
 
@@ -353,7 +353,7 @@ int DeviceRunner::finalize() {
 // Kernel Binary Upload (returns function address for caller to store in Runtime)
 // =============================================================================
 
-uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data, size_t bin_size) {
+uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data, uint64_t bin_size) {
     if (bin_data == nullptr || bin_size == 0) {
         LOG_ERROR("Invalid kernel data");
         return 0;
@@ -419,9 +419,9 @@ uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data
 
 int DeviceRunner::init_performance_profiling(Runtime& runtime, int num_aicore, int device_id) {
     // Define allocation callback (a2a3sim: use malloc)
-    auto alloc_cb = [](size_t size, void* user_data) -> void* {
+    auto alloc_cb = [](uint64_t size, void* user_data) -> void* {
         (void)user_data;  // Not needed for malloc
-        return malloc(size);
+        return malloc(static_cast<size_t>(size));
     };
 
     // Simulation: no registration needed (pass nullptr)

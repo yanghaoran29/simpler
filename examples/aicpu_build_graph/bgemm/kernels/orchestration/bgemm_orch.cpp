@@ -29,7 +29,7 @@ constexpr int GRID_K = 4;
 constexpr int GRID_N = 4;
 constexpr int BATCH = 1;
 
-constexpr size_t TILE_BYTES = TILE * TILE * sizeof(float);
+constexpr uint64_t TILE_BYTES = TILE * TILE * sizeof(float);
 constexpr int NUM_P_BUFFERS = BATCH * GRID_M * GRID_N;
 
 constexpr int DEV_A = 0;
@@ -82,9 +82,9 @@ extern "C" int orchestration(Runtime* runtime) {
             for (int n_idx = 0; n_idx < GRID_N; n_idx++) {
                 for (int k_idx = 0; k_idx < GRID_K; k_idx++) {
                     // Calculate tile offsets
-                    size_t A_offset = (batch * GRID_M * GRID_K + m_idx * GRID_K + k_idx) * TILE_BYTES;
-                    size_t B_offset = (batch * GRID_K * GRID_N + k_idx * GRID_N + n_idx) * TILE_BYTES;
-                    size_t C_offset = (batch * GRID_M * GRID_N + m_idx * GRID_N + n_idx) * TILE_BYTES;
+                    uint64_t A_offset = (batch * GRID_M * GRID_K + m_idx * GRID_K + k_idx) * TILE_BYTES;
+                    uint64_t B_offset = (batch * GRID_K * GRID_N + k_idx * GRID_N + n_idx) * TILE_BYTES;
+                    uint64_t C_offset = (batch * GRID_M * GRID_N + m_idx * GRID_N + n_idx) * TILE_BYTES;
 
                     int c_tile_idx = batch * GRID_M * GRID_N + m_idx * GRID_N + n_idx;
 

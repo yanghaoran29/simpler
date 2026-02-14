@@ -105,7 +105,7 @@ extern "C" {
  */
 int init_runtime_impl(Runtime* runtime,
     const uint8_t* orch_so_binary,
-    size_t orch_so_size,
+    uint64_t orch_so_size,
     const char* orch_func_name,
     uint64_t* func_args,
     int func_args_count,
@@ -113,7 +113,7 @@ int init_runtime_impl(Runtime* runtime,
     uint64_t* arg_sizes,
     const int* kernel_func_ids,
     const uint8_t* const* kernel_binaries,
-    const size_t* kernel_sizes,
+    const uint64_t* kernel_sizes,
     int kernel_count) {
     if (runtime == nullptr) {
         std::cerr << "Error: Runtime pointer is null\n";
@@ -163,7 +163,7 @@ int init_runtime_impl(Runtime* runtime,
         } else {
             // Pointer argument: allocate device memory.
             void* host_ptr = reinterpret_cast<void*>(func_args[i]);
-            size_t nbytes = static_cast<size_t>(asize);
+            uint64_t nbytes = asize;
 
             void* dev_ptr = runtime->host_api.device_malloc(nbytes);
             if (dev_ptr == nullptr) {

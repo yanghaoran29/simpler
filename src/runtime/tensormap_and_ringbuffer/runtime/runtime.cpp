@@ -43,7 +43,7 @@ Runtime::Runtime() {
 // Tensor Pair Management
 // =============================================================================
 
-void Runtime::record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size) {
+void Runtime::record_tensor_pair(void* host_ptr, void* dev_ptr, uint64_t size) {
     if (tensor_pair_count >= RUNTIME_MAX_TENSOR_PAIRS) {
         fprintf(stderr, "[Runtime] ERROR: Tensor pairs full (max=%d)\n", RUNTIME_MAX_TENSOR_PAIRS);
         return;
@@ -86,7 +86,7 @@ void Runtime::set_pto2_gm_heap(void* p) { pto2_gm_heap_ptr_ = p; }
 void Runtime::set_orch_args(uint64_t* args, int count) {
     orch_arg_count_ = count <= RUNTIME_MAX_ARGS ? count : RUNTIME_MAX_ARGS;
     if (args && orch_arg_count_ > 0) {
-        memcpy(orch_args_storage_, args, (size_t)orch_arg_count_ * sizeof(uint64_t));
+        memcpy(orch_args_storage_, args, (uint64_t)orch_arg_count_ * sizeof(uint64_t));
         // Note: We no longer store orch_args_ pointer as it would contain host address
         // get_orch_args() now computes address from embedded storage directly
     }
@@ -94,14 +94,14 @@ void Runtime::set_orch_args(uint64_t* args, int count) {
 
 // Device orchestration SO binary (for dlopen on AICPU thread 3)
 // Copies data to internal storage to avoid lifetime issues with Python ctypes arrays
-void Runtime::set_device_orch_so(const void* data, size_t size) {
+void Runtime::set_device_orch_so(const void* data, uint64_t size) {
     if (data == nullptr || size == 0) {
         device_orch_so_size_ = 0;
         return;
     }
     if (size > RUNTIME_MAX_ORCH_SO_SIZE) {
-        fprintf(stderr, "[Runtime] ERROR: Orchestration SO too large (%zu > %d)\n",
-                size, RUNTIME_MAX_ORCH_SO_SIZE);
+        fprintf(stderr, "[Runtime] ERROR: Orchestration SO too large (%llu > %d)\n",
+                (unsigned long long)size, RUNTIME_MAX_ORCH_SO_SIZE);
         device_orch_so_size_ = 0;
         return;
     }
@@ -113,7 +113,7 @@ const void* Runtime::get_device_orch_so_data() const {
     return device_orch_so_size_ > 0 ? device_orch_so_storage_ : nullptr;
 }
 
-size_t Runtime::get_device_orch_so_size() const {
+uint64_t Runtime::get_device_orch_so_size() const {
     return device_orch_so_size_;
 }
 
