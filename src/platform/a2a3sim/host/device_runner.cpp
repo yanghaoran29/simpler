@@ -16,6 +16,8 @@
 
 #include "device_runner.h"
 
+#include <inttypes.h>
+
 // Function pointer types for dynamically loaded executors
 typedef int (*aicpu_execute_func_t)(Runtime* runtime);
 typedef void (*aicore_execute_func_t)(Runtime* runtime, int block_idx, CoreType core_type, uint32_t physical_core_id, uint64_t regs);
@@ -203,7 +205,7 @@ int DeviceRunner::run(Runtime& runtime,
         if (task != nullptr) {
             uint64_t addr = runtime.get_function_bin_addr(task->func_id);
             task->function_bin_addr = addr;
-            LOG_DEBUG("Task %d (func_id=%d) -> function_bin_addr=0x%lx",
+            LOG_DEBUG("Task %d (func_id=%d) -> function_bin_addr=0x%" PRIx64,
                           i, task->func_id, addr);
         }
     }
@@ -443,7 +445,7 @@ uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data
 
     func_id_to_addr_[func_id] = kernel;
 
-    LOG_DEBUG("Registered kernel (dlopen): func_id=%d -> addr=0x%lx, handle=%p",
+    LOG_DEBUG("Registered kernel (dlopen): func_id=%d -> addr=0x%" PRIx64 ", handle=%p",
                   func_id, kernel.func_addr, handle);
 
     return kernel.func_addr;

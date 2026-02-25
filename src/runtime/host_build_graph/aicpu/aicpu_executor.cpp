@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cinttypes>
 #include <cstdint>
 #include <mutex>
 
@@ -268,7 +269,7 @@ int AicpuExecutor::handshake_all_cores(Runtime* runtime) {
 
         core_id_to_reg_addr_[i] = reg_addr;
 
-        LOG_INFO("  Core %d: type=%s, physical_id=%u, reg_addr=0x%lx",
+        LOG_INFO("  Core %d: type=%s, physical_id=%u, reg_addr=0x%" PRIx64,
                  i, core_type_to_string(type), physical_core_id, reg_addr);
 
         if (reg_addr != 0) {
@@ -368,7 +369,7 @@ int AicpuExecutor::shutdown_aicore(Runtime* runtime, int thread_idx, const int* 
     for (int i = 0; i < thread_cores_num_; i++) {
         int core_id = cur_thread_cores[i];
         Handshake* hank = &all_hanks[core_id];
-        LOG_INFO("Thread %d: AICPU hank addr = 0x%lx", thread_idx, (uint64_t)hank);
+        LOG_INFO("Thread %d: AICPU hank addr = 0x%" PRIx64, thread_idx, (uint64_t)hank);
 
         uint64_t reg_addr = core_id_to_reg_addr_[core_id];
         if (reg_addr != 0) {
