@@ -7,7 +7,6 @@
 
 #include "device_runner.h"
 
-#include <inttypes.h>
 #include <dlfcn.h>
 
 // Include HAL constants from CANN (header only, library loaded dynamically)
@@ -356,7 +355,7 @@ int DeviceRunner::run(Runtime& runtime,
         if (task != nullptr) {
             uint64_t addr = runtime.get_function_bin_addr(task->func_id);
             task->function_bin_addr = addr;
-            LOG_DEBUG("Task %d (func_id=%d) -> function_bin_addr=0x%" PRIx64,
+            LOG_DEBUG("Task %d (func_id=%d) -> function_bin_addr=0x%lx",
                           i, task->func_id, addr);
         }
     }
@@ -637,7 +636,7 @@ uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data
     // Cache for later reuse and cleanup
     func_id_to_addr_[func_id] = function_bin_addr;
 
-    LOG_DEBUG("  func_id=%d -> function_bin_addr=0x%" PRIx64, func_id, function_bin_addr);
+    LOG_DEBUG("  func_id=%d -> function_bin_addr=0x%lx", func_id, function_bin_addr);
 
     return function_bin_addr;
 }

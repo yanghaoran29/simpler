@@ -4,7 +4,6 @@
  */
 
 #include "aicpu/performance_collector_aicpu.h"
-#include <inttypes.h>
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
 #include "common/platform_config.h"
@@ -62,7 +61,7 @@ void perf_aicpu_init_profiling(Runtime* runtime) {
         h->perf_records_addr = (uint64_t)&db->buffer1;
         db->buffer1_status = BufferStatus::WRITING;
 
-        LOG_DEBUG("Core %d: assigned buffer1 (addr=0x%" PRIx64 ")", i, h->perf_records_addr);
+        LOG_DEBUG("Core %d: assigned buffer1 (addr=0x%lx)", i, h->perf_records_addr);
     }
 
     wmb();
@@ -120,7 +119,7 @@ void perf_aicpu_switch_buffer(Runtime* runtime, int core_id, int thread_idx) {
         alternate_status_ptr = &db->buffer1_status;
         alternate_buffer_id = 1;
     } else {
-        LOG_ERROR("Thread %d: Core %d has invalid perf_records_addr=0x%" PRIx64,
+        LOG_ERROR("Thread %d: Core %d has invalid perf_records_addr=0x%lx",
                   thread_idx, core_id, current_addr);
         return;
     }
@@ -157,7 +156,7 @@ void perf_aicpu_switch_buffer(Runtime* runtime, int core_id, int thread_idx) {
             } 
 
             if (elapsed >= TIMEOUT_SECONDS * PLATFORM_PROF_SYS_CNT_FREQ) {
-                LOG_ERROR("Thread %d: Core %d buffer%u timeout after %" PRIu64 " seconds (status=%u)",
+                LOG_ERROR("Thread %d: Core %d buffer%u timeout after %lu seconds (status=%u)",
                          thread_idx, core_id, alternate_buffer_id, TIMEOUT_SECONDS,
                          static_cast<uint32_t>(alternate_status));
                 LOG_ERROR("Forcing buffer%u to IDLE and discarding performance data to prevent deadlock",
@@ -251,7 +250,7 @@ void perf_aicpu_flush_buffers(Runtime* runtime,
             current_status = &db->buffer2_status;
             buffer_id = 2;
         } else {
-            LOG_WARN("Thread %d: Core %d perf_records_addr=0x%" PRIx64 " doesn't match buffer1=0x%" PRIx64 " or buffer2=0x%" PRIx64,
+            LOG_WARN("Thread %d: Core %d perf_records_addr=0x%lx doesn't match buffer1=0x%lx or buffer2=0x%lx",
                      thread_idx, core_id, current_addr, buf1_addr, buf2_addr);
             continue;
         }

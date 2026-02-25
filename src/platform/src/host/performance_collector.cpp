@@ -5,7 +5,6 @@
 
 #include "host/performance_collector.h"
 
-#include <inttypes.h>
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -112,7 +111,7 @@ int PerformanceCollector::initialize(Runtime& runtime,
 
     // Step 6: Pass to Runtime
     runtime.perf_data_base = (uint64_t)perf_dev_ptr;
-    LOG_DEBUG("Set runtime.perf_data_base = 0x%" PRIx64, runtime.perf_data_base);
+    LOG_DEBUG("Set runtime.perf_data_base = 0x%lx", runtime.perf_data_base);
 
     perf_shared_mem_dev_ = perf_dev_ptr;
     perf_shared_mem_host_ = perf_host_ptr;
@@ -293,7 +292,7 @@ int PerformanceCollector::export_swimlane_json(const std::string& output_path) {
         }
         if (record.dispatch_time < base_time_cycles && record.dispatch_time > 0) {
             base_time_cycles = record.dispatch_time;
-            LOG_WARN("Timestamp violation: dispatch_time (%" PRIu64 ") < base_time (%" PRIu64 ") for task %u, using dispatch_time as new base_time",
+            LOG_WARN("Timestamp violation: dispatch_time (%lu) < base_time (%lu) for task %u, using dispatch_time as new base_time",
                         record.dispatch_time, base_time_cycles, record.task_id);
         }
     }
