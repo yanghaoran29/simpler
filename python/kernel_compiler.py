@@ -241,18 +241,20 @@ class KernelCompiler:
         source_path: str,
         core_type: str = "aiv",
         pto_isa_root: Optional[str] = None,
-        extra_include_dirs: Optional[List[str]] = None
+        extra_include_dirs: Optional[List[str]] = None,
+        func_id: int = 0,
     ) -> bytes:
         """
         Compile a kernel source file. Dispatches based on platform:
         - a2a3: Uses ccec compiler (requires pto_isa_root)
-        - a2a3sim: Uses compile_incore_sim (g++-15)
+        - a2a3sim: Uses compile_incore_sim (g++-15), produces renamed .o
 
         Args:
             source_path: Path to kernel source file (.cpp)
             core_type: Core type: "aic" (cube) or "aiv" (vector). Default: "aiv"
             pto_isa_root: Path to PTO-ISA root directory. Required for a2a3.
             extra_include_dirs: Additional include directories
+            func_id: Function identifier for symbol renaming (a2a3sim only).
 
         Returns:
             Binary contents of the compiled .o file
@@ -272,6 +274,7 @@ class KernelCompiler:
         if incore_toolchain == ToolchainType.HOST_GXX_15:
             return self._compile_incore_sim(
                 source_path,
+                func_id=func_id,
                 pto_isa_root=pto_isa_root,
                 extra_include_dirs=extra_include_dirs
             )
@@ -364,11 +367,17 @@ class KernelCompiler:
     def _compile_orchestration_shared_lib(
         self,
         source_path: str,
-        toolchain: Toolchain,
+        toolchain: "Toolchain",
         extra_include_dirs: Optional[List[str]] = None,
         extra_sources: Optional[List[str]] = None,
     ) -> bytes:
-        """Compile an orchestration function to a shared library (.so).
+        """Compile an orchestration function.
+
+        For a2a3sim (HOST_GXX toolchain): compiles to a relocatable object (.o)
+        that will be statically linked into host_runtime.so. Extra sources are
+        each compiled to separate .o files; all are combined via ld -r.
+
+        For other platforms: compiles to a shared library (.so) for dlopen.
 
         Prefer the unified compile_orchestration() entry point.
 
@@ -376,16 +385,24 @@ class KernelCompiler:
             source_path: Path to orchestration source file (.cpp)
             toolchain: Resolved toolchain object (GxxToolchain or Aarch64GxxToolchain)
             extra_include_dirs: Additional include directories
-            extra_sources: Additional source files to compile into the SO
+            extra_sources: Additional source files to compile into the output
 
         Returns:
-            Binary contents of the compiled .so file
+            Binary contents of the compiled .so or .o file
         """
         source_path = os.path.abspath(source_path)
         if not os.path.isfile(source_path):
             raise FileNotFoundError(f"Source file not found: {source_path}")
 
-        # Generate output path
+        # a2a3sim: compile to relocatable .o for static linking
+        if self.platform == "a2a3sim":
+            return self._compile_orchestration_static_obj(
+                source_path, toolchain,
+                extra_include_dirs=extra_include_dirs,
+                extra_sources=extra_sources,
+            )
+
+        # Other platforms: compile to .so for dlopen
         output_path = self._make_temp_path(prefix="orch_", suffix=".so")
 
         cmd = [toolchain.cxx_path] + toolchain.get_compile_flags()
@@ -410,7 +427,6 @@ class KernelCompiler:
         # Output and input
         cmd.extend(["-o", output_path, source_path])
 
-        # Log compilation command
         logger.info(f"[Orchestration] Compiling: {source_path}")
         logger.debug(f"  Command: {' '.join(cmd)}")
 
@@ -419,37 +435,145 @@ class KernelCompiler:
             error_hint=f"{toolchain.cxx_path} not found. Please install it."
         )
 
+    def _compile_orchestration_static_obj(
+        self,
+        source_path: str,
+        toolchain: "Toolchain",
+        extra_include_dirs: Optional[List[str]] = None,
+        extra_sources: Optional[List[str]] = None,
+    ) -> bytes:
+        """Compile orchestration sources to a single combined relocatable object (.o).
+
+        Each source is compiled individually to .o, then combined using 'ld -r'
+        (partial linking) into a single .o suitable for static linking into host_runtime.so.
+
+        Args:
+            source_path: Path to main orchestration source file (.cpp)
+            toolchain: Resolved toolchain object
+            extra_include_dirs: Additional include directories
+            extra_sources: Additional source files to compile
+
+        Returns:
+            Binary contents of the combined .o file
+        """
+        import shutil
+        temp_dir = tempfile.mkdtemp(prefix="orch_static_")
+        try:
+            # Get compile flags without -shared
+            base_flags = [f for f in toolchain.get_compile_flags() if f != "-shared"]
+            include_flags = []
+            if extra_include_dirs:
+                for inc_dir in extra_include_dirs:
+                    include_flags.append(f"-I{os.path.abspath(inc_dir)}")
+
+            all_sources = [source_path] + [
+                os.path.abspath(s) for s in (extra_sources or []) if os.path.isfile(os.path.abspath(s))
+            ]
+
+            obj_paths = []
+            for i, src in enumerate(all_sources):
+                obj_path = os.path.join(temp_dir, f"orch_{i}.o")
+                cmd = [toolchain.cxx_path] + base_flags + ["-c"] + include_flags
+                cmd.extend(["-o", obj_path, src])
+                logger.info(f"[Orchestration] Compiling part {i}: {src}")
+                logger.debug(f"  Command: {' '.join(cmd)}")
+                self._run_subprocess(cmd, f"OrchPart{i}",
+                                     error_hint=f"{toolchain.cxx_path} not found.")
+                if os.path.isfile(obj_path):
+                    obj_paths.append(obj_path)
+
+            if not obj_paths:
+                raise RuntimeError("No orchestration objects compiled successfully")
+
+            # Combine using ld -r (partial linking) if multiple objects
+            combined_path = os.path.join(temp_dir, "orch_combined.o")
+            if len(obj_paths) == 1:
+                combined_path = obj_paths[0]
+            else:
+                ld_cmd = ["ld", "-r", "-o", combined_path] + obj_paths
+                logger.debug(f"  Combining: {' '.join(ld_cmd)}")
+                self._run_subprocess(ld_cmd, "OrchCombine",
+                                     error_hint="ld not found. Please install binutils.")
+
+            with open(combined_path, "rb") as f:
+                data = f.read()
+
+            logger.info(f"[Orchestration] Static object: {len(data)} bytes")
+            return data
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def generate_kernel_dispatch(self, func_ids: List[int]) -> str:
+        """Generate kernel_dispatch.cpp content for static linking.
+
+        The generated file provides get_kernel_func_addr(func_id) which maps
+        func_ids to their statically-linked kernel entry points.
+
+        Args:
+            func_ids: List of kernel function IDs that were compiled and renamed
+
+        Returns:
+            C++ source code string for kernel_dispatch.cpp
+        """
+        lines = [
+            "// Auto-generated kernel dispatch table for static linking",
+            "// Each kernel_entry_N is the renamed kernel_entry from the corresponding",
+            "// kernel object file (renamed via objcopy --redefine-sym).",
+            "#include <stdint.h>",
+            "",
+        ]
+        for fid in func_ids:
+            lines.append(f"extern \"C\" uint64_t kernel_entry_{fid}(uint64_t regs);")
+        lines += [
+            "",
+            "extern \"C\" uint64_t get_kernel_func_addr(int func_id) {",
+            "    switch (func_id) {",
+        ]
+        for fid in func_ids:
+            lines.append(f"    case {fid}: return reinterpret_cast<uint64_t>(kernel_entry_{fid});")
+        lines += [
+            "    default: return 0;",
+            "    }",
+            "}",
+            "",
+        ]
+        return "\n".join(lines)
+
     def _compile_incore_sim(
         self,
         source_path: str,
+        func_id: int = 0,
         pto_isa_root: Optional[str] = None,
         extra_include_dirs: Optional[List[str]] = None
     ) -> bytes:
         """
-        Compile a simulation kernel to .so/.dylib using g++-15.
+        Compile a simulation kernel to a relocatable object (.o) using g++-15.
+        The symbol 'kernel_entry' is renamed to 'kernel_entry_{func_id}' via objcopy
+        to avoid symbol collisions when multiple kernels are statically linked together.
 
         Args:
             source_path: Path to kernel source file (.cpp)
+            func_id: Function identifier used to rename the kernel_entry symbol
             pto_isa_root: Path to PTO-ISA root directory (for PTO ISA headers)
             extra_include_dirs: Additional include directories
 
         Returns:
-            Binary contents of the compiled .so/.dylib file
+            Binary contents of the compiled and renamed .o file
 
         Raises:
             FileNotFoundError: If source file not found
-            RuntimeError: If compilation fails
+            RuntimeError: If compilation or objcopy fails
         """
         source_path = os.path.abspath(source_path)
         if not os.path.isfile(source_path):
             raise FileNotFoundError(f"Source file not found: {source_path}")
 
-        # Generate output path (use platform-appropriate extension)
-        ext = ".dylib" if sys.platform == "darwin" else ".so"
-        output_path = self._make_temp_path(prefix="sim_kernel_", suffix=ext)
+        # Compile to object file (-c -fPIC, no -shared)
+        obj_path = self._make_temp_path(prefix="sim_kernel_", suffix=".o")
 
-        # Build command from toolchain
-        cmd = [self.gxx15.cxx_path] + self.gxx15.get_compile_flags()
+        # Build command: remove -shared from flags, add -c
+        base_flags = [f for f in self.gxx15.get_compile_flags() if f != "-shared"]
+        cmd = [self.gxx15.cxx_path] + base_flags + ["-c"]
 
         # Add PTO ISA header paths if provided
         if pto_isa_root:
@@ -462,13 +586,33 @@ class KernelCompiler:
             for inc_dir in extra_include_dirs:
                 cmd.append(f"-I{os.path.abspath(inc_dir)}")
 
-        cmd.extend(["-o", output_path, source_path])
+        cmd.extend(["-o", obj_path, source_path])
 
-        # Log compilation command
         logger.info(f"[SimKernel] Compiling: {source_path}")
         logger.debug(f"  Command: {' '.join(cmd)}")
 
-        return self._compile_to_bytes(
-            cmd, output_path, "SimKernel",
-            error_hint=f"{self.gxx15.cxx_path} not found. Please install g++-15."
-        )
+        self._run_subprocess(cmd, "SimKernel",
+                             error_hint=f"{self.gxx15.cxx_path} not found. Please install g++-15.")
+
+        if not os.path.isfile(obj_path):
+            raise RuntimeError(f"Compilation succeeded but output not found: {obj_path}")
+
+        # Rename kernel_entry -> kernel_entry_{func_id} using objcopy
+        renamed_path = self._make_temp_path(prefix="sim_kernel_renamed_", suffix=".o")
+        objcopy_cmd = [
+            "objcopy",
+            f"--redefine-sym=kernel_entry=kernel_entry_{func_id}",
+            obj_path,
+            renamed_path,
+        ]
+        logger.debug(f"  objcopy: {' '.join(objcopy_cmd)}")
+        self._run_subprocess(objcopy_cmd, "SimKernelObjcopy",
+                             error_hint="objcopy not found. Please install binutils.")
+        os.remove(obj_path)
+
+        with open(renamed_path, "rb") as f:
+            binary_data = f.read()
+        os.remove(renamed_path)
+
+        logger.info(f"[SimKernel] Compiled and renamed kernel_entry_{func_id}: {len(binary_data)} bytes")
+        return binary_data

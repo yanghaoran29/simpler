@@ -95,6 +95,27 @@ int init_runtime_impl(Runtime *runtime,
             runtime->set_function_bin_addr(kernel_func_ids[i], addr);
         }
     }
+    OrchestrationFunc orch_func = nullptr;
+
+#ifdef STATIC_ORCH_LINK
+    // Static link mode: orchestration function is already linked into this library
+    if (orch_func_name == nullptr) {
+        LOG_ERROR("Orchestration function name is required");
+        return -1;
+    }
+
+    // Look up the function in the current process (already loaded symbols)
+    dlerror();  // Clear any existing error
+    orch_func = reinterpret_cast<OrchestrationFunc>(dlsym(RTLD_DEFAULT, orch_func_name));
+    const char* dlsym_error = dlerror();
+    if (dlsym_error != nullptr || orch_func == nullptr) {
+        LOG_ERROR("dlsym(RTLD_DEFAULT) failed for '%s': %s",
+                  orch_func_name, dlsym_error ? dlsym_error : "symbol not found");
+        return -1;
+    }
+    LOG_INFO("Static link mode: resolved orchestration function '%s'", orch_func_name);
+#else
+    // Dynamic load mode: load orchestration SO from binary data
     if (orch_so_binary == nullptr || orch_so_size == 0 || orch_func_name == nullptr) {
         LOG_ERROR("Invalid orchestration parameters");
         return -1;
@@ -127,8 +148,7 @@ int init_runtime_impl(Runtime *runtime,
     }
 
     dlerror();  // Clear any existing error
-    OrchestrationFunc orch_func =
-        reinterpret_cast<OrchestrationFunc>(dlsym(handle, orch_func_name));
+    orch_func = reinterpret_cast<OrchestrationFunc>(dlsym(handle, orch_func_name));
     const char* dlsym_error = dlerror();
     if (dlsym_error != nullptr) {
         LOG_ERROR("dlsym failed for '%s': %s", orch_func_name, dlsym_error);
@@ -137,6 +157,8 @@ int init_runtime_impl(Runtime *runtime,
     }
 
     LOG_INFO("Loaded orchestration function: %s", orch_func_name);
+    // Note: We intentionally leak the dlopen handle to keep the SO loaded
+#endif
 
     // Clear any previous tensor pairs
     runtime->clear_tensor_pairs();
@@ -150,14 +172,18 @@ int init_runtime_impl(Runtime *runtime,
     if (rc != 0) {
         LOG_ERROR("Orchestration function failed with code %d", rc);
         runtime->clear_tensor_pairs();
+#ifndef STATIC_ORCH_LINK
         dlclose(handle);
+#endif
         return rc;
     }
 
     LOG_INFO("Runtime initialized. Ready for execution from Python.");
 
+#ifndef STATIC_ORCH_LINK
     // Note: We intentionally leak the dlopen handle to keep the SO loaded
     // for the lifetime of the process.
+#endif
 
     return 0;
 }

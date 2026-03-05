@@ -724,30 +724,81 @@ class CodeRunner:
                 core_type=kernel["core_type"],
                 pto_isa_root=pto_isa_root,
                 extra_include_dirs=runtime_include_dirs,
+                func_id=kernel["func_id"],
             )
             if self.platform == "a2a3sim":
-                kernel_bin = incore_o
+                kernel_bin = incore_o  # .o bytes for static linking
             else:
                 kernel_bin = extract_text_section(incore_o)
             return (kernel["func_id"], kernel_bin)
 
-        # Launch all compilations concurrently
-        max_workers = 2 + len(self.kernels)  # runtime + orchestration + kernels
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            fut_runtime = executor.submit(_build_runtime)
-            fut_orch = executor.submit(_compile_orchestration)
-            fut_kernels = [executor.submit(_compile_one_kernel, k) for k in self.kernels]
+        if self.platform == "a2a3sim":
+            import shutil
+            import tempfile as _tempfile
 
+            # Step 1: Compile orch and kernels in parallel (independent of each other)
+            max_workers = 1 + len(self.kernels)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                fut_orch = executor.submit(_compile_orchestration)
+                fut_kernels = [executor.submit(_compile_one_kernel, k) for k in self.kernels]
+                orch_obj_bytes = fut_orch.result()
+                kernel_obj_list = [f.result() for f in fut_kernels]
+
+            # Step 2: Write .o files to temp dir, generate dispatch.cpp
+            _tmpdir = _tempfile.mkdtemp(prefix="a2a3sim_static_")
             try:
-                host_binary, aicpu_binary, aicore_binary = fut_runtime.result()
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to build runtime '{self.runtime_name}' for platform '{self.platform}'.\n"
-                    f"Error: {e}"
-                ) from e
+                extra_obj_paths = []
 
-            orch_so_binary = fut_orch.result()
-            kernel_binaries = [f.result() for f in fut_kernels]
+                orch_obj_path = os.path.join(_tmpdir, "orch.o")
+                with open(orch_obj_path, "wb") as f:
+                    f.write(orch_obj_bytes)
+                extra_obj_paths.append(orch_obj_path)
+
+                for func_id, kbin in kernel_obj_list:
+                    kobj_path = os.path.join(_tmpdir, f"kernel_{func_id}.o")
+                    with open(kobj_path, "wb") as f:
+                        f.write(kbin)
+                    extra_obj_paths.append(kobj_path)
+
+                func_ids = [fid for fid, _ in kernel_obj_list]
+                dispatch_cpp = kernel_compiler.generate_kernel_dispatch(func_ids)
+                dispatch_path = os.path.join(_tmpdir, "kernel_dispatch.cpp")
+                with open(dispatch_path, "w") as f:
+                    f.write(dispatch_cpp)
+
+                # Step 3: Register objects and build runtime (sequential: .a then .so)
+                builder.set_kernel_objects(extra_obj_paths, dispatch_path)
+                try:
+                    host_binary, aicpu_binary, aicore_binary = _build_runtime()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to build runtime '{self.runtime_name}' for platform '{self.platform}'.\n"
+                        f"Error: {e}"
+                    ) from e
+            finally:
+                shutil.rmtree(_tmpdir, ignore_errors=True)
+
+            # In static mode, orch and kernels are linked into host_binary
+            orch_so_binary = b""
+            kernel_binaries = [(fid, b"static") for fid, _ in kernel_obj_list]
+        else:
+            # Non-a2a3sim: compile all concurrently
+            max_workers = 2 + len(self.kernels)  # runtime + orchestration + kernels
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                fut_runtime = executor.submit(_build_runtime)
+                fut_orch = executor.submit(_compile_orchestration)
+                fut_kernels = [executor.submit(_compile_one_kernel, k) for k in self.kernels]
+
+                try:
+                    host_binary, aicpu_binary, aicore_binary = fut_runtime.result()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to build runtime '{self.runtime_name}' for platform '{self.platform}'.\n"
+                        f"Error: {e}"
+                    ) from e
+
+                orch_so_binary = fut_orch.result()
+                kernel_binaries = [f.result() for f in fut_kernels]
 
         logger.info(f"Compiled {len(kernel_binaries)} kernel(s)")
 

@@ -119,10 +119,33 @@ int init_runtime_impl(Runtime* runtime,
         std::cerr << "Error: Runtime pointer is null\n";
         return -1;
     }
-    if (orch_so_binary == nullptr || orch_so_size == 0 || orch_func_name == nullptr) {
+    if (orch_func_name == nullptr) {
+        std::cerr << "Error: Orchestration function name is required\n";
+        return -1;
+    }
+
+#ifdef STATIC_ORCH_LINK
+    // Static link mode: orchestration function is already linked into this library
+    // Skip SO storage, just store the function name for AICPU executor to resolve
+    std::cout << "Static link mode: orchestration function '" << orch_func_name
+              << "' will be resolved by AICPU executor\n";
+#else
+    // Dynamic load mode: store orchestration SO for AICPU to load
+    if (orch_so_binary == nullptr || orch_so_size == 0) {
         std::cerr << "Error: Invalid orchestration parameters\n";
         return -1;
     }
+
+    if (!runtime->try_set_aicpu_orch_so(orch_so_binary, orch_so_size)) {
+        std::cerr << "Error: Failed to store AICPU orchestration SO "
+                     "(size=" << orch_so_size << " bytes, max="
+                     << RUNTIME_MAX_AICPU_ORCH_SO_SIZE << ")\n";
+        return -1;
+    }
+
+    std::cout << "Embedded orchestration plugin (" << orch_so_size
+              << " bytes), entry: " << orch_func_name << '\n';
+#endif
 
     // Register kernel binaries via platform-provided upload function
     if (kernel_count > 0 && kernel_func_ids != NULL &&
@@ -192,19 +215,10 @@ int init_runtime_impl(Runtime* runtime,
     }
     runtime->orch_argc = func_args_count;
 
-    // --- Embed AICPU orchestration plugin ---
-    if (!runtime->try_set_aicpu_orch_so(orch_so_binary, orch_so_size)) {
-        std::cerr << "Error: failed to embed AICPU orchestration plugin into Runtime "
-                     "(size=" << orch_so_size << " bytes, max="
-                  << RUNTIME_MAX_AICPU_ORCH_SO_SIZE << " bytes)\n";
-        return -1;
-    }
+    // --- Store orchestration function name ---
     memset(runtime->aicpu_orch_func_name, 0, sizeof(runtime->aicpu_orch_func_name));
     strncpy(runtime->aicpu_orch_func_name, orch_func_name,
             sizeof(runtime->aicpu_orch_func_name) - 1);
-
-    std::cout << "Embedded orchestration plugin (" << orch_so_size
-              << " bytes), entry: " << runtime->aicpu_orch_func_name << '\n';
 
     // --- Build mode ---
     const char* build_mode_env = std::getenv("PTO_AICPU_BUILD_GRAPH_BUILD_MODE");

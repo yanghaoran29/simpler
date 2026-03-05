@@ -1,25 +1,25 @@
 /**
- * Device Runner Implementation - Thread-Based Simulation
+ * Device Runner Implementation - Thread-Based Simulation (Static Link Mode)
  *
  * This file implements the simulated device execution using host threads.
- * It provides the same API as the real a2a3 implementation but uses
- * std::thread instead of CANN runtime APIs.
- *
- * aicpu_execute and aicore_execute_wrapper are loaded dynamically via dlopen from
- * the binaries passed to launch_runtime.
+ * AICPU and AICore executors are statically linked into this library.
+ * Kernel functions are resolved via get_kernel_func_addr() from the
+ * generated kernel_dispatch.cpp (or kernel_dispatch_stub.cpp for stub builds).
  *
  * Cross-platform notes:
  * - Linux: Uses MAP_ANONYMOUS for anonymous memory mapping
- * - macOS: Uses MAP_ANON (aliased) and MAP_JIT for executable memory on Apple Silicon
- *   which requires W^X (write xor execute) protection toggling via pthread_jit_write_protect_np
  */
 
 #include "device_runner.h"
 
-// Function pointer types for dynamically loaded executors
-typedef int (*aicpu_execute_func_t)(Runtime* runtime);
-typedef void (*aicore_execute_func_t)(Runtime* runtime, int block_idx, CoreType core_type, uint32_t physical_core_id, uint64_t regs);
-typedef void (*set_platform_regs_func_t)(uint64_t regs);
+// Statically linked executor functions (from libaicpu_kernel.a and libaicore_kernel.a)
+extern "C" int aicpu_execute(Runtime* runtime);
+extern "C" void aicore_execute_wrapper(Runtime* runtime, int block_idx, CoreType core_type,
+                                       uint32_t physical_core_id, uint64_t regs);
+extern "C" void set_platform_regs(uint64_t regs);
+
+// Kernel dispatch function (from generated kernel_dispatch.cpp or kernel_dispatch_stub.cpp)
+extern "C" uint64_t get_kernel_func_addr(int func_id);
 
 // =============================================================================
 // DeviceRunner Implementation
@@ -32,80 +32,6 @@ DeviceRunner& DeviceRunner::get() {
 
 DeviceRunner::~DeviceRunner() {
     finalize();
-}
-
-int DeviceRunner::ensure_device_initialized(int device_id,
-                                            const std::vector<uint8_t>& aicpu_so_binary,
-                                            const std::vector<uint8_t>& aicore_kernel_binary) {
-    device_id_ = device_id;
-    return ensure_binaries_loaded(aicpu_so_binary, aicore_kernel_binary);
-}
-
-int DeviceRunner::ensure_binaries_loaded(const std::vector<uint8_t>& aicpu_so_binary,
-                                         const std::vector<uint8_t>& aicore_kernel_binary) {
-    // Skip if already loaded
-    if (aicpu_execute_func_ != nullptr && aicore_execute_func_ != nullptr) {
-        return 0;
-    }
-
-    // Write AICPU binary to temp file and dlopen
-    if (!aicpu_so_binary.empty() && aicpu_execute_func_ == nullptr) {
-        aicpu_so_path_ = "/tmp/aicpu_sim_" + std::to_string(getpid()) + ".so";
-        std::ofstream ofs(aicpu_so_path_, std::ios::binary);
-        if (!ofs) {
-            LOG_ERROR("Failed to create temp file for AICPU SO: %s", aicpu_so_path_.c_str());
-            return -1;
-        }
-        ofs.write(reinterpret_cast<const char*>(aicpu_so_binary.data()), aicpu_so_binary.size());
-        ofs.close();
-
-        aicpu_so_handle_ = dlopen(aicpu_so_path_.c_str(), RTLD_NOW | RTLD_GLOBAL);
-        if (aicpu_so_handle_ == nullptr) {
-            LOG_ERROR("dlopen failed for AICPU SO: %s", dlerror());
-            return -1;
-        }
-
-        aicpu_execute_func_ = reinterpret_cast<int(*)(Runtime*)>(dlsym(aicpu_so_handle_, "aicpu_execute"));
-        if (aicpu_execute_func_ == nullptr) {
-            LOG_ERROR("dlsym failed for aicpu_execute: %s", dlerror());
-            return -1;
-        }
-
-        set_platform_regs_func_ = reinterpret_cast<void(*)(uint64_t)>(dlsym(aicpu_so_handle_, "set_platform_regs"));
-        if (set_platform_regs_func_ == nullptr) {
-            LOG_ERROR("dlsym failed for set_platform_regs: %s", dlerror());
-            return -1;
-        }
-
-        LOG_INFO("DeviceRunner(sim): Loaded aicpu_execute from %s", aicpu_so_path_.c_str());
-    }
-
-    // Write AICore binary to temp file and dlopen
-    if (!aicore_kernel_binary.empty() && aicore_execute_func_ == nullptr) {
-        aicore_so_path_ = "/tmp/aicore_sim_" + std::to_string(getpid()) + ".so";
-        std::ofstream ofs(aicore_so_path_, std::ios::binary);
-        if (!ofs) {
-            LOG_ERROR("Failed to create temp file for AICore SO: %s", aicore_so_path_.c_str());
-            return -1;
-        }
-        ofs.write(reinterpret_cast<const char*>(aicore_kernel_binary.data()), aicore_kernel_binary.size());
-        ofs.close();
-
-        aicore_so_handle_ = dlopen(aicore_so_path_.c_str(), RTLD_NOW | RTLD_GLOBAL);
-        if (aicore_so_handle_ == nullptr) {
-            LOG_ERROR("dlopen failed for AICore SO: %s", dlerror());
-            return -1;
-        }
-
-        aicore_execute_func_ = reinterpret_cast<void(*)(Runtime*, int, CoreType, uint32_t, uint64_t)>(dlsym(aicore_so_handle_, "aicore_execute_wrapper"));
-        if (aicore_execute_func_ == nullptr) {
-            LOG_ERROR("dlsym failed for aicore_execute_wrapper: %s", dlerror());
-            return -1;
-        }
-        LOG_INFO("DeviceRunner(sim): Loaded aicore_execute_wrapper from %s", aicore_so_path_.c_str());
-    }
-
-    return 0;
 }
 
 void* DeviceRunner::allocate_tensor(size_t bytes) {
@@ -137,16 +63,22 @@ int DeviceRunner::run(Runtime& runtime,
                       const std::vector<uint8_t>& aicore_kernel_binary,
                       int launch_aicpu_num) {
 
+    // Suppress unused parameter warnings (binaries are ignored in static mode)
+    (void)aicpu_so_binary;
+    (void)aicore_kernel_binary;
+
+    device_id_ = device_id;
+
     // Validate launch_aicpu_num
     if (launch_aicpu_num < 1 || launch_aicpu_num > PLATFORM_MAX_AICPU_THREADS) {
-        LOG_ERROR("launch_aicpu_num (%d) must be in range [1, %d]", 
+        LOG_ERROR("launch_aicpu_num (%d) must be in range [1, %d]",
                        launch_aicpu_num, PLATFORM_MAX_AICPU_THREADS);
         return -1;
     }
 
     // Validate block_dim
     if (block_dim < 1 || block_dim > PLATFORM_MAX_BLOCKDIM) {
-        LOG_ERROR("block_dim (%d) must be in range [1, %d]", 
+        LOG_ERROR("block_dim (%d) must be in range [1, %d]",
                        block_dim, PLATFORM_MAX_BLOCKDIM);
         return -1;
     }
@@ -158,13 +90,6 @@ int DeviceRunner::run(Runtime& runtime,
         LOG_ERROR("block_dim (%d) must be evenly divisible by scheduler_thread_num (%d)",
                        block_dim, scheduler_thread_num);
         return -1;
-    }
-
-    // Ensure device is initialized
-    int rc = ensure_device_initialized(device_id, aicpu_so_binary, aicore_kernel_binary);
-    if (rc != 0) {
-        LOG_ERROR("ensure_device_initialized failed: %d", rc);
-        return rc;
     }
 
     // Calculate execution parameters
@@ -212,6 +137,7 @@ int DeviceRunner::run(Runtime& runtime,
     last_runtime_ = &runtime;
 
     // Initialize performance profiling if enabled
+    int rc = 0;
     if (runtime.enable_profiling) {
         rc = init_performance_profiling(runtime, num_aicore, device_id);
         if (rc != 0) {
@@ -244,32 +170,29 @@ int DeviceRunner::run(Runtime& runtime,
 
     LOG_INFO("Allocated simulated registers: %d cores x 0x%x bytes", num_aicore, SIM_REG_BLOCK_SIZE);
 
-    // Check if executors are loaded
-    if (aicpu_execute_func_ == nullptr || aicore_execute_func_ == nullptr) {
-        LOG_ERROR("Executor functions not loaded. Call ensure_binaries_loaded first.");
-        return -1;
-    }
+    // Set platform regs before launching threads (statically linked function)
+    set_platform_regs(kernel_args_.regs);
 
-    // Set platform regs in the AICPU .so before launching threads
-    set_platform_regs_func_(kernel_args_.regs);
-
-    // Launch AICPU threads
+    // Launch AICPU threads (statically linked aicpu_execute)
     LOG_INFO("Launching %d AICPU thread(s)", launch_aicpu_num);
     std::vector<std::thread> aicpu_threads;
     for (int i = 0; i < launch_aicpu_num; i++) {
-        aicpu_threads.emplace_back([this, &runtime]() {
-            aicpu_execute_func_(&runtime);
+        aicpu_threads.emplace_back([&runtime]() {
+            aicpu_execute(&runtime);
         });
     }
 
-    // Launch AICore threads
+    // Capture regs value for AICore threads
+    uint64_t regs_val = kernel_args_.regs;
+
+    // Launch AICore threads (statically linked aicore_execute_wrapper)
     LOG_INFO("Launching %d AICore thread(s)", num_aicore);
     std::vector<std::thread> aicore_threads;
     for (int i = 0; i < num_aicore; i++) {
         CoreType core_type = runtime.workers[i].core_type;
         uint32_t physical_core_id = static_cast<uint32_t>(i);
-        aicore_threads.emplace_back([this, &runtime, i, core_type, physical_core_id]() {
-            aicore_execute_func_(&runtime, i, core_type, physical_core_id, kernel_args_.regs);
+        aicore_threads.emplace_back([&runtime, i, core_type, physical_core_id, regs_val]() {
+            aicore_execute_wrapper(&runtime, i, core_type, physical_core_id, regs_val);
         });
     }
 
@@ -328,27 +251,16 @@ int DeviceRunner::clean_cache() {
         return 0;
     }
 
-    // Only cleanup test-specific resources:
-
-    // 1. Close dlopen'd kernel libraries (different tests may have different kernels)
-    for (auto& pair : func_id_to_addr_) {
-        MappedKernel& kernel = pair.second;
-        if (kernel.dl_handle != nullptr) {
-            dlclose(kernel.dl_handle);
-            LOG_DEBUG("Closed dlopen kernel: func_id=%d", pair.first);
-            kernel.dl_handle = nullptr;
-            kernel.func_addr = 0;
-        }
-    }
+    // Clear kernel address cache (next call will re-resolve via get_kernel_func_addr)
     func_id_to_addr_.clear();
 
-    LOG_INFO("DeviceRunner(sim): cache cleaned (test-specific resources only)");
+    LOG_INFO("DeviceRunner(sim): cache cleaned");
     return 0;
 }
 
 int DeviceRunner::finalize() {
     // Skip if already finalized
-    if (device_id_ == -1 && aicpu_so_handle_ == nullptr && aicore_so_handle_ == nullptr) {
+    if (device_id_ == -1) {
         return 0;
     }
 
@@ -366,38 +278,8 @@ int DeviceRunner::finalize() {
         perf_collector_.finalize(nullptr, free_cb, nullptr);
     }
 
-    // Close all dlopen'd kernel libraries
-    for (auto& pair : func_id_to_addr_) {
-        MappedKernel& kernel = pair.second;
-        if (kernel.dl_handle != nullptr) {
-            dlclose(kernel.dl_handle);
-            LOG_DEBUG("Closed dlopen kernel: func_id=%d", pair.first);
-            kernel.dl_handle = nullptr;
-            kernel.func_addr = 0;
-        }
-    }
+    // Clear kernel address cache
     func_id_to_addr_.clear();
-
-    // Close dynamically loaded libraries and remove temp files
-    if (aicpu_so_handle_ != nullptr) {
-        dlclose(aicpu_so_handle_);
-        aicpu_so_handle_ = nullptr;
-        aicpu_execute_func_ = nullptr;
-    }
-    if (!aicpu_so_path_.empty()) {
-        std::remove(aicpu_so_path_.c_str());
-        aicpu_so_path_.clear();
-    }
-
-    if (aicore_so_handle_ != nullptr) {
-        dlclose(aicore_so_handle_);
-        aicore_so_handle_ = nullptr;
-        aicore_execute_func_ = nullptr;
-    }
-    if (!aicore_so_path_.empty()) {
-        std::remove(aicore_so_path_.c_str());
-        aicore_so_path_.clear();
-    }
 
     // Free all remaining allocations
     mem_alloc_.finalize();
@@ -411,67 +293,35 @@ int DeviceRunner::finalize() {
 }
 
 // =============================================================================
-// Kernel Binary Upload (returns function address for caller to store in Runtime)
+// Kernel Binary Upload (static-link mode: resolves via get_kernel_func_addr)
 // =============================================================================
 
 uint64_t DeviceRunner::upload_kernel_binary(int func_id, const uint8_t* bin_data, size_t bin_size) {
-    if (bin_data == nullptr || bin_size == 0) {
-        LOG_ERROR("Invalid kernel data");
-        return 0;
-    }
+    // Suppress unused parameter warnings (binary is ignored in static mode)
+    (void)bin_data;
+    (void)bin_size;
 
-    // Return cached address if already uploaded
+    // Return cached address if already resolved
     auto it = func_id_to_addr_.find(func_id);
     if (it != func_id_to_addr_.end()) {
-        LOG_INFO("Kernel func_id=%d already uploaded, returning cached address", func_id);
+        LOG_INFO("Kernel func_id=%d already resolved, returning cached address", func_id);
         return it->second.func_addr;
     }
 
-    // 1. Generate temp file path
-    char tmpfile[256];
-    snprintf(tmpfile, sizeof(tmpfile), "/tmp/kernel_%d_%d.so", func_id, getpid());
-
-    // 2. Write to temp file
-    std::ofstream ofs(tmpfile, std::ios::binary);
-    if (!ofs) {
-        LOG_ERROR("Failed to create temp file: %s", tmpfile);
-        return 0;
-    }
-    ofs.write(reinterpret_cast<const char*>(bin_data), bin_size);
-    ofs.close();
-
-    LOG_DEBUG("Uploading kernel .so: %s (size=%zu bytes)", tmpfile, bin_size);
-
-    // 3. dlopen to load .so (RTLD_NOW ensures all symbols resolved immediately)
-    void* handle = dlopen(tmpfile, RTLD_NOW | RTLD_LOCAL);
-
-    // 4. Remove temp file immediately (.so is already in memory)
-    std::remove(tmpfile);
-
-    if (!handle) {
-        LOG_ERROR("dlopen failed: %s", dlerror());
+    // Resolve via statically-linked dispatch table
+    uint64_t addr = get_kernel_func_addr(func_id);
+    if (addr == 0) {
+        LOG_ERROR("get_kernel_func_addr returned 0 for func_id=%d", func_id);
         return 0;
     }
 
-    // 5. dlsym to get kernel function address (unified entry point: "kernel_entry")
-    void* func = dlsym(handle, "kernel_entry");
-    if (!func) {
-        LOG_ERROR("dlsym failed for 'kernel_entry': %s", dlerror());
-        dlclose(handle);
-        return 0;
-    }
-
-    // 6. Store mapping info for cleanup
     MappedKernel kernel;
-    kernel.dl_handle = handle;
-    kernel.func_addr = reinterpret_cast<uint64_t>(func);
-
+    kernel.func_addr = addr;
     func_id_to_addr_[func_id] = kernel;
 
-    LOG_DEBUG("Registered kernel (dlopen): func_id=%d -> addr=0x%lx, handle=%p",
-                  func_id, kernel.func_addr, handle);
+    LOG_DEBUG("Resolved kernel (static): func_id=%d -> addr=0x%lx", func_id, addr);
 
-    return kernel.func_addr;
+    return addr;
 }
 
 // =============================================================================
@@ -497,4 +347,3 @@ void DeviceRunner::poll_and_collect_performance_data(int expected_tasks) {
 int DeviceRunner::export_swimlane_json(const std::string& output_path) {
     return perf_collector_.export_swimlane_json(output_path);
 }
-

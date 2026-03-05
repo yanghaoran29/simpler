@@ -38,6 +38,7 @@ extern "C" void aicpu_runtime_publish_task(Runtime* runtime, int task_id);
 namespace {
 using AicpuBuilderFunc = int (*)(Runtime*);
 
+#ifndef STATIC_ORCH_LINK
 int write_bytes_to_file(const char* path, const uint8_t* data, size_t size) {
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
     if (fd < 0) {
@@ -55,6 +56,7 @@ int write_bytes_to_file(const char* path, const uint8_t* data, size_t size) {
     ::close(fd);
     return 0;
 }
+#endif
 
 void ensure_current_so_is_global(int thread_idx) {
     static std::once_flag once;
@@ -80,6 +82,28 @@ int build_graph_via_aicpu_plugin(Runtime* runtime, int thread_idx) {
         return -1;
     }
 
+    const char* sym = (runtime->aicpu_orch_func_name[0] != '\0') ? runtime->aicpu_orch_func_name : "orchestration";
+
+    AicpuBuilderFunc func = nullptr;
+
+#ifdef STATIC_ORCH_LINK
+    // Static link mode: orchestration function is already linked into this library
+    DEV_INFO("Thread %d: Static link mode, resolving orchestration function '%s'", thread_idx, sym);
+
+    // Ensure the current runtime .so's symbols are visible to the dynamic loader
+    ensure_current_so_is_global(thread_idx);
+
+    ::dlerror();  // clear
+    func = reinterpret_cast<AicpuBuilderFunc>(::dlsym(RTLD_DEFAULT, sym));
+    const char* err = ::dlerror();
+    if (err != nullptr || func == nullptr) {
+        DEV_ERROR("Thread %d: dlsym(RTLD_DEFAULT) failed for '%s': %s",
+                  thread_idx, sym, err ? err : "symbol not found");
+        return -1;
+    }
+    DEV_INFO("Thread %d: Resolved orchestration function '%s' from static link", thread_idx, sym);
+#else
+    // Dynamic load mode: load orchestration SO from embedded binary
     const void* so_data_v = runtime->get_aicpu_orch_so_data();
     size_t so_size = runtime->get_aicpu_orch_so_size();
     if (so_data_v == nullptr || so_size == 0) {
@@ -88,7 +112,6 @@ int build_graph_via_aicpu_plugin(Runtime* runtime, int thread_idx) {
         return -1;
     }
 
-    const char* sym = (runtime->aicpu_orch_func_name[0] != '\0') ? runtime->aicpu_orch_func_name : "orchestration";
     const uint8_t* so_data = reinterpret_cast<const uint8_t*>(so_data_v);
 
     // On some real AICPU configurations, /dev/shm, /tmp, and memfd may be mounted `noexec`,
@@ -141,16 +164,21 @@ int build_graph_via_aicpu_plugin(Runtime* runtime, int thread_idx) {
     }
 
     ::dlerror();  // clear
-    AicpuBuilderFunc func = reinterpret_cast<AicpuBuilderFunc>(::dlsym(handle, sym));
+    func = reinterpret_cast<AicpuBuilderFunc>(::dlsym(handle, sym));
     const char* err = ::dlerror();
     if (err != nullptr || func == nullptr) {
         DEV_ERROR("Thread %d: dlsym failed for '%s': %s", thread_idx, sym, err ? err : "<null>");
         ::dlclose(handle);
         return -1;
     }
+#endif
 
     int rc = func(runtime);
+
+#ifndef STATIC_ORCH_LINK
     ::dlclose(handle);
+#endif
+
     return rc;
 }
 }  // namespace

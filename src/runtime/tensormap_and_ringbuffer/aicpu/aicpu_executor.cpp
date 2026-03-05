@@ -797,6 +797,13 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
     return cur_thread_completed;
 }
 
+#ifdef STATIC_ORCH_LINK
+// Static link mode: aicpu_orchestration_entry is linked directly into this library.
+// aicpu_orchestration_config is optional (weak symbol — NULL if not defined by the user).
+extern "C" void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count);
+extern "C" __attribute__((weak)) PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count);
+#endif
+
 int AicpuExecutor::run(Runtime* runtime) {
     int thread_idx = thread_idx_++;
 
@@ -811,6 +818,18 @@ int AicpuExecutor::run(Runtime* runtime) {
         if (runtime->get_orch_built_on_host()) {
             DEV_INFO("Thread 3: Host orchestration mode, no-op");
         } else {
+            DeviceOrchestrationFunc orch_func = nullptr;
+            DeviceOrchestrationConfigFunc config_func = nullptr;
+#ifndef STATIC_ORCH_LINK
+            void* handle = nullptr;
+            char so_path[256] = {};
+#endif
+
+#ifdef STATIC_ORCH_LINK
+            DEV_INFO("Thread 3: Device orchestration, static link mode");
+            orch_func = aicpu_orchestration_entry;
+            config_func = aicpu_orchestration_config;  // may be nullptr (weak symbol)
+#else
             DEV_INFO("Thread 3: Device orchestration, loading SO via dlopen");
 
             // Get SO binary from runtime
@@ -824,7 +843,6 @@ int AicpuExecutor::run(Runtime* runtime) {
 
             // /dev/shm, /tmp, and memfd are mounted noexec on real hardware
             // Try multiple paths that may allow execution on AICPU
-            char so_path[256];
             bool file_created = false;
 
             // List of candidate paths to try (in order of preference)
@@ -866,7 +884,7 @@ int AicpuExecutor::run(Runtime* runtime) {
 
             // dlopen the SO
             dlerror();  // Clear any existing error before dlopen
-            void* handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
+            handle = dlopen(so_path, RTLD_LAZY | RTLD_LOCAL);
             const char* dlopen_err = dlerror();
             if (handle == nullptr) {
                 DEV_ERROR("Thread 3: dlopen failed: %s", dlopen_err ? dlopen_err : "unknown");
@@ -877,12 +895,12 @@ int AicpuExecutor::run(Runtime* runtime) {
 
             // Get the config function to read orchestration parameters
             dlerror();
-            auto config_func = reinterpret_cast<DeviceOrchestrationConfigFunc>(
+            config_func = reinterpret_cast<DeviceOrchestrationConfigFunc>(
                 dlsym(handle, "aicpu_orchestration_config"));
 
             // Get the orchestration entry function
             dlerror();
-            DeviceOrchestrationFunc orch_func =
+            orch_func =
                 reinterpret_cast<DeviceOrchestrationFunc>(dlsym(handle, "aicpu_orchestration_entry"));
             const char* dlsym_error = dlerror();
             if (dlsym_error != nullptr) {
@@ -897,6 +915,7 @@ int AicpuExecutor::run(Runtime* runtime) {
                 unlink(so_path);
                 return -1;
             }
+#endif  // !STATIC_ORCH_LINK
 
             uint64_t* args = runtime->get_orch_args();
             int arg_count = runtime->get_orch_arg_count();
@@ -920,8 +939,10 @@ int AicpuExecutor::run(Runtime* runtime) {
 
             if (expected_arg_count > 0 && arg_count < expected_arg_count) {
                 DEV_ERROR("Thread 3: arg_count %d < expected %d", arg_count, expected_arg_count);
+#ifndef STATIC_ORCH_LINK
                 dlclose(handle);
                 unlink(so_path);
+#endif
                 return -1;
             }
 
@@ -949,8 +970,10 @@ int AicpuExecutor::run(Runtime* runtime) {
                                             heap_size, dep_list_pool_size);
             if (!sm_handle) {
                 DEV_ERROR("Thread 3: Failed to create shared memory handle");
+#ifndef STATIC_ORCH_LINK
                 dlclose(handle);
                 unlink(so_path);
+#endif
                 return -1;
             }
 
@@ -959,8 +982,10 @@ int AicpuExecutor::run(Runtime* runtime) {
             if (!rt) {
                 DEV_ERROR("Thread 3: Failed to create PTO2Runtime");
                 pto2_sm_destroy(sm_handle);
+#ifndef STATIC_ORCH_LINK
                 dlclose(handle);
                 unlink(so_path);
+#endif
                 return -1;
             }
 
@@ -1038,8 +1063,10 @@ int AicpuExecutor::run(Runtime* runtime) {
 
             // The orchestration .so no longer contains static output buffers
             // (heap is managed by the executor), so we can close immediately
+#ifndef STATIC_ORCH_LINK
             dlclose(handle);
             unlink(so_path);
+#endif
 
             // Device mode: task count lives in PTO2 shared memory
             void* sm = runtime->get_pto2_gm_sm_ptr();

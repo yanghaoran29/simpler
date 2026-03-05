@@ -30,6 +30,9 @@ file(GLOB PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 list(APPEND AICPU_SOURCES ${PLATFORM_SOURCES})
 # Add common source list like 1) unified log device implementation; 2) platform register implementation
 file(GLOB COMMON_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/aicpu/*.cpp")
+# Exclude unified_log_device.cpp: its symbols (unified_log_error etc.) are already
+# provided by unified_log_host.cpp in host_runtime.so, which links this static lib.
+list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*unified_log_device\\.cpp$")
 list(APPEND AICPU_SOURCES ${COMMON_SOURCES})
 
 # Then, collect sources from CUSTOM_SOURCE_DIRS (runtime sources)
@@ -42,8 +45,8 @@ else()
     message(FATAL_ERROR "MUST set CUSTOM_SOURCE_DIRS to build AICPU (simulation)")
 endif()
 
-# Create shared library (host-compatible for dlopen)
-add_library(aicpu_kernel SHARED ${AICPU_SOURCES})
+# Create static library (linked into host_runtime.so)
+add_library(aicpu_kernel STATIC ${AICPU_SOURCES})
 
 # Compile options (host g++/gcc)
 target_compile_options(aicpu_kernel
@@ -59,6 +62,9 @@ target_compile_options(aicpu_kernel
         $<$<COMPILE_LANGUAGE:C>:-std=gnu11>
 )
 
+# Define STATIC_ORCH_LINK: replaces dlopen for orchestration with direct calls
+target_compile_definitions(aicpu_kernel PRIVATE STATIC_ORCH_LINK)
+
 # Include directories
 target_include_directories(aicpu_kernel
     PRIVATE
@@ -73,7 +79,4 @@ target_link_libraries(aicpu_kernel
 
 set_target_properties(aicpu_kernel PROPERTIES
     OUTPUT_NAME "aicpu_kernel"
-    # Force .so suffix on all platforms (macOS defaults to .dylib)
-    # This matches the hardcoded paths in Python/C++ code
-    SUFFIX ".so"
 )

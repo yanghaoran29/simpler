@@ -119,8 +119,12 @@ extern "C" int init_runtime_impl(Runtime *runtime,
     }
 
     if (orch_so_binary == nullptr || orch_so_size == 0) {
+#ifndef STATIC_ORCH_LINK
         LOG_ERROR("Orchestration SO binary is required for device orchestration");
         return -1;
+#else
+        LOG_INFO("Static link mode: skipping orchestration SO upload");
+#endif
     }
 
     if (arg_types == nullptr || arg_sizes == nullptr) {
@@ -224,6 +228,8 @@ extern "C" int init_runtime_impl(Runtime *runtime,
     long long t_args_end = _now_ms();
 
     // Copy orchestration SO to device memory (AICPU cannot access host memory)
+    // In static link mode, the orchestration function is already linked in.
+#ifndef STATIC_ORCH_LINK
     long long t_so_start = _now_ms();
     void* dev_so = runtime->host_api.device_malloc(orch_so_size);
     if (dev_so == nullptr) {
@@ -243,6 +249,11 @@ extern "C" int init_runtime_impl(Runtime *runtime,
     runtime->record_tensor_pair(nullptr, dev_so, orch_so_size);
     LOG_INFO("Orchestration SO: %zu bytes copied to device", orch_so_size);
     long long t_so_end = _now_ms();
+#else
+    long long t_so_start = _now_ms();
+    LOG_INFO("Static link mode: orchestration function linked directly, skipping SO upload");
+    long long t_so_end = _now_ms();
+#endif
 
     // Read ready queue shard count from environment for AICPU scheduler
     {

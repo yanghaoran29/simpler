@@ -18,7 +18,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <dlfcn.h>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -39,14 +38,12 @@
 #include "runtime.h"
 
 /**
- * Mapped kernel binary loaded via dlopen
+ * Mapped kernel binary loaded via static linking
  *
- * Stores dlopen handle and function pointer address. This enables
- * proper handling of external symbols (e.g., std::exp) via PLT/GOT.
+ * Stores function pointer address resolved via get_kernel_func_addr().
  */
 struct MappedKernel {
-    void* dl_handle{nullptr};    // dlopen handle
-    uint64_t func_addr{0};       // Function pointer address (from dlsym)
+    uint64_t func_addr{0};       // Function pointer address (from get_kernel_func_addr)
 };
 
 /**
@@ -160,7 +157,6 @@ public:
      * Clean cached resources - lightweight cleanup between tests
      *
      * Cleans up test-specific resources while preserving device resources for reuse:
-     * - Closes dlopen'd kernel libraries (different tests may have different kernels)
      * - Clears kernel address cache
      *
      * @return 0 on success, error code on failure
@@ -179,16 +175,16 @@ public:
     /**
      * Upload a kernel binary and return the function address
      *
-     * Loads the complete kernel .so via dlopen, enabling proper handling
-     * of external symbols (e.g., std::exp, std::log) via PLT/GOT.
-     * Uses dlsym to resolve the unified entry point "kernel_entry".
+     * In static-link mode, looks up the function address by func_id using
+     * the statically-linked get_kernel_func_addr() dispatch table.
+     * The bin_data and bin_size arguments are ignored.
      *
      * If the kernel is already uploaded (same func_id), returns the
      * cached address without re-uploading.
      *
-     * @param func_id      Function identifier (for caching)
-     * @param bin_data     Complete kernel .so binary data
-     * @param bin_size     Size of binary data in bytes
+     * @param func_id      Function identifier (for caching and dispatch)
+     * @param bin_data     Kernel binary data (ignored in static mode)
+     * @param bin_size     Size of binary data (ignored in static mode)
      * @return Function pointer address on success, 0 on error
      */
     uint64_t upload_kernel_binary(int func_id, const uint8_t* bin_data, size_t bin_size);
@@ -209,30 +205,14 @@ private:
     // Simulation state (no actual device resources)
     KernelArgs kernel_args_;
 
-    // Kernel binary mapping (func_id -> executable memory)
+    // Kernel address cache (func_id -> address)
     std::map<int, MappedKernel> func_id_to_addr_;
 
     // Runtime pointer for print_handshake_results
     Runtime* last_runtime_{nullptr};
 
-    // Dynamically loaded executor libraries and function pointers
-    void* aicpu_so_handle_{nullptr};
-    void* aicore_so_handle_{nullptr};
-    int (*aicpu_execute_func_)(Runtime*){nullptr};
-    void (*aicore_execute_func_)(Runtime*, int, CoreType, uint32_t, uint64_t){nullptr};
-    void (*set_platform_regs_func_)(uint64_t){nullptr};
-    std::string aicpu_so_path_;
-    std::string aicore_so_path_;
-
     // Performance profiling
     PerformanceCollector perf_collector_;
-
-    // Private helper methods
-    int ensure_device_initialized(int device_id,
-                                  const std::vector<uint8_t>& aicpu_so_binary,
-                                  const std::vector<uint8_t>& aicore_kernel_binary);
-    int ensure_binaries_loaded(const std::vector<uint8_t>& aicpu_so_binary,
-                               const std::vector<uint8_t>& aicore_kernel_binary);
 
     /**
      * Initialize performance profiling shared memory

@@ -116,6 +116,15 @@ bool pto2_scheduler_init(PTO2SchedulerState* sched,
         return false;
     }
 
+    // Explicitly zero-initialize: std::atomic<T> default constructor is trivial in C++17
+    // and leaves the value indeterminate. After delete[]/new[] cycles, the allocator may
+    // reuse freed memory (with its free-list metadata) without zeroing it.
+    for (uint64_t i = 0; i < window_size; i++) {
+        sched->task_state[i].store(PTO2_TASK_PENDING, std::memory_order_relaxed);
+        sched->fanin_refcount[i].store(0, std::memory_order_relaxed);
+        sched->fanout_refcount[i].store(0, std::memory_order_relaxed);
+    }
+
     // Initialize ready queues
     for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
         if (!pto2_ready_queue_init(&sched->ready_queues[i], PTO2_READY_QUEUE_SIZE)) {

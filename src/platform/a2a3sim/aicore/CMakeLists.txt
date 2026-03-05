@@ -29,10 +29,9 @@ set(AICORE_SOURCES "")
 file(GLOB LOCAL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 list(APPEND AICORE_SOURCES ${LOCAL_SOURCES})
 
-# Add host_log.cpp for HostLogger support (required by runtime.cpp)
-list(APPEND AICORE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/host/host_log.cpp")
-# Add unified_log_host.cpp for unified logging support (required by runtime.cpp)
-list(APPEND AICORE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/host/unified_log_host.cpp")
+# Note: host_log.cpp and unified_log_host.cpp are intentionally excluded.
+# They are already included in host_runtime.so, which also links this static lib.
+# Including them here would cause duplicate symbol errors at link time.
 
 if(DEFINED CUSTOM_SOURCE_DIRS)
     foreach(SRC_DIR ${CUSTOM_SOURCE_DIRS})
@@ -43,8 +42,8 @@ else()
     message(FATAL_ERROR "MUST set CUSTOM_SOURCE_DIRS to build AICore (simulation)")
 endif()
 
-# Create shared library (host-compatible for dlopen)
-add_library(aicore_kernel SHARED ${AICORE_SOURCES})
+# Create static library (linked into host_runtime.so)
+add_library(aicore_kernel STATIC ${AICORE_SOURCES})
 
 # Compile options (host g++)
 target_compile_options(aicore_kernel
@@ -59,7 +58,8 @@ target_compile_options(aicore_kernel
 
 # Define __CPU_SIM for CPU simulation backend
 # This enables CPU stubs for PTO instructions (TLOAD, TSTORE, TADD, etc.)
-target_compile_definitions(aicore_kernel PRIVATE __CPU_SIM)
+# Define STATIC_ORCH_LINK: replaces dlopen for orchestration with direct calls
+target_compile_definitions(aicore_kernel PRIVATE __CPU_SIM STATIC_ORCH_LINK)
 
 # Include directories
 target_include_directories(aicore_kernel
@@ -69,7 +69,4 @@ target_include_directories(aicore_kernel
 
 set_target_properties(aicore_kernel PROPERTIES
     OUTPUT_NAME "aicore_kernel"
-    # Force .so suffix on all platforms (macOS defaults to .dylib)
-    # This matches the hardcoded paths in Python/C++ code
-    SUFFIX ".so"
 )

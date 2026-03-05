@@ -108,19 +108,38 @@ class RuntimeCompiler:
         """Initialize toolchains for simulation platform.
         All targets use host gcc/g++ with platform-specific CMake dirs.
         No Ascend SDK required.
+
+        For a2a3sim, AICPU and AICore are built as static archives (.a)
+        and linked into the host shared library (libhost_runtime.so).
         """
         self._ensure_host_compilers()
         gxx = GxxToolchain()
 
         self.aicore_target = BuildTarget(
-            gxx, str(self.platform_dir / "aicore"), "libaicore_kernel.so"
+            gxx, str(self.platform_dir / "aicore"), "libaicore_kernel.a"
         )
         self.aicpu_target = BuildTarget(
-            gxx, str(self.platform_dir / "aicpu"), "libaicpu_kernel.so"
+            gxx, str(self.platform_dir / "aicpu"), "libaicpu_kernel.a"
         )
         self.host_target = BuildTarget(
             gxx, str(self.platform_dir / "host"), "libhost_runtime.so"
         )
+
+        # Static build extras: paths to .a files and extra .o objects.
+        # Populated externally before compile("host") is called.
+        self._static_build_extras: dict = {}
+
+    def set_static_build_extras(self, extras: dict) -> None:
+        """Set extra CMake args for the next a2a3sim host build.
+
+        Args:
+            extras: Dict with optional keys:
+                'aicpu_lib'    - path to libaicpu_kernel.a
+                'aicore_lib'   - path to libaicore_kernel.a
+                'extra_objects' - list of .o file paths to link
+                'dispatch_source' - path to generated kernel_dispatch.cpp
+        """
+        self._static_build_extras = extras
 
     def _ensure_host_compilers(self):
         if not self._find_executable("gcc"):
@@ -178,9 +197,27 @@ class RuntimeCompiler:
         cmake_source_dir = target.get_root_dir()
         binary_name = target.get_binary_name()
 
+        # For a2a3sim host build: append static linking args if set
+        if self.platform == "a2a3sim" and target_platform == "host":
+            cmake_args += self._get_static_cmake_args()
+
         return self._run_compilation(
             cmake_source_dir, cmake_args, binary_name, platform=target_platform.upper()
         )
+
+    def _get_static_cmake_args(self) -> List[str]:
+        """Return extra CMake -D args for a2a3sim static host build."""
+        extras = getattr(self, "_static_build_extras", {})
+        args = []
+        if extras.get("aicpu_lib"):
+            args.append(f'-DAICPU_STATIC_LIB={extras["aicpu_lib"]}')
+        if extras.get("aicore_lib"):
+            args.append(f'-DAICORE_STATIC_LIB={extras["aicore_lib"]}')
+        if extras.get("extra_objects"):
+            args.append(f'-DEXTRA_OBJECTS={";".join(extras["extra_objects"])}')
+        if extras.get("dispatch_source"):
+            args.append(f'-DKERNEL_DISPATCH_SOURCE={extras["dispatch_source"]}')
+        return args
 
     def _run_build_step(
         self,
