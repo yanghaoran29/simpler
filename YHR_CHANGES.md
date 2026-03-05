@@ -215,20 +215,14 @@ int write_bytes_to_file(const char* path, const uint8_t* data, size_t size) {
 ## 2.1 改造概述
 
 ### 2.1.1 改造目标
-以 `paged_attention_orch.cpp` 为基础进行改造，构建出可以独立编译的、使用CPU模拟AICPU操作的Paged Attention Orchestration测试脚本。该脚本特点如下：
-1. 只模拟 AICPU 部分的操作，跳过 AICore 部分
-2. 链接静态库
-3. 添加了单独的main函数，使其可以独立运行
+以 `paged_attention_orch.cpp` 为基础，形成可独立编译、基于CPU模拟AICPU操作的Paged Attention Orchestration测试脚本。脚本仅模拟AICPU相关操作，跳过AICore部分，采用静态库链接方式，内置独立main函数，支持直接运行。
 
 ### 2.1.2 改造范围
 - **源文件**: `simpler/tests/device_tests/tensormap_and_ringbuffer/paged_attention/kernels/orchestration/paged_attention_orch.cpp`
 - **目标文件**: `simpler/tests/orchestration_ut/test_paged_attention.cpp`
 - **相关文件**: 
-  - `simpler/tests/orchestration_ut/Makefile` (已包含构建规则)
-  - `simpler/tests/unit/Makefile` (已移除 test_sim_orch_sched 相关内容)
-  - `simpler/ci.sh` (已移除上板测试调用)
-
----
+  - `simpler/tests/orchestration_ut/Makefile` 包含对应构建规则
+  - `simpler/tests/unit/Makefile` 移除 test_sim_orch_sched 相关内容
 
 ## 2.2 改造前后对比
 
@@ -239,426 +233,86 @@ int write_bytes_to_file(const char* path, const uint8_t* data, size_t size) {
 simpler/tests/device_tests/tensormap_and_ringbuffer/paged_attention/
 ├── kernels/
 │   ├── orchestration/
-│   │   └── paged_attention_orch.cpp  ← 源文件
+│   │   └── paged_attention_orch.cpp
 │   ├── aic/
 │   ├── aiv/
 │   └── kernel_config.py
 └── golden.py
 ```
-
-**特点**:
-- 作为 orchestration 函数，由 AICPU executor 动态加载
-- 需要真实硬件（Ascend 设备）执行
-- 执行实际的 AICore kernels
-- 无独立的 main 函数
+文件以orchestration函数形式存在，由AICPU executor动态加载，依赖Ascend真实硬件，执行实际AICore kernels，无独立main函数。
 
 #### 2.2.1.2 改造后（单元测试）
 ```
 simpler/tests/orchestration_ut/
-├── test_paged_attention.cpp  ← 新文件
+├── test_paged_attention.cpp
 └── Makefile
 
 simpler/tests/unit/
-├── Makefile  ← 已移除 test_sim_orch_sched 相关内容
+└── Makefile
 ```
-
-**特点**:
-- 独立的单元测试程序
-- 可在任何 CPU 上运行（不需要硬件）
-- 跳过 AICore kernel 执行
-- 包含完整的 main 函数和测试框架
-- 使用 C++ chrono 库进行计时（替代硬件 cycle counting）
-
----
+文件为独立单元测试程序，可在通用CPU环境运行，跳过AICore kernel执行，包含完整main函数与测试框架，采用C++ chrono库完成计时工作。
 
 ## 2.3 详细改造内容
 
 ### 2.3.1 移除硬件特定代码
 
 #### 2.3.1.1 移除 ARM 系统计数器指令
-
-**改造前**:
-```cpp
-inline uint64_t get_sys_cnt_aicpu() {
-    uint64_t ticks;
-    asm volatile("mrs %0, cntvct_el0" : "=r"(ticks));  // ARM 特定指令
-    return ticks;
-}
-
-#define CYCLE_COUNT_START() uint64_t _t0 = get_sys_cnt_aicpu(), _t1
-#define CYCLE_COUNT_LAP(acc) do { _t1 = get_sys_cnt_aicpu(); acc += (_t1 - _t0); _t0 = _t1; } while(0)
-```
-
-**改造后**:
-```cpp
-// 使用 C++ chrono 库替代硬件 cycle counting
-#include <chrono>
-
-auto t_start = std::chrono::high_resolution_clock::now();
-// ... 执行代码 ...
-auto t_end = std::chrono::high_resolution_clock::now();
-auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
-printf("  Execution time: %lld us (%.3f ms)\n", 
-       (long long)duration.count(), duration.count() / 1000.0);
-```
-
-**原因**: 
-- `mrs cntvct_el0` 是 ARM 架构特定的系统寄存器读取指令
-- 在 x86 或其他架构上无法编译或执行
-- 使用标准 C++ chrono 库提供跨平台的计时功能
-- 仍然可以测量性能，但使用标准库而非硬件特定指令
+删除ARM架构专属的`cntvct_el0`系统计数器读取指令及相关宏定义，替换为C++标准chrono库实现跨平台高精度计时，支持微秒、毫秒级时间统计与打印。
 
 #### 2.3.1.2 移除性能分析相关代码
-
-**改造前**:
-```cpp
-uint64_t prof_param_extract = 0;
-uint64_t prof_ext_tensor    = 0;
-uint64_t prof_make_tensor   = 0;
-uint64_t prof_tensor_view   = 0;
-uint64_t prof_param_setup   = 0;
-uint64_t prof_submit_task   = 0;
-int      prof_submit_count  = 0;
-int      prof_make_count    = 0;
-int      prof_view_count    = 0;
-
-CYCLE_COUNT_START();
-// ... 代码 ...
-CYCLE_COUNT_LAP(prof_param_extract);
-// ... 更多性能分析代码 ...
-
-LOG_ALWAYS(rt, "=== PagedAttn Orch Profiling: %d submits, %d makes, %d views, total=%.3fus ===",
-    prof_submit_count, prof_make_count, prof_view_count, cycles_to_us(total));
-```
-
-**改造后**:
-```cpp
-// 使用 chrono 进行性能分析
-#include <chrono>
-
-auto t_start = std::chrono::high_resolution_clock::now();
-// ... 代码执行 ...
-auto t_end = std::chrono::high_resolution_clock::now();
-auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
-
-printf("  Total tasks submitted: %d\n", total_tasks);
-printf("  Timing breakdown:\n");
-printf("    TensorPool init:     %lld us\n", (long long)duration_tensor_pool.count());
-printf("    Orchestration:        %lld us\n", (long long)duration_orchestration.count());
-printf("    Total:                %lld us (%.3f ms)\n", 
-       (long long)duration_total.count(), duration_total.count() / 1000.0);
-```
-
-**原因**:
-- 使用标准 C++ chrono 库替代硬件特定的 cycle counting
-- 提供跨平台的性能测量
-- 仍然可以分析性能，但使用标准库
-- 输出格式更易读（微秒和毫秒）
+移除基于硬件周期计数的性能统计变量与打点逻辑，采用chrono库对TensorPool初始化、编排流程、总耗时等环节做分段计时，输出格式化的时间与任务统计信息。
 
 ### 2.3.2 API 调用方式改造
 
 #### 2.3.2.1 Orchestration API → 直接 API
-
-**改造前** (使用 orchestration API):
-```cpp
-#include "pto_orchestration_api.h"
-
-extern "C" {
-__attribute__((visibility("default"))) 
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
-    pto2_rt_init_tensor_pool(rt);  // 通过函数指针表调用
-    // ...
-    pto2_rt_submit_task(rt, FUNC_AIV_HUB, PTO2_WORKER_VECTOR, params_inplace, 3);
-    // ...
-}
-}
-```
-
-**改造后** (直接调用):
-```cpp
-#include "pto_runtime2.h"
-
-static void build_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
-    TensorPool::set_instance(&rt->orchestrator.tensor_pool);  // 直接设置
-    // ...
-    pto2_submit_task(&rt->orchestrator, FUNC_AIV_HUB, PTO2_WORKER_VECTOR, params_inplace, 3);
-    // ...
-}
-```
-
-**变化说明**:
-| 原 API | 新 API | 原因 |
-|--------|--------|------|
-| `pto2_rt_init_tensor_pool(rt)` | `TensorPool::set_instance(&rt->orchestrator.tensor_pool)` | 直接访问，无需函数指针 |
-| `pto2_rt_submit_task(rt, ...)` | `pto2_submit_task(&rt->orchestrator, ...)` | 直接调用 orchestrator |
-| `LOG_ALWAYS(rt, ...)` | `printf(...)` | 简化日志，使用标准输出 |
-
-**原因**:
-- 单元测试环境允许直接访问 runtime 内部结构
-- 不需要通过函数指针表（orchestration API 的设计目的）
-- 更易于调试和跟踪
+将原通过函数指针表的orchestration API调用，改为直接访问runtime内部结构与orchestrator接口，日志输出从平台日志接口替换为标准printf输出，简化调用链路与调试难度。
 
 #### 2.3.2.2 移除 extern "C" 和 visibility 属性
-
-**改造前**:
-```cpp
-extern "C" {
-__attribute__((visibility("default"))) 
-PTO2OrchestrationConfig aicpu_orchestration_config(...) { ... }
-
-__attribute__((visibility("default"))) 
-void aicpu_orchestration_entry(...) { ... }
-}
-```
-
-**改造后**:
-```cpp
-// 普通 C++ 函数，不需要 extern "C"
-static void build_paged_attention_graph(...) { ... }
-```
-
-**原因**:
-- 原代码需要被动态加载（dlopen），需要 C 链接和 visibility 控制
-- 单元测试是静态链接，不需要这些特性
+删除用于动态加载的`extern "C"`声明与默认可见性属性修饰，代码以普通静态链接C++函数形式存在，适配单元测试编译链接形态。
 
 ### 2.3.3 数据类型改造
-
-#### 2.3.3.1 BFLOAT16 → FLOAT32
-
-**改造前**:
-```cpp
-DataType data_type = DataType::BFLOAT16;  // 用例是float32的，这个考虑要如何扩展成其他类型
-```
-
-**改造后**:
-```cpp
-DataType data_type = DataType::FLOAT32;  // Use FLOAT32 for simulation instead of BFLOAT16
-```
-
-**原因**:
-- BFLOAT16 在模拟环境中可能不完全支持
-- FLOAT32 在所有平台上都有完整支持
-- 对于验证 orchestration 逻辑，数据类型不影响测试
-- 简化测试数据准备
+将数据类型从BFLOAT16统一切换为FLOAT32，依托FLOAT32的全平台兼容性，降低模拟环境数据处理复杂度，不影响编排逻辑验证。
 
 ### 2.3.4 添加测试框架
 
 #### 2.3.4.1 添加模拟执行函数
-
-**新增代码**:
-```cpp
-static int sim_drain_one_pass(PTO2Runtime* rt) {
-    int executed = 0;
-    for (int wt = 0; wt < PTO2_NUM_WORKER_TYPES; ++wt) {
-        int32_t task_id;
-        while ((task_id = rt->scheduler.get_ready_task((PTO2WorkerType)wt)) >= 0) {
-            rt->scheduler.mark_running(task_id);
-            // 关键：跳过实际 kernel 执行，直接标记完成
-            rt->scheduler.on_task_complete(task_id);
-            ++executed;
-        }
-    }
-    return executed;
-}
-
-static int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000) {
-    int total = 0;
-    for (int r = 0; r < max_rounds; ++r) {
-        int n = sim_drain_one_pass(rt);
-        total += n;
-        if (n == 0) break;
-    }
-    return total;
-}
-```
-
-**关键设计**:
-- **跳过 AICore 执行**: 不调用实际的 kernel 函数
-- **模拟完成**: 直接调用 `on_task_complete()` 标记任务完成
-- **验证依赖**: 仍然验证任务依赖关系和状态转换
-
-**原因**:
-- 单元测试只关注任务图构建，不关注计算结果
-- 不需要实现或模拟复杂的 AICore kernels
-- 测试更快速、更简单
+新增`sim_drain_one_pass`与`sim_run_all`模拟执行函数，直接标记任务完成状态，跳过真实AICore核函数执行，保留任务依赖与状态流转校验能力。
 
 #### 2.3.4.2 添加日志桩函数
-
-**新增代码**:
-```cpp
-extern "C" {
-void unified_log_error(const char* func, const char* fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[ERR]  %s: ", func); vfprintf(stderr, fmt, ap); fputc('\n', stderr);
-    va_end(ap);
-}
-// ... 其他日志函数 ...
-}
-```
-
-**原因**: 
-- 替换完整的日志系统，避免依赖平台特定实现
-- 简化测试环境
+实现`unified_log_error/warn/info/debug/always`等日志桩函数，替代平台原生日志系统，消除底层日志依赖。
 
 #### 2.3.4.3 添加测试宏
-
-**新增代码**:
-```cpp
-#define CHECK(cond)                                                          \
-    do {                                                                     \
-        if (!(cond)) {                                                       \
-            fprintf(stderr, "  FAIL [%s:%d]  %s\n",                         \
-                    __FILE__, __LINE__, #cond);                              \
-            g_fail++;                                                        \
-        } else {                                                             \
-            g_pass++;                                                        \
-        }                                                                    \
-    } while (0)
-
-#define TEST_BEGIN(name) printf("\n=== %s ===\n", (name))
-#define TEST_END() printf("  PASS: %d, FAIL: %d\n", g_pass, g_fail)
-```
-
-**原因**: 提供标准的测试框架，便于验证和报告结果
+定义`CHECK`断言宏、`TEST_BEGIN`/`TEST_END`用例宏，维护全局通过/失败计数，形成标准化测试断言与结果上报能力。
 
 ### 2.3.5 添加独立的 main 函数
-
-#### 2.3.5.1 测试数据准备
-
-**新增代码**:
-```cpp
-int main() {
-    // 创建模拟运行时
-    PTO2Runtime* rt = make_small_runtime();
-    
-    // 准备测试参数
-    const uint64_t batch = 2;
-    const uint64_t num_heads = 4;
-    const uint64_t head_dim = 8;
-    const uint64_t block_size = 4;
-    const uint64_t block_num = 2;
-    const float scale_value = 0.125f;
-    
-    // 分配测试缓冲区
-    void* query_buf = malloc(query_size);
-    void* key_cache_buf = malloc(key_cache_size);
-    // ... 更多缓冲区分配 ...
-    
-    // 初始化测试数据
-    memset(query_buf, 0, query_size);
-    // ...
-    
-    // 准备参数数组
-    uint64_t args[10] = { ... };
-    
-    // 执行测试
-    {  // Scope for Tensors
-        build_paged_attention_graph(rt, args, 10);
-        int executed = sim_run_all(rt);
-        // 验证结果
-        CHECK(executed == rt->orchestrator.tasks_submitted);
-    }
-    
-    // 清理
-    free(...);
-    pto2_runtime_destroy(rt);
-    
-    return (g_fail == 0) ? 0 : 1;
-}
-```
-
-**特点**:
-- 完整的测试生命周期管理
-- 内存分配和清理
-- 测试数据初始化
-- 结果验证和报告
+新增完整main函数，完成模拟运行时创建、测试参数与缓冲区初始化、测试用例执行、结果校验、资源释放与返回值判定，覆盖全测试生命周期。
 
 ### 2.3.6 添加 pto2_orchestrator_done 调用
+在编排流程末尾显式调用`pto2_orchestrator_done`，向调度器标记任务提交结束，保证调度流程完整。
 
-**改造前**:
-```cpp
-// 原代码中缺少此调用
-// 函数直接返回，没有标记 orchestration 完成
-```
+# 3. Batch Paged Attention 单元测试与代码重构
 
-**改造后**:
-```cpp
-pto2_orchestrator_done(&rt->orchestrator);  // 显式标记完成
-```
+## 3.1 概述
+在`test_paged_attention.cpp`基础上，新增`test_batch_paged_attention.cpp`测试文件，完成批处理场景编排验证，并对测试框架做统一重构，抽取公共代码、优化目录结构。
 
-**原因**: 
-- 确保调度器知道不再有新任务
-- 符合最佳实践（其他示例都调用了此函数）
+## 3.2 新增测试文件
 
----
+### 3.2.1 test_batch_paged_attention.cpp
+文件位于`orchestration_ut/tests`目录，源自batch版paged attention编排代码，支持IN_CORE_BATCH=16的批分块逻辑，提供基础功能与分块功能两个测试用例，采用FLOAT32模拟，接口形态与基础测试保持一致。
 
-## 2.4 代码行数对比
+## 3.3 代码重构
 
-| 项目 | 改造前 | 改造后 | 变化 |
-|------|--------|--------|------|
-| **总行数** | 288 | 499 | +211 |
-| **核心逻辑** | ~200 | ~200 | 基本不变 |
-| **性能分析** | ~80 | ~60 | -20 (使用 chrono) |
-| **测试框架** | 0 | ~150 | +150 |
-| **计时功能** | 0 | ~60 | +60 (chrono) |
-| **硬件特定** | ~30 | 0 | -30 |
+### 3.3.1 目录结构重组
+测试工程划分为`common`公共代码目录、`tests`测试用例目录、`build`构建输出目录，`main.cpp`作为统一入口，Makefile管理整体构建，实现公共逻辑与用例分离。
 
-**说明**: 
-- 核心 orchestration 逻辑基本保持不变
-- 移除了性能分析和硬件特定代码
-- 添加了完整的测试框架
+### 3.3.2 提取公共代码
+在`common`目录下维护测试宏、通用辅助函数、日志桩实现，`test_common.h/cpp`提供运行时创建、任务模拟、数据转换等通用能力，`test_log_stubs.cpp`提供统一日志桩。
 
----
+### 3.3.3 统一测试入口
+`main.cpp`集中声明并顺序执行所有测试用例，全局统计用例通过/失败数量，输出整体测试汇总结果，以返回值标识测试整体状态。
 
-## 2.5 编译和构建
+### 3.3.4 Makefile 更新
+Makefile按目录分组管理源文件，指定头文件路径，将可执行文件输出至`build`目录，支持一键编译、运行与清理。
 
-### 2.5.1 Makefile 集成
-
-**文件位置**: `simpler/tests/orchestration_ut/Makefile`
-
-**配置内容**:
-```makefile
-TEST_PA_SRCS := test_paged_attention.cpp
-TARGET_PA := test_paged_attention
-
-$(TARGET_PA): $(ALL_SRCS) $(TEST_PA_SRCS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -ldl
-	@echo "编译完成: $(TARGET_PA)"
-
-run-pa: $(TARGET_PA)
-	@echo ""
-	@./$(TARGET_PA)
-```
-
-### 2.5.2 编译命令
-
-```bash
-cd simpler/tests/orchestration_ut
-make build-pa    # 编译
-make run-pa      # 运行
-make clean       # 清理
-```
-
-**注意**: 文件位于 `simpler/tests/orchestration_ut/` 目录，而不是 `simpler/tests/unit/` 目录。
-
-### 2.5.3 测试输出示例
-
-```
-=== test_paged_attention_basic ===
-  batch = 2, num_heads = 4, head_dim = 8
-  Total tasks submitted: 18
-  Timing breakdown:
-    TensorPool init:     0 us
-    Orchestration:        28 us
-    Total:                29 us (0.029 ms)
-  Tasks submitted: 18
-  Simulation execution:  9 us (0.009 ms)
-  Tasks executed: 18
-  Test timing summary:
-    Graph building:     35 us (0.035 ms)
-    Task simulation:    10 us (0.010 ms)
-  Overall timing:
-    Runtime creation:     5367 us (5.367 ms)
-    Total test time:      6345 us (6.345 ms)
-  PASS: 5, FAIL: 0
-```
+## 3.4 测试结果
+编译过程无硬件依赖，可在通用x86环境完成构建与执行。所有用例任务提交数量符合预期，任务依赖与分块逻辑正常，任务模拟执行完整，全部断言通过，测试流程稳定可控。

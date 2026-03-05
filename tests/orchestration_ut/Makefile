@@ -2,8 +2,8 @@
 # Makefile — PTO Runtime2 Orchestrator-Scheduler 模拟测试
 #
 # 用法：
-#   cd simpler/tests/unit
-#   make          # 编译并运行
+#   cd simpler/tests/orchestration_ut
+#   make          # 编译并运行所有测试
 #   make build    # 只编译
 #   make run      # 只运行
 #   make clean    # 清理
@@ -16,6 +16,13 @@ ROOT := ../..
 RUNTIME_DIR := $(ROOT)/src/runtime/tensormap_and_ringbuffer/runtime
 ORCH_DIR    := $(ROOT)/src/runtime/tensormap_and_ringbuffer/orchestration
 
+# 测试源码目录
+COMMON_DIR := common
+TESTS_DIR  := tests
+
+# 构建输出目录
+BUILD_DIR := build
+
 # ─── 编译器 ─────────────────────────────────────────────────────────────────
 CXX      := g++
 CXXFLAGS := -std=c++17 -O0 -g \
@@ -26,10 +33,12 @@ CXXFLAGS := -std=c++17 -O0 -g \
 # 1. 运行时头文件（pto_runtime2.h, tensor.h, pto_types.h 等）
 # 2. 平台统一日志接口（common/unified_log.h）
 # 3. 编排目录（orchestration/common.h 供 assert_impl 使用）
+# 4. 测试公共头文件目录
 INCLUDES := \
     -I$(RUNTIME_DIR) \
     -I$(ROOT)/src/platform/include \
-    -I$(ORCH_DIR)
+    -I$(ORCH_DIR) \
+    -I$(COMMON_DIR)
 
 # ─── 待编译的运行时 .cpp 文件 ────────────────────────────────────────────────
 # 注意：
@@ -44,32 +53,42 @@ RUNTIME_SRCS := \
     $(RUNTIME_DIR)/pto_tensormap.cpp       \
     $(ORCH_DIR)/common.cpp
 
-# 测试源文件（含 unified_log 桩）
-TEST_PA_SRCS := test_paged_attention.cpp
+# 公共测试源文件
+COMMON_TEST_SRCS := \
+    $(COMMON_DIR)/test_common.cpp \
+    $(COMMON_DIR)/test_log_stubs.cpp
+
+# 测试源文件
+TEST_SRCS := \
+    $(TESTS_DIR)/test_paged_attention.cpp \
+    $(TESTS_DIR)/test_batch_paged_attention.cpp
+
+# 主程序源文件
+MAIN_SRC := main.cpp
+
+# 所有测试源文件
+ALL_TEST_SRCS := $(COMMON_TEST_SRCS) $(TEST_SRCS) $(MAIN_SRC)
 
 ALL_SRCS := $(RUNTIME_SRCS)
 
 # ─── 目标 ────────────────────────────────────────────────────────────────────
-TARGET_PA := test_paged_attention
+TARGET := $(BUILD_DIR)/test_orchestration
 
-.PHONY: all build run clean build-pa run-pa
+.PHONY: all build run clean
 
 all: build run
 
-build: build-pa
+build: $(TARGET)
 
-build-pa: $(TARGET_PA)
+$(TARGET): $(ALL_SRCS) $(ALL_TEST_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -ldl -pthread
+	@echo "编译完成: $(TARGET)"
 
-$(TARGET_PA): $(ALL_SRCS) $(TEST_PA_SRCS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -ldl
-	@echo "编译完成: $(TARGET_PA)"
-
-run: run-pa
-
-run-pa: $(TARGET_PA)
+run: $(TARGET)
 	@echo ""
-	@./$(TARGET_PA)
+	@$(TARGET)
 
 clean:
-	rm -f $(TARGET_PA) *.o
+	rm -rf $(BUILD_DIR)
 	@echo "清理完成"

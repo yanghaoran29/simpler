@@ -15,142 +15,21 @@
  *   - 只验证任务图的构建，不验证计算结果
  *
  * 编译：
- *   cd simpler/tests/unit && make build-pa && make run-pa
+ *   cd simpler/tests/orchestration_ut && make build && make run
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [1] 平台日志桩
-// ─────────────────────────────────────────────────────────────────────────────
-#include <cstdarg>
-#include <cstdio>
-
-extern "C" {
-
-void unified_log_error(const char* func, const char* fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[ERR]  %s: ", func); vfprintf(stderr, fmt, ap); fputc('\n', stderr);
-    va_end(ap);
-}
-
-void unified_log_warn(const char* func, const char* fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[WARN] %s: ", func); vfprintf(stderr, fmt, ap); fputc('\n', stderr);
-    va_end(ap);
-}
-
-void unified_log_info([[maybe_unused]] const char* func,
-                      [[maybe_unused]] const char* fmt, ...) {
-    // 测试期间静默 INFO
-}
-
-void unified_log_debug([[maybe_unused]] const char* func,
-                       [[maybe_unused]] const char* fmt, ...) {}
-
-void unified_log_always(const char* func, const char* fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    printf("[ALWY] %s: ", func); vprintf(fmt, ap); putchar('\n');
-    va_end(ap);
-}
-
-}  // extern "C"
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [2] Runtime 主头文件
+// [1] Runtime 主头文件
 // ─────────────────────────────────────────────────────────────────────────────
 #include "pto_runtime2.h"
+#include "test_common.h"
 #include <cstring>
 #include <algorithm>
 #include <cstdint>
 #include <chrono>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [3] 测试框架宏
-// ─────────────────────────────────────────────────────────────────────────────
-int g_pass = 0;
-int g_fail = 0;
-
-#define CHECK(cond)                                                          \
-    do {                                                                     \
-        if (!(cond)) {                                                       \
-            fprintf(stderr, "  FAIL [%s:%d]  %s\n",                         \
-                    __FILE__, __LINE__, #cond);                              \
-            g_fail++;                                                        \
-        } else {                                                             \
-            g_pass++;                                                        \
-        }                                                                    \
-    } while (0)
-
-#define TEST_BEGIN(name) printf("\n=== %s ===\n", (name))
-#define TEST_END() printf("  PASS: %d, FAIL: %d\n", g_pass, g_fail)
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [4] Helper functions
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Helper to encode float as uint64_t for scalar params
- */
-static uint64_t float_to_u64(float f) {
-    union {
-        float f32;
-        uint64_t u64;
-    } conv;
-    conv.u64 = 0;  // Clear upper bits
-    conv.f32 = f;
-    return conv.u64;
-}
-
-/**
- * Create a small runtime for testing
- */
-static PTO2Runtime* make_small_runtime() {
-    return pto2_runtime_create_custom(PTO2_MODE_SIMULATE,
-        /*task_window_size=*/512,        // Larger window for paged attention
-        /*heap_size=*/32 * 1024 * 1024,  // 32 MB for intermediate buffers
-        /*dep_list_size=*/1024);
-}
-
-/**
- * Simulate task execution by draining ready queues
- */
-static int sim_drain_one_pass(PTO2Runtime* rt) {
-    int executed = 0;
-    for (int wt = 0; wt < PTO2_NUM_WORKER_TYPES; ++wt) {
-        int32_t task_id;
-        while ((task_id = rt->scheduler.get_ready_task((PTO2WorkerType)wt)) >= 0) {
-            rt->scheduler.mark_running(task_id);
-            // Skip actual kernel execution, just mark as complete
-            rt->scheduler.on_task_complete(task_id);
-            ++executed;
-        }
-    }
-    return executed;
-}
-
-/**
- * Run simulation until all tasks complete
- */
-static int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000) {
-    auto t_start = std::chrono::high_resolution_clock::now();
-    
-    int total = 0;
-    for (int r = 0; r < max_rounds; ++r) {
-        int n = sim_drain_one_pass(rt);
-        total += n;
-        if (n == 0) break;
-    }
-    
-    auto t_end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
-    
-    printf("  Simulation execution:  %lld us (%.3f ms)\n", 
-           (long long)duration.count(), duration.count() / 1000.0);
-    
-    return total;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [5] Paged Attention Orchestration Logic (extracted from paged_attention_orch.cpp)
+// [2] Paged Attention Orchestration Logic (extracted from paged_attention_orch.cpp)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #define FUNC_QK_MATMUL 0
@@ -341,7 +220,7 @@ static void build_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [6] Test function
+// [3] Test function
 // ─────────────────────────────────────────────────────────────────────────────
 
 void test_paged_attention_basic() {
@@ -477,22 +356,4 @@ void test_paged_attention_basic() {
            (long long)duration_total.count(), duration_total.count() / 1000.0);
     
     TEST_END();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [7] Main function
-// ─────────────────────────────────────────────────────────────────────────────
-
-int main() {
-    printf("========================================\n");
-    printf("Paged Attention Orchestration Test\n");
-    printf("========================================\n");
-    
-    test_paged_attention_basic();
-    
-    printf("\n========================================\n");
-    printf("Summary: PASS=%d, FAIL=%d\n", g_pass, g_fail);
-    printf("========================================\n");
-    
-    return (g_fail == 0) ? 0 : 1;
 }
