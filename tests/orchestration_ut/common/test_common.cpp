@@ -24,7 +24,7 @@ uint64_t float_to_u64(float f) {
 /**
  * Create a small runtime for testing
  */
-PTO2Runtime* make_small_runtime() {
+PTO2Runtime* make_runtime() {
     return pto2_runtime_create_custom(PTO2_MODE_SIMULATE,
         /*task_window_size=*/512,        // Larger window for paged attention
         /*heap_size=*/32 * 1024 * 1024,  // 32 MB for intermediate buffers

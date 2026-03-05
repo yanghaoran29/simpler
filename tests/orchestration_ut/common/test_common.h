@@ -34,7 +34,7 @@ extern int g_fail;
 
 // Common helper functions
 uint64_t float_to_u64(float f);
-PTO2Runtime* make_small_runtime();
+PTO2Runtime* make_runtime();
 int sim_drain_one_pass(PTO2Runtime* rt);
 int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000);
 

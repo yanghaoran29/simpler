@@ -11,7 +11,7 @@
  *   5. Chunked batched architecture 正确工作
  *
  * 模拟策略：
- *   - 使用 make_small_runtime() 创建模拟运行时
+ *   - 使用 make_runtime() 创建模拟运行时
  *   - 使用 sim_run_all() 模拟任务执行（跳过 AICore kernel 执行）
  *   - 只验证任务图的构建，不验证计算结果
  *
@@ -250,7 +250,7 @@ void test_batch_paged_attention_basic() {
 
     auto t_test_start = std::chrono::high_resolution_clock::now();
 
-    PTO2Runtime* rt = make_small_runtime();
+    PTO2Runtime* rt = make_runtime();
     CHECK(rt != nullptr);
     if (!rt) return;
 
@@ -385,7 +385,7 @@ void test_batch_paged_attention_chunked() {
 
     auto t_test_start = std::chrono::high_resolution_clock::now();
 
-    PTO2Runtime* rt = make_small_runtime();
+    PTO2Runtime* rt = make_runtime();
     CHECK(rt != nullptr);
     if (!rt) return;
 

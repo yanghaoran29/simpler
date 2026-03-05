@@ -25,7 +25,7 @@ BUILD_DIR := build
 
 # ─── 编译器 ─────────────────────────────────────────────────────────────────
 CXX      := g++
-CXXFLAGS := -std=c++17 -O0 -g \
+CXXFLAGS := -std=c++17 -O0 -ggdb3 -fno-omit-frame-pointer \
             -Wall -Wextra -Wno-unused-parameter \
             -DPTO2_PROFILING=0
 
