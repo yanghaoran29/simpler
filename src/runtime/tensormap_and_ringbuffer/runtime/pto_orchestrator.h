@@ -245,6 +245,8 @@ struct PTO2OrchProfilingData {
     uint64_t finalize_cycle;
     uint64_t scope_end_cycle;
     int64_t  submit_count;
+    uint64_t start_time;   // cycle counter at first pto2_submit_task() entry
+    uint64_t end_time;     // cycle counter at last pto2_submit_task() exit
 };
 
 /**

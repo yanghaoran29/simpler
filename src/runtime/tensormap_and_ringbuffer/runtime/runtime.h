@@ -143,6 +143,17 @@ public:
     int sche_cpu_num;  // Number of AICPU threads for scheduling
     int ready_queue_shards;  // Number of ready queue shards (1..MAX_AICPU_THREADS, default MAX-1)
 
+    // CPU affinity configuration for AICPU threads
+    // If cpu_affinity_enabled is true, bind threads to specific CPU cores
+    // - Orchestrator thread (when sche_cpu_num==4, thread_idx=3) binds to orch_cpu_core
+    // - Scheduler threads bind to sched_cpu_cores[thread_idx]
+    // Default behavior (when enabled but cores not specified):
+    // - Orchestrator: core 0
+    // - Schedulers: cores 1, 2, 3, ... (1-based sequential)
+    bool cpu_affinity_enabled;
+    int orch_cpu_core;  // CPU core for orchestrator thread (-1 = use default)
+    int sched_cpu_cores[PLATFORM_MAX_AICPU_THREADS];  // CPU cores for scheduler threads (-1 = use default)
+
     // Ring buffer size overrides (0 = use compile-time defaults)
     uint64_t pto2_task_window_size;
     uint64_t pto2_heap_size;
