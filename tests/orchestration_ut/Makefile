@@ -29,6 +29,15 @@ CXXFLAGS := -std=c++17 -O0 -ggdb3 -fno-omit-frame-pointer \
             -Wall -Wextra -Wno-unused-parameter \
             -DPTO2_PROFILING=1
 
+# ─── 静态链接库路径 ──────────────────────────────────────────────────────────
+STATIC_LIBSTDCXX := $(HOME)/Ascend/cann-8.5.0/tools/hcc/aarch64-target-linux-gnu/lib64/libstdc++.a
+STATIC_LIBGCC := $(shell g++ -print-file-name=libgcc.a)
+STATIC_LIBGCC_EH := $(shell g++ -print-file-name=libgcc_eh.a)
+STATIC_LIBM := /usr/lib64/libm.a
+STATIC_LIBC := /usr/lib64/libc.a
+STATIC_LIBDL := /usr/lib64/libdl.a
+STATIC_LIBPTHREAD := /usr/lib64/libpthread.a
+
 # ─── Include 路径 ────────────────────────────────────────────────────────────
 # 1. 运行时头文件（pto_runtime2.h, tensor.h, pto_types.h 等）
 # 2. 平台统一日志接口（common/unified_log.h）
@@ -83,8 +92,13 @@ build: $(TARGET)
 
 $(TARGET): $(ALL_SRCS) $(ALL_TEST_SRCS)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -ldl -pthread
-	@echo "编译完成: $(TARGET)"
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ \
+		-nodefaultlibs \
+		-Wl,--start-group \
+		$(STATIC_LIBSTDCXX) $(STATIC_LIBM) $(STATIC_LIBPTHREAD) $(STATIC_LIBDL) \
+		$(STATIC_LIBC) $(STATIC_LIBGCC) $(STATIC_LIBGCC_EH) \
+		-Wl,--end-group
+	@echo "编译完成: $(TARGET) (完全静态链接)"
 
 run: $(TARGET)
 	@echo ""

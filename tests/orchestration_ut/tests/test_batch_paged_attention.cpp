@@ -231,8 +231,6 @@ static void build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, i
 void test_batch_paged_attention_basic() {
     TEST_BEGIN("test_batch_paged_attention_basic");
 
-    auto t_test_start = std::chrono::high_resolution_clock::now();
-
     PTO2Runtime* rt = make_runtime();
     CHECK(rt != nullptr);
     if (!rt) return;
@@ -351,8 +349,6 @@ void test_batch_paged_attention_basic() {
 
 void test_batch_paged_attention_chunked() {
     TEST_BEGIN("test_batch_paged_attention_chunked");
-
-    auto t_test_start = std::chrono::high_resolution_clock::now();
 
     PTO2Runtime* rt = make_runtime();
     CHECK(rt != nullptr);

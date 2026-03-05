@@ -208,9 +208,7 @@ static void build_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg
 
 void test_paged_attention_basic() {
     TEST_BEGIN("test_paged_attention_basic");
-    
-    auto t_test_start = std::chrono::high_resolution_clock::now();
-    
+
     PTO2Runtime* rt = make_runtime();
     CHECK(rt != nullptr);
     if (!rt) return;
