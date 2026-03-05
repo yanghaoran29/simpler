@@ -45,6 +45,8 @@ static uint64_t g_orch_finalize_cycle = 0;   // scheduler init + SM update
 static uint64_t g_orch_scope_end_cycle = 0;  // scope_end overhead
 static int64_t  g_orch_submit_count = 0;
 static uint32_t g_orch_submit_idx = 0;
+static uint64_t g_orch_start_time = 0;   // cycle counter at first pto2_submit_task() entry
+static uint64_t g_orch_end_time = 0;     // cycle counter at last pto2_submit_task() exit
 #define CYCLE_COUNT_START() uint64_t _t0 = get_sys_cnt_aicpu(), _t1
 #define CYCLE_COUNT_LAP(acc) do { _t1 = get_sys_cnt_aicpu(); acc += (_t1 - _t0); _t0 = _t1; } while(0)
 #define CYCLE_COUNT_LAP_RECORD(acc, phase_id) do { \
@@ -204,6 +206,9 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 void pto2_submit_task(
     PTO2OrchestratorState* orch, int32_t kernel_id, PTO2WorkerType worker_type, PTOParam* params, int32_t num_params) {
     CYCLE_COUNT_START();
+#if PTO2_PROFILING
+    if (g_orch_submit_count == 0) g_orch_start_time = _t0;
+#endif
 
     // === STEP 0: Sync TensorMap validity and optional cleanup ===
     orch->tensor_map.sync_tensormap();
@@ -399,6 +404,9 @@ void pto2_submit_task(
     orch->sm_handle->header->current_task_index.store(orch->task_ring.current_index, std::memory_order_release);
 
     CYCLE_COUNT_LAP_RECORD(g_orch_finalize_cycle, AicpuPhaseId::ORCH_FINALIZE);
+#if PTO2_PROFILING
+    g_orch_end_time = _t1;
+#endif
 
     orch->tasks_submitted++;
 #if PTO2_PROFILING
@@ -473,6 +481,8 @@ PTO2OrchProfilingData pto2_orchestrator_get_profiling() {
     d.finalize_cycle = g_orch_finalize_cycle;
     d.scope_end_cycle = g_orch_scope_end_cycle;
     d.submit_count = g_orch_submit_count;
+    d.start_time = g_orch_start_time;
+    d.end_time = g_orch_end_time;
 
     // Reset
     g_orch_sync_cycle = g_orch_alloc_cycle = g_orch_params_cycle = 0;
@@ -480,6 +490,7 @@ PTO2OrchProfilingData pto2_orchestrator_get_profiling() {
     g_orch_fanin_cycle = g_orch_finalize_cycle = g_orch_scope_end_cycle = 0;
     g_orch_submit_count = 0;
     g_orch_submit_idx = 0;
+    g_orch_start_time = g_orch_end_time = 0;
     return d;
 }
 #endif

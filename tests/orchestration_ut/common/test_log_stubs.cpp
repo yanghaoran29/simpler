@@ -36,3 +36,8 @@ void unified_log_always(const char* func, const char* fmt, ...) {
 }
 
 }  // extern "C"
+
+// Stub for AICPU orchestrator phase profiling (no-op in unit test context,
+// which has no shared memory profiling buffer).
+#include "common/perf_profiling.h"
+void perf_aicpu_record_orch_phase(AicpuPhaseId, uint64_t, uint64_t, uint32_t) {}

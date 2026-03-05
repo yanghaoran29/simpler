@@ -6,6 +6,7 @@
 
 #include "test_common.h"
 #include "pto_runtime2.h"
+#include "common/platform_config.h"
 #include <chrono>
 
 /**
@@ -69,3 +70,30 @@ int sim_run_all(PTO2Runtime* rt, int max_rounds) {
 
     return total;
 }
+
+#if PTO2_PROFILING
+void print_orch_profiling() {
+    PTO2OrchProfilingData pd = pto2_orchestrator_get_profiling();
+    uint64_t orch_total = pd.sync_cycle + pd.alloc_cycle + pd.params_cycle
+                        + pd.lookup_cycle + pd.heap_cycle + pd.insert_cycle
+                        + pd.fanin_cycle + pd.finalize_cycle + pd.scope_end_cycle;
+    if (orch_total == 0) orch_total = 1;
+    uint64_t elapsed = pd.end_time - pd.start_time;
+    printf("  === Orchestrator Profiling (%lld submits) ===\n", (long long)pd.submit_count);
+    printf("    start_time: %8.3f us\n", cycles_to_us(pd.start_time));
+    printf("    end_time:   %8.3f us\n", cycles_to_us(pd.end_time));
+    printf("    sync:       %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.sync_cycle),     pd.sync_cycle     * 100.0 / orch_total);
+    printf("    alloc:      %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.alloc_cycle),    pd.alloc_cycle    * 100.0 / orch_total);
+    printf("    params:     %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.params_cycle),   pd.params_cycle   * 100.0 / orch_total);
+    printf("    lookup:     %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.lookup_cycle),   pd.lookup_cycle   * 100.0 / orch_total);
+    printf("    heap:       %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.heap_cycle),     pd.heap_cycle     * 100.0 / orch_total);
+    printf("    insert:     %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.insert_cycle),   pd.insert_cycle   * 100.0 / orch_total);
+    printf("    fanin:      %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.fanin_cycle),    pd.fanin_cycle    * 100.0 / orch_total);
+    printf("    finalize:   %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.finalize_cycle), pd.finalize_cycle * 100.0 / orch_total);
+    printf("    scope:      %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.scope_end_cycle),pd.scope_end_cycle* 100.0 / orch_total);
+    printf("    others:     %8.3f us\n", cycles_to_us(elapsed) - cycles_to_us(orch_total));
+    printf("    total:      %8.3f us\n", cycles_to_us(orch_total));
+}
+#else
+void print_orch_profiling() {}
+#endif

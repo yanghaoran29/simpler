@@ -27,7 +27,7 @@ BUILD_DIR := build
 CXX      := g++
 CXXFLAGS := -std=c++17 -O0 -ggdb3 -fno-omit-frame-pointer \
             -Wall -Wextra -Wno-unused-parameter \
-            -DPTO2_PROFILING=0
+            -DPTO2_PROFILING=1
 
 # ─── Include 路径 ────────────────────────────────────────────────────────────
 # 1. 运行时头文件（pto_runtime2.h, tensor.h, pto_types.h 等）
@@ -51,7 +51,8 @@ RUNTIME_SRCS := \
     $(RUNTIME_DIR)/pto_ring_buffer.cpp     \
     $(RUNTIME_DIR)/pto_shared_memory.cpp   \
     $(RUNTIME_DIR)/pto_tensormap.cpp       \
-    $(ORCH_DIR)/common.cpp
+    $(ORCH_DIR)/common.cpp                 \
+    $(ROOT)/src/platform/a2a3sim/aicpu/device_time.cpp
 
 # 公共测试源文件
 COMMON_TEST_SRCS := \

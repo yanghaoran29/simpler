@@ -24,10 +24,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "pto_runtime2.h"
 #include "test_common.h"
+#include "common/platform_config.h"
 #include <cstring>
 #include <algorithm>
 #include <cstdint>
-#include <chrono>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // [2] Batch Paged Attention Orchestration Logic
@@ -44,20 +44,14 @@
  * Batch Paged Attention orchestration function
  *
  * This is adapted from batch_paged_attention/paged_attention_orch.cpp, but:
- * - Removed hardware-specific cycle counting
  * - Uses PTO2Runtime directly instead of PTO2Runtime* from orchestration API
  * - All Tensor objects must be in a local scope to ensure proper destruction
- * - Uses chrono for timing instead of hardware cycle counting
  * - Implements chunked batched architecture with IN_CORE_BATCH
  */
 static void build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;  // Suppress unused warning
 
-    auto t_start = std::chrono::high_resolution_clock::now();
-
     TensorPool::set_instance(&rt->orchestrator.tensor_pool);
-
-    auto t_tensor_pool = std::chrono::high_resolution_clock::now();
 
     // Extract device pointers
     void* host_query = reinterpret_cast<void*>(args[0]);
@@ -224,21 +218,10 @@ static void build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, i
 
     pto2_orchestrator_done(&rt->orchestrator);
 
-    auto t_end = std::chrono::high_resolution_clock::now();
-
-    auto duration_total = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
-    auto duration_tensor_pool = std::chrono::duration_cast<std::chrono::microseconds>(t_tensor_pool - t_start);
-    auto duration_orchestration = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_tensor_pool);
-
     printf("  Total tasks submitted: %d\n", total_tasks);
     printf("  Expected tasks: %lu (num_chunks=%lu, max_bn=%lu, IN_CORE_BATCH=%lu)\n",
            (unsigned long)(num_chunks * q_loop * (1 + max_bn * 4)),
            (unsigned long)num_chunks, (unsigned long)max_bn, (unsigned long)IN_CORE_BATCH);
-    printf("  Timing breakdown:\n");
-    printf("    TensorPool init:     %lld us\n", (long long)duration_tensor_pool.count());
-    printf("    Orchestration:        %lld us\n", (long long)duration_orchestration.count());
-    printf("    Total:                %lld us (%.3f ms)\n",
-           (long long)duration_total.count(), duration_total.count() / 1000.0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -254,7 +237,9 @@ void test_batch_paged_attention_basic() {
     CHECK(rt != nullptr);
     if (!rt) return;
 
-    auto t_runtime_created = std::chrono::high_resolution_clock::now();
+#if PTO2_PROFILING
+    printf("  Profiling enabled\n");
+#endif
 
     // Prepare test data
     const uint64_t batch = 2;
@@ -324,13 +309,12 @@ void test_batch_paged_attention_basic() {
     };
 
     {  // Scope for Tensors to ensure proper destruction order
-        auto t_graph_start = std::chrono::high_resolution_clock::now();
-
         // Build the task graph
         build_batch_paged_attention_graph(rt, args, 10);
 
-        auto t_graph_end = std::chrono::high_resolution_clock::now();
-        auto t_sim_start = std::chrono::high_resolution_clock::now();
+#if PTO2_PROFILING
+        print_orch_profiling();
+#endif
 
         // Verify tasks were submitted
         CHECK(rt->orchestrator.tasks_submitted > 0);
@@ -340,21 +324,16 @@ void test_batch_paged_attention_basic() {
         int executed = sim_run_all(rt);
         printf("  Tasks executed: %d\n", executed);
 
-        auto t_sim_end = std::chrono::high_resolution_clock::now();
-
         // Verify all tasks completed
         CHECK(executed == rt->orchestrator.tasks_submitted);
         CHECK(rt->scheduler.tasks_completed.load() == executed);
         CHECK(rt->scheduler.tasks_consumed.load() == executed);
 
-        // Timing summary
-        auto duration_graph = std::chrono::duration_cast<std::chrono::microseconds>(t_graph_end - t_graph_start);
-        auto duration_sim = std::chrono::duration_cast<std::chrono::microseconds>(t_sim_end - t_sim_start);
-        printf("  Test timing summary:\n");
-        printf("    Graph building:     %lld us (%.3f ms)\n",
-               (long long)duration_graph.count(), duration_graph.count() / 1000.0);
-        printf("    Task simulation:    %lld us (%.3f ms)\n",
-               (long long)duration_sim.count(), duration_sim.count() / 1000.0);
+#if PTO2_PROFILING
+        printf("  === Scheduler Statistics ===\n");
+        pto2_scheduler_print_stats(&rt->scheduler);
+        pto2_scheduler_print_queues(&rt->scheduler);
+#endif
     }  // Tensors destructed here
 
     // Cleanup
@@ -366,16 +345,6 @@ void test_batch_paged_attention_basic() {
     free(context_lens);
 
     pto2_runtime_destroy(rt);
-
-    auto t_test_end = std::chrono::high_resolution_clock::now();
-    auto duration_runtime = std::chrono::duration_cast<std::chrono::microseconds>(t_runtime_created - t_test_start);
-    auto duration_total = std::chrono::duration_cast<std::chrono::microseconds>(t_test_end - t_test_start);
-
-    printf("  Overall timing:\n");
-    printf("    Runtime creation:     %lld us (%.3f ms)\n",
-           (long long)duration_runtime.count(), duration_runtime.count() / 1000.0);
-    printf("    Total test time:      %lld us (%.3f ms)\n",
-           (long long)duration_total.count(), duration_total.count() / 1000.0);
 
     TEST_END();
 }
@@ -389,7 +358,9 @@ void test_batch_paged_attention_chunked() {
     CHECK(rt != nullptr);
     if (!rt) return;
 
-    auto t_runtime_created = std::chrono::high_resolution_clock::now();
+#if PTO2_PROFILING
+    printf("  Profiling enabled\n");
+#endif
 
     // Prepare test data with batch > IN_CORE_BATCH to test chunking
     const uint64_t batch = 32;  // Will be split into 2 chunks (IN_CORE_BATCH=16)
@@ -459,13 +430,12 @@ void test_batch_paged_attention_chunked() {
     };
 
     {  // Scope for Tensors to ensure proper destruction order
-        auto t_graph_start = std::chrono::high_resolution_clock::now();
-
         // Build the task graph
         build_batch_paged_attention_graph(rt, args, 10);
 
-        auto t_graph_end = std::chrono::high_resolution_clock::now();
-        auto t_sim_start = std::chrono::high_resolution_clock::now();
+#if PTO2_PROFILING
+        print_orch_profiling();
+#endif
 
         // Verify tasks were submitted
         CHECK(rt->orchestrator.tasks_submitted > 0);
@@ -475,21 +445,16 @@ void test_batch_paged_attention_chunked() {
         int executed = sim_run_all(rt);
         printf("  Tasks executed: %d\n", executed);
 
-        auto t_sim_end = std::chrono::high_resolution_clock::now();
-
         // Verify all tasks completed
         CHECK(executed == rt->orchestrator.tasks_submitted);
         CHECK(rt->scheduler.tasks_completed.load() == executed);
         CHECK(rt->scheduler.tasks_consumed.load() == executed);
 
-        // Timing summary
-        auto duration_graph = std::chrono::duration_cast<std::chrono::microseconds>(t_graph_end - t_graph_start);
-        auto duration_sim = std::chrono::duration_cast<std::chrono::microseconds>(t_sim_end - t_sim_start);
-        printf("  Test timing summary:\n");
-        printf("    Graph building:     %lld us (%.3f ms)\n",
-               (long long)duration_graph.count(), duration_graph.count() / 1000.0);
-        printf("    Task simulation:    %lld us (%.3f ms)\n",
-               (long long)duration_sim.count(), duration_sim.count() / 1000.0);
+#if PTO2_PROFILING
+        printf("  === Scheduler Statistics ===\n");
+        pto2_scheduler_print_stats(&rt->scheduler);
+        pto2_scheduler_print_queues(&rt->scheduler);
+#endif
     }  // Tensors destructed here
 
     // Cleanup
@@ -501,16 +466,6 @@ void test_batch_paged_attention_chunked() {
     free(context_lens);
 
     pto2_runtime_destroy(rt);
-
-    auto t_test_end = std::chrono::high_resolution_clock::now();
-    auto duration_runtime = std::chrono::duration_cast<std::chrono::microseconds>(t_runtime_created - t_test_start);
-    auto duration_total = std::chrono::duration_cast<std::chrono::microseconds>(t_test_end - t_test_start);
-
-    printf("  Overall timing:\n");
-    printf("    Runtime creation:     %lld us (%.3f ms)\n",
-           (long long)duration_runtime.count(), duration_runtime.count() / 1000.0);
-    printf("    Total test time:      %lld us (%.3f ms)\n",
-           (long long)duration_total.count(), duration_total.count() / 1000.0);
 
     TEST_END();
 }
