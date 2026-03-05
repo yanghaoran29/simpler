@@ -27,6 +27,13 @@ Runtime::Runtime() {
     pto2_heap_size = 0;
     pto2_dep_list_pool_size = 0;
 
+    // Initialize CPU affinity configuration (disabled by default)
+    cpu_affinity_enabled = false;
+    orch_cpu_core = -1;  // -1 means use default (core 0)
+    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) {
+        sched_cpu_cores[i] = -1;  // -1 means use default (core i+1)
+    }
+
     // Initialize tensor pairs
     tensor_pair_count = 0;
 

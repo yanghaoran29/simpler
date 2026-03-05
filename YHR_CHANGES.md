@@ -1,5 +1,3 @@
-# YHR 代码改造文档
-
 # 1. 静态链接改造
 
 ## 1.1 概述
@@ -191,7 +189,83 @@ int write_bytes_to_file(const char* path, const uint8_t* data, size_t size) {
 4. 构建 aicpu.a 和 aicore.a (包含运行时 + 内核 + 编排)
 5. 构建 host_runtime.so (链接 aicpu.a 和 aicore.a)
 
-## 注意事项
+## 1.4 保留符号信息支持 perf 分析
+### 1.4.1 修改文件
+**文件路径**：`tests/orchestration_ut/Makefile`
+
+### 修改内容
+将 `CXXFLAGS` 编译选项调整，增强调试与性能分析能力：
+```makefile
+# 修改前
+CXXFLAGS := -std=c++17 -O0 -g \
+            -Wall -Wextra -Wno-unused-parameter \
+            -DPTO2_PROFILING=0
+
+# 修改后
+CXXFLAGS := -std=c++17 -O0 -ggdb3 -fno-omit-frame-pointer \
+            -Wall -Wextra -Wno-unused-parameter \
+            -DPTO2_PROFILING=0
+```
+
+### 1.4.2 关键选项说明
+| 编译选项 | 核心作用 |
+|----------|----------|
+| `-ggdb3` | 生成最完整的 GDB/DWARF 调试信息，包含宏展开记录，确保 `perf annotate` 符号解析精准 |
+| `-fno-omit-frame-pointer` | 保留帧指针寄存器（RBP/FP），避免 `perf` 调用栈展开时出现截断 |
+
+### 1.4.3 使用方式
+```bash
+cd tests/orchestration_ut
+make build
+perf record -g ./build/test_orchestration  # 采集性能数据
+perf report                                 # 分析性能报告
+```
+
+## 1.5 静态链接设计（tests/orchestration_ut）
+### 1.5.1 原始链接方式
+```makefile
+$(CXX) ... -o $@ -ldl -pthread
+```
+
+### 1.5.2 改造后（完全静态链接）
+```makefile
+# 静态库路径配置
+STATIC_LIBSTDCXX := $(HOME)/Ascend/cann-8.5.0/tools/hcc/aarch64-target-linux-gnu/lib64/libstdc++.a
+STATIC_LIBGCC := $(shell g++ -print-file-name=libgcc.a)
+STATIC_LIBGCC_EH := $(shell g++ -print-file-name=libgcc_eh.a)
+STATIC_LIBM := /usr/lib64/libm.a
+STATIC_LIBC := /usr/lib64/libc.a
+STATIC_LIBDL := /usr/lib64/libdl.a
+STATIC_LIBPTHREAD:= /usr/lib64/libpthread.a
+
+# 静态链接命令
+$(CXX) ... -o $@ \
+-nodefaultlibs \
+-Wl,--start-group \
+$(STATIC_LIBSTDCXX) $(STATIC_LIBM) $(STATIC_LIBPTHREAD) $(STATIC_LIBDL) \
+$(STATIC_LIBC) $(STATIC_LIBGCC) $(STATIC_LIBGCC_EH) \
+-Wl,--end-group
+```
+
+### 1.5.3 关键技术点
+| 链接选项 | 作用 |
+|----------|------|
+| `-nodefaultlibs` | 禁用编译器默认附加的库，改为手动指定静态库 |
+| `-Wl,--start-group/--end-group` | 允许链接器在组内多次扫描，解决静态库循环依赖问题 |
+| `libstdc++.a` | 来源：Ascend CANN 工具链（适配 aarch64 架构） |
+| `libm/libc/libdl/libpthread.a` | 来源：EulerOS 系统 `/usr/lib64/` 目录 |
+
+### 1.5.4 验证结果
+```bash
+$ file build/test_orchestration
+ELF 64-bit LSB executable, ARM aarch64, statically linked, with debug_info
+$ ldd build/test_orchestration
+not a dynamic executable
+$ ./build/test_orchestration
+All Tests Summary: PASS=15, FAIL=0
+```
+
+## 1.6 注意事项
 
 1. **符号冲突处理**:
    - 使用 `-Wl,--allow-multiple-definition` 允许多重定义
@@ -231,8 +305,6 @@ int write_bytes_to_file(const char* path, const uint8_t* data, size_t size) {
   - `simpler/tests/orchestration_ut/Makefile` (已包含构建规则)
   - `simpler/tests/unit/Makefile` (已移除 test_sim_orch_sched 相关内容)
   - `simpler/ci.sh` (已移除上板测试调用)
-
-
 
 ## 2.2 改造前后对比
 
@@ -283,7 +355,109 @@ simpler/tests/unit/
 - 使用 C++ chrono 库进行计时（替代硬件 cycle counting）
 - 公共代码与测试用例分离，目录结构更清晰
 
+## 2.2.2 Orchestration 单元测试 Profiling 集成
+### 2.2.2.1 背景
+`simpler/tests/orchestration_ut` 是 PTO Runtime 编排调度层的单元测试，可在无 AICore 硬件依赖的情况下，验证任务图构建、依赖关系及 Scope 生命周期。
 
+### 2.2.2.2 改动文件清单
+#### 1. `tests/orchestration_ut/Makefile`
+| 配置项 | 修改前 | 修改后 |
+|--------|--------|--------|
+| `CXXFLAGS` | `-DPTO2_PROFILING=0` | `-DPTO2_PROFILING=1` |
+| `RUNTIME_SRCS` | 无 `device_time.cpp` | 新增 `src/platform/a2a3sim/aicpu/device_time.cpp` |
+
+> 补充说明：`device_time.cpp` 提供 `get_sys_cnt_aicpu()` 的模拟实现（基于 `std::chrono`），是 `pto_orchestrator.cpp` 中 `CYCLE_COUNT_START()` 宏的底层计时函数。
+
+#### 2. `tests/orchestration_ut/common/test_log_stubs.cpp`
+新增空实现桩函数，避免链接失败：
+```cpp
+#include "common/perf_profiling.h"
+// 单元测试无共享内存 profiling buffer，用空实现替代
+void perf_aicpu_record_orch_phase(AicpuPhaseId, uint64_t, uint64_t, uint32_t) {}
+```
+> 原因：启用 `PTO2_PROFILING=1` 后，`pto_orchestrator.cpp` 中的 `CYCLE_COUNT_LAP_RECORD` 宏会调用该函数，而完整 AICPU 运行时中该函数负责写入共享内存，单元测试场景需规避此依赖。
+
+#### 3. 测试用例文件（2个）
+`tests/orchestration_ut/tests/test_paged_attention.cpp`、`tests/orchestration_ut/tests/test_batch_paged_attention.cpp` 做了相同结构改动：
+- 新增 `#include "common/platform_config.h"`（提供 `cycles_to_us()` 转换函数）；
+- 图构建完成后，调用 `pto2_orchestrator_get_profiling()` 打印 orchestrator 各子步骤 cycle 分解；
+- 模拟执行完成后，调用 `pto2_scheduler_print_stats()`/`pto2_scheduler_print_queues()` 打印调度器统计；
+- 所有新增 profiling 代码均包裹在 `#if PTO2_PROFILING` 编译守卫中，支持编译期关闭。
+
+### 2.2.2.3 Profiling 机制原理
+#### 1. 两层 profiling 架构
+```
+┌─────────────────────────────────────────────────────┐
+│  Layer 1: Orchestrator 子步骤 cycle 分解             │
+│  数据来源：pto_orchestrator.cpp 全局累积计数器       │
+│  接口：pto2_orchestrator_get_profiling()             │
+│                                                      │
+│  核心子步骤：                                         │
+│    sync    — TensorMap 同步等待                      │
+│    alloc   — TaskRing slot 分配                      │
+│    params  — 参数拷贝                                │
+│    lookup  — TensorMap producer 查找                 │
+│    heap    — HeapRing buffer 分配                    │
+│    insert  — TensorMap producer 注册                 │
+│    fanin   — 依赖边建立 (fanin/fanout)               │
+│    finalize — 任务状态初始化 + SM 更新               │
+│    scope   — scope_end 开销                         │
+├─────────────────────────────────────────────────────┤
+│  Layer 2: Scheduler 统计                             │
+│  接口：pto2_scheduler_print_stats()                  │
+│        pto2_scheduler_print_queues()                 │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 2. Cycle 计时逻辑
+- `CYCLE_COUNT_START()`：在 `pto2_submit_task()` 入口调用 `get_sys_cnt_aicpu()` 记录计时起点；
+- `CYCLE_COUNT_LAP_RECORD(acc, phase_id)`：在子步骤边界记录时间增量，并累加到对应全局计数器；
+- `cycles_to_us(cycles)`：按 `PLATFORM_PROF_SYS_CNT_FREQ = 50 MHz` 将 cycle 数转换为微秒；
+- 仿真环境：`a2a3sim` 下 `get_sys_cnt_aicpu()` 通过 `std::chrono::high_resolution_clock` 模拟 50 MHz 计数器，输出微秒值反映真实 CPU 执行时间。
+
+### 2.2.2.4 典型输出示例
+```
+=== test_paged_attention_basic ===
+  Profiling enabled
+  batch = 2, num_heads = 4, head_dim = 8
+  Total tasks submitted: 18
+  === Orchestrator Profiling (18 submits) ===
+    sync:      1.220 us  ( 4.2%)
+    alloc:     2.040 us  ( 7.1%)
+    params:    2.660 us  ( 9.2%)
+    lookup:    6.640 us  (23.0%)   ← TensorMap 查找占比最高
+    heap:      2.400 us  ( 8.3%)
+    insert:    5.480 us  (19.0%)   ← TensorMap 注册占比次高
+    fanin:     3.620 us  (12.6%)
+    finalize:  3.580 us  (12.4%)
+    scope:     1.180 us  ( 4.1%)
+    total:     28.820 us
+  Tasks submitted: 18
+  Tasks executed: 18
+  === Scheduler Statistics ===
+  ...
+  PASS: 5, FAIL: 0
+```
+> 关键结论：`lookup`（TensorMap 查找）和 `insert`（依赖注册）合计占比约 42%，是 orchestrator 优化的核心方向，与硬件侧实测规律一致。
+
+### 2.2.2.5 编译与运行命令
+```bash
+cd simpler/tests/orchestration_ut
+make          # 编译并运行（输出 profiling 数据）
+make build    # 仅编译
+make run      # 仅运行
+make clean    # 清理编译产物
+```
+> 关闭 profiling：将 `Makefile` 中 `-DPTO2_PROFILING=1` 改回 `-DPTO2_PROFILING=0` 即可。
+
+### 2.2.2.6 单元测试 vs 硬件侧 Profiling 对比
+| 对比项 | 单元测试（本文档） | 硬件侧（a2a3 平台） |
+|--------|--------------------|---------------------|
+| `get_sys_cnt_aicpu()` | `std::chrono` 模拟 50 MHz | 读取硬件系统计数器寄存器 |
+| `perf_aicpu_record_orch_phase()` | no-op 桩函数 | 写入共享内存 phase buffer |
+| Orchestrator 数据获取 | 直接读取进程内全局变量 | host 通过设备 log 收集 `AicpuOrchSummary` |
+| Scheduler 数据获取 | `pto2_scheduler_print_stats()` | AICPU 侧 `DEV_ALWAYS` 日志 |
+| Swimlane 可视化 | 不适用 | `tools/swimlane_converter.py` + `--enable-profiling` |
 
 ## 2.3 详细改造内容
 
@@ -590,8 +764,6 @@ pto2_orchestrator_done(&rt->orchestrator);  // 显式标记完成
 - 确保调度器知道不再有新任务
 - 符合最佳实践（其他示例都调用了此函数）
 
-
-
 ## 2.4 编译和构建
 
 ### 2.4.1 编译命令
@@ -674,12 +846,183 @@ All Tests Summary: PASS=15, FAIL=0
 ========================================
 ```
 
-## 2.5 核心问题解答
+## 2.5 AICPU 线程绑核设计文档
+### 2.5.1 背景
+PTO Runtime 在模拟模式（a2a3sim）下通过多个 host 线程模拟 AICPU 的执行：当 `sche_cpu_num == 4` 时，Thread 0-2 充当 scheduler，Thread 3 充当 orchestrator。默认情况下这些线程可在任意 CPU 核上自由调度，引入绑核配置后可将其固定到指定核，降低跨核迁移开销并提升调度确定性。
 
-### 2.5.1 直接调用 on_task_complete 跳过 AICore 的原因解析
+### 2.5.2 线程角色与默认核分配
+```
+sche_cpu_num == 4 时：
+  Thread 0  (scheduler)    → 默认绑 CPU 核 1
+  Thread 1  (scheduler)    → 默认绑 CPU 核 2
+  Thread 2  (scheduler)    → 默认绑 CPU 核 3
+  Thread 3  (orchestrator) → 默认绑 CPU 核 0
+sche_cpu_num < 4 时：
+  所有线程均为 scheduler，orchestration 在 host 侧完成
+  默认绑核规则：Thread i → CPU 核 i+1
+```
+
+### 2.5.3 配置接口
+绑核配置通过 `Runtime` 类的三个字段控制：
+```cpp
+class Runtime {
+public:
+    // 是否启用绑核（默认 false，不影响现有行为）
+    bool cpu_affinity_enabled;
+    // orchestrator 线程绑定的 CPU 核编号
+    // -1 表示使用默认值（核 0）
+    int orch_cpu_core;
+    // scheduler 线程绑定的 CPU 核编号，下标对应 thread_idx
+    // -1 表示使用默认值（核 thread_idx + 1）
+    int sched_cpu_cores[PLATFORM_MAX_AICPU_THREADS];
+};
+```
+**字段初始值**（`Runtime` 构造函数）：
+| 字段 | 初始值 | 含义 |
+|------|--------|------|
+| `cpu_affinity_enabled` | `false` | 默认不绑核 |
+| `orch_cpu_core` | `-1` | 启用时默认绑核 0 |
+| `sched_cpu_cores[i]` | `-1` | 启用时默认绑核 i+1 |
+
+### 2.5.4 使用方式
+#### 2.5.4.1 启用默认绑核
+```cpp
+Runtime runtime;
+runtime.cpu_affinity_enabled = true;
+// orch_cpu_core 和 sched_cpu_cores 保持 -1，使用默认分配
+// 结果：Thread0→核1，Thread1→核2，Thread2→核3，Thread3→核0
+```
+
+#### 2.5.4.2 自定义核分配
+```cpp
+Runtime runtime;
+runtime.cpu_affinity_enabled = true;
+runtime.orch_cpu_core       = 4;   // orchestrator 绑核 4
+runtime.sched_cpu_cores[0]  = 5;   // scheduler 0 绑核 5
+runtime.sched_cpu_cores[1]  = 6;   // scheduler 1 绑核 6
+runtime.sched_cpu_cores[2]  = 7;   // scheduler 2 绑核 7
+```
+
+#### 2.5.4.3 混合配置（部分使用默认，部分指定）
+```cpp
+Runtime runtime;
+runtime.cpu_affinity_enabled = true;
+runtime.orch_cpu_core       = -1;  // 默认：绑核 0
+runtime.sched_cpu_cores[0]  = 2;   // 指定：绑核 2
+runtime.sched_cpu_cores[1]  = -1;  // 默认：绑核 2（thread_idx=1，1+1=2，但实际为 2）
+runtime.sched_cpu_cores[2]  = 6;   // 指定：绑核 6
+```
+
+### 2.5.5 实现机制
+绑核在 `DeviceRunner::run()` 启动 AICPU 线程时，于线程内部最先执行：
+```cpp
+// device_runner.cpp（a2a3sim）
+for (int i = 0; i < launch_aicpu_num; i++) {
+    aicpu_threads.emplace_back([&runtime, i, launch_aicpu_num]() {
+        if (runtime.cpu_affinity_enabled) {
+#ifdef __linux__
+            bool is_orchestrator = (launch_aicpu_num == 4 && i == 3);
+            int target_core;
+            if (is_orchestrator) {
+                target_core = (runtime.orch_cpu_core >= 0)
+                              ? runtime.orch_cpu_core : 0;
+            } else {
+                target_core = (runtime.sched_cpu_cores[i] >= 0)
+                              ? runtime.sched_cpu_cores[i] : (i + 1);
+            }
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(target_core, &cpuset);
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+#endif
+        }
+        aicpu_execute(&runtime);
+    });
+}
+```
+**关键设计点：**
+- 绑核在 `aicpu_execute()` 之前完成，保证整个执行周期都在目标核上
+- `pthread_setaffinity_np` 失败时仅打印警告，不中断执行
+- 仅在 `__linux__` 下编译绑核代码，非 Linux 平台打印警告后继续
+
+### 2.5.6 绑核工具库
+绑核相关的基础函数封装在 [`tests/orchestration_ut/common/cpu_affinity.h`](../tests/orchestration_ut/common/cpu_affinity.h) 中，供所有测试文件共用。
+
+#### 2.5.6.1 ThreadReport 结构体
+记录单个线程的绑核测试结果：
+```cpp
+struct ThreadReport {
+    int  thread_idx;  // 线程编号
+    int  target_cpu;  // 期望绑定的核（-1 = 未设置）
+    int  bound_cpu;   // pthread_getaffinity_np 读回的核（-1 = 未特意绑核）
+    int  actual_cpu;  // sched_getcpu() 实测运行核
+    bool bind_ok;     // bind_to_cpu() 是否成功
+};
+```
+
+#### 2.5.6.2 工具函数
+| 函数 | 说明 |
+|------|------|
+| `int num_cpus_online()` | 返回系统在线 CPU 核数，非 Linux 返回 1 |
+| `int current_cpu()` | 返回当前线程运行的 CPU 核编号（`sched_getcpu`），失败返回 -1 |
+| `int bind_to_cpu(int cpu_core)` | 将当前线程绑定到指定核（`pthread_setaffinity_np`），成功返回 0 |
+| `int unbind_from_cpu()` | 清除亲和性限制，允许在所有在线核上调度，成功返回 0 |
+| `int get_bound_cpu()` | 读取亲和性掩码中第一个绑定核；若覆盖所有在线核则返回 -1（视为未绑核） |
+| `bool verify_cpu_binding(int target, const char* ctx)` | 验证当前线程是否在目标核上运行，打印结果并返回是否通过 |
+| `void print_separator(int n)` | 打印 n 个 `-` 的缩进分隔线 |
+
+### 2.5.7 单元测试
+#### 2.5.7.1 测试结构
+测试分为两类，均位于 [`tests/orchestration_ut/`](../tests/orchestration_ut/)：
+| 类型 | 文件 | 说明 |
+|------|------|------|
+| 功能测试 | `tests/test_cpu_affinity.cpp` | 验证绑核行为是否正确，报告 PASS/FAIL |
+| 性能测试 | `tests/test_paged_attention.cpp`<br>`tests/test_batch_paged_attention.cpp` | 测量任务图构建与模拟执行的吞吐量，只输出数据 |
+**运行顺序**（`main.cpp`）：功能测试在前，性能测试在后，最终只汇报功能测试的 PASS/FAIL。
+
+#### 2.5.7.2 功能测试（test_cpu_affinity.cpp）
+在 host CPU 上通过 `pthread_create` 直接创建线程，调用 `pthread_setaffinity_np` + `sched_getcpu()` 验证。
+| 测试函数 | 验证内容 |
+|---------|---------|
+| `test_cpu_affinity_without_binding` | 各线程先调用 `unbind_from_cpu()` 清除继承的亲和性，验证 `get_bound_cpu()` 返回 -1 |
+| `test_cpu_affinity_with_binding_default` | 默认分配（orch→核0，sched[i]→核i+1），验证 bound_cpu == target_cpu == actual_cpu |
+| `test_cpu_affinity_with_binding_custom` | 自定义分配（orch→最后一核，sched[i]→核i），核数不足时取模回绕，均验证绑定成功 |
+| `test_cpu_affinity_comparison` | 对比场景A（不绑核）与场景B（默认绑核），展示线程分布差异 |
+
+#### 2.5.7.3 Makefile 绑核参数
+编译时可通过 Makefile 变量指定默认绑核配置，参数以 `-D` 宏注入测试代码：
+```bash
+# 使用默认值（orch=0，sched0=1，sched1=2，sched2=3）
+make
+# 自定义绑核配置
+make ORCH_CPU=4 SCHED_CPU0=5 SCHED_CPU1=6 SCHED_CPU2=7
+```
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ORCH_CPU` | `0` | orchestrator 线程绑定的 CPU 核 |
+| `SCHED_CPU0` | `1` | scheduler 线程 0 绑定的 CPU 核 |
+| `SCHED_CPU1` | `2` | scheduler 线程 1 绑定的 CPU 核 |
+| `SCHED_CPU2` | `3` | scheduler 线程 2 绑定的 CPU 核 |
+
+### 2.5.8 平台支持
+| 平台 | 支持情况 |
+|------|---------|
+| Linux | 完整支持，使用 `pthread_setaffinity_np` |
+| 非 Linux | 跳过绑核，打印 `LOG_WARN`，不影响功能 |
+
+### 2.5.9 注意事项
+- `cpu_affinity_enabled` 默认为 `false`，对不使用该特性的调用方完全透明
+- 指定的核编号若超出系统可用范围，`pthread_setaffinity_np` 会返回错误，运行时打印警告但继续执行
+- 多个线程可配置到同一个核（合法，但可能增加竞争）
+- 绑核配置仅对 a2a3sim 平台的 AICPU 线程生效；真实硬件（a2a3）的线程由 CANN 驱动管理，不受此字段影响
+- `pthread_create` 子线程继承父线程的亲和性掩码，测试"不绑核"场景时需在线程入口调用 `unbind_from_cpu()` 显式清除
+
+## 2.6 核心问题解答
+
+### 2.6.1 直接调用 on_task_complete 跳过 AICore 的原因解析
 PTO2SchedulerState 是纯状态机，仅维护任务状态逻辑，不依赖硬件交互。
 
-#### 2.5.1.1 真实硬件执行路径（aicpu_executor.cpp）
+#### 2.6.1.1 真实硬件执行路径（aicpu_executor.cpp）
 AICPU 调度器的主循环是一个持续轮询的过程，完整依赖硬件寄存器状态：
 ```
 AICPU 调度器主循环 while(true):
@@ -695,7 +1038,7 @@ AICPU 调度器主循环 while(true):
 ```
 在真实路径中，`on_task_complete()` 的触发完全依赖**硬件寄存器 COND 的状态变为 TASK_FIN_STATE**，是硬件→软件的被动通知。
 
-#### 2.5.1.2 模拟测试执行路径（sim_drain_one_pass）
+#### 2.6.1.2 模拟测试执行路径（sim_drain_one_pass）
 测试代码中直接跳过了所有硬件交互环节，强制触发任务完成状态：
 ```cpp
 // test_common.cpp:37
@@ -715,7 +1058,7 @@ int sim_drain_one_pass(PTO2Runtime* rt) {
 3. AICore 完成后改写 COND 寄存器为 TASK_FIN_STATE
 4. AICPU 轮询到 COND 寄存器的 FIN 状态
 
-#### 2.5.1.3 为何直接调用合法？（调度器的无感知特性）
+#### 2.6.1.3 为何直接调用合法？（调度器的无感知特性）
 `PTO2SchedulerState::on_task_complete()` 的内部逻辑（pto_scheduler.h:314）仅处理**任务状态管理**，完全不涉及硬件：
 1. 计数器更新：`tasks_completed++`（统计完成的任务数）
 2. 消费者处理：遍历 fanout 链表 → 对每个消费者减 `fanin_refcount` → 若计数归零则将任务加入 ready queue
@@ -723,7 +1066,7 @@ int sim_drain_one_pass(PTO2Runtime* rt) {
 
 调度器只关心「某个任务 ID 被告知完成」，不感知这个“告知”的来源（是硬件寄存器轮询触发，还是测试代码直接调用）。
 
-#### 2.5.1.4 关键前提：PTO2_MODE_SIMULATE + init_task_on_submit=true
+#### 2.6.1.4 关键前提：PTO2_MODE_SIMULATE + init_task_on_submit=true
 `make_runtime()` 创建测试运行时环境时（test_common.cpp:28），会触发两个关键配置：
 ```cpp
 pto2_runtime_create_custom(PTO2_MODE_SIMULATE, ...)
@@ -735,3 +1078,5 @@ pto2_runtime_create_custom(PTO2_MODE_SIMULATE, ...)
 - 每次调用 `pto2_submit_task()` 时，Step 6 会立刻执行 `scheduler.init_task()`，将任务直接加入 ready queue
 - orchestrator（编排器）和 scheduler（调度器）在**同一进程、同一线程**中操作，无需真实 AICPU 多线程调度器轮询 `current_task_index`
 - 测试代码可直接从 ready queue 中取任务，通过调用 `on_task_complete` 模拟“执行完成”
+
+---

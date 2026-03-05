@@ -12,6 +12,11 @@
 
 #include "device_runner.h"
 
+#ifdef __linux__
+#include <pthread.h>
+#include <cerrno>
+#endif
+
 // Statically linked executor functions (from libaicpu_kernel.a and libaicore_kernel.a)
 extern "C" int aicpu_execute(Runtime* runtime);
 extern "C" void aicore_execute_wrapper(Runtime* runtime, int block_idx, CoreType core_type,
@@ -177,7 +182,40 @@ int DeviceRunner::run(Runtime& runtime,
     LOG_INFO("Launching %d AICPU thread(s)", launch_aicpu_num);
     std::vector<std::thread> aicpu_threads;
     for (int i = 0; i < launch_aicpu_num; i++) {
-        aicpu_threads.emplace_back([&runtime]() {
+        aicpu_threads.emplace_back([&runtime, i, launch_aicpu_num]() {
+            // Set CPU affinity if enabled
+            if (runtime.cpu_affinity_enabled) {
+#ifdef __linux__
+                // Determine if this thread is orchestrator or scheduler
+                bool is_orchestrator = (launch_aicpu_num == 4 && i == 3);
+                int target_core = -1;
+
+                if (is_orchestrator) {
+                    // Orchestrator thread: use configured core or default to 0
+                    target_core = (runtime.orch_cpu_core >= 0) ? runtime.orch_cpu_core : 0;
+                } else {
+                    // Scheduler thread: use configured core or default to (i+1)
+                    target_core = (runtime.sched_cpu_cores[i] >= 0) ? runtime.sched_cpu_cores[i] : (i + 1);
+                }
+
+                // Set CPU affinity
+                cpu_set_t cpuset;
+                CPU_ZERO(&cpuset);
+                CPU_SET(target_core, &cpuset);
+
+                int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+                if (rc != 0) {
+                    LOG_WARN("Failed to set CPU affinity for AICPU thread %d to core %d: %s",
+                             i, target_core, strerror(rc));
+                } else {
+                    LOG_INFO("AICPU thread %d (%s) bound to CPU core %d",
+                             i, is_orchestrator ? "orchestrator" : "scheduler", target_core);
+                }
+#else
+                LOG_WARN("CPU affinity not supported on non-Linux platforms");
+#endif
+            }
+
             aicpu_execute(&runtime);
         });
     }

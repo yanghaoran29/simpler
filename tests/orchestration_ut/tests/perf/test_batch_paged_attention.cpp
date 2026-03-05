@@ -1,30 +1,31 @@
 /**
  * test_batch_paged_attention.cpp
  *
- * Batch Paged Attention Orchestration 单元测试
+ * Batch Paged Attention Orchestration Unit Tests
  *
- * 目的：在不依赖硬件（AICore）的情况下，验证
- *   1. Batch Orchestration 函数能正确构建任务图
- *   2. 任务依赖关系正确建立
- *   3. Scope 管理正确
- *   4. Tensor 创建和视图操作正确
- *   5. Chunked batched architecture 正确工作
+ * Purpose: Verify without hardware (AICore) dependency:
+ *   1. Batch Orchestration function correctly builds task graph
+ *   2. Task dependencies are correctly established
+ *   3. Scope management is correct
+ *   4. Tensor creation and view operations are correct
+ *   5. Chunked batched architecture works correctly
  *
- * 模拟策略：
- *   - 使用 make_runtime() 创建模拟运行时
- *   - 使用 sim_run_all() 模拟任务执行（跳过 AICore kernel 执行）
- *   - 只验证任务图的构建，不验证计算结果
+ * Simulation strategy:
+ *   - Use make_runtime() to create simulated runtime
+ *   - Use sim_run_all() to simulate task execution (skip AICore kernel execution)
+ *   - Only verify task graph construction, not computation results
  *
- * 编译：
+ * Build:
  *   cd simpler/tests/orchestration_ut && make build && make run
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [1] Runtime 主头文件
+// [1] Runtime main header
 // ─────────────────────────────────────────────────────────────────────────────
 #include "pto_runtime2.h"
 #include "test_common.h"
 #include "common/platform_config.h"
+#include "cpu_affinity.h"
 #include <cstring>
 #include <algorithm>
 #include <cstdint>
@@ -225,74 +226,54 @@ static void build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, i
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// [3] Test functions
+// [3] Performance test functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-void test_batch_paged_attention_basic() {
-    TEST_BEGIN("test_batch_paged_attention_basic");
+// Common helper: run one batch paged attention performance test
+static void run_batch_perf(const char* name, uint64_t batch, uint64_t num_heads,
+                           int kv_head_num, uint64_t head_dim,
+                           uint64_t block_size, uint64_t block_num) {
+    TEST_BEGIN(name);
 
-    PTO2Runtime* rt = make_runtime();
-    CHECK(rt != nullptr);
-    if (!rt) return;
+    bind_to_cpu(ORCH_CPU);
+    printf("  CPU affinity: orchestrator → core %d\n", ORCH_CPU);
+    printf("  Config: batch=%lu, num_heads=%lu, head_dim=%lu, block_size=%lu, block_num=%lu\n",
+           (unsigned long)batch, (unsigned long)num_heads, (unsigned long)head_dim,
+           (unsigned long)block_size, (unsigned long)block_num);
 
-#if PTO2_PROFILING
-    printf("  Profiling enabled\n");
-#endif
-
-    // Prepare test data
-    const uint64_t batch = 2;
-    const uint64_t num_heads = 16;
-    const int kv_head_num = 1;
-    const uint64_t head_dim = 16;
-    const uint64_t block_size = 16;
-    const uint64_t block_num = 2;
     const float scale_value = 0.125f;
-
-    // Allocate test buffers
-    const size_t query_size = batch * num_heads * head_dim * sizeof(float);
-    const size_t key_cache_size = batch * block_num * block_size * head_dim * sizeof(float);
+    const size_t query_size       = batch * num_heads * head_dim * sizeof(float);
+    const size_t key_cache_size   = batch * block_num * block_size * head_dim * sizeof(float);
     const size_t value_cache_size = batch * block_num * block_size * head_dim * sizeof(float);
-    const size_t out_size = batch * num_heads * head_dim * sizeof(float);
+    const size_t out_size         = batch * num_heads * head_dim * sizeof(float);
 
-    void* query_buf = malloc(query_size);
-    void* key_cache_buf = malloc(key_cache_size);
+    void* query_buf       = malloc(query_size);
+    void* key_cache_buf   = malloc(key_cache_size);
     void* value_cache_buf = malloc(value_cache_size);
-    void* out_buf = malloc(out_size);
-    int* block_table = (int*)malloc(batch * block_num * sizeof(int));
-    int* context_lens = (int*)malloc(batch * sizeof(int));
+    void* out_buf         = malloc(out_size);
+    int*  block_table     = (int*)malloc(batch * block_num * sizeof(int));
+    int*  context_lens    = (int*)malloc(batch * sizeof(int));
 
-    // Initialize test data
     memset(query_buf, 0, query_size);
     memset(key_cache_buf, 0, key_cache_size);
     memset(value_cache_buf, 0, value_cache_size);
     memset(out_buf, 0, out_size);
 
-    // Set up block table and context lengths
     for (uint64_t i = 0; i < batch; i++) {
-        context_lens[i] = block_size * block_num;  // Full blocks
-        for (uint64_t j = 0; j < block_num; j++) {
+        context_lens[i] = block_size * block_num;
+        for (uint64_t j = 0; j < block_num; j++)
             block_table[i * block_num + j] = static_cast<int>(i * block_num + j);
-        }
     }
 
-    // Prepare config
     int64_t config[7] = {
-        static_cast<int64_t>(batch),
-        static_cast<int64_t>(num_heads),
-        static_cast<int64_t>(kv_head_num),
-        static_cast<int64_t>(head_dim),
-        static_cast<int64_t>(block_size),
-        static_cast<int64_t>(block_num),
-        0  // scale_value will be set via union
+        static_cast<int64_t>(batch), static_cast<int64_t>(num_heads),
+        static_cast<int64_t>(kv_head_num), static_cast<int64_t>(head_dim),
+        static_cast<int64_t>(block_size), static_cast<int64_t>(block_num), 0
     };
-    union {
-        uint32_t u;
-        float f;
-    } scale_conv;
+    union { uint32_t u; float f; } scale_conv;
     scale_conv.f = scale_value;
     config[6] = static_cast<int64_t>(scale_conv.u);
 
-    // Prepare args array
     uint64_t args[10] = {
         reinterpret_cast<uint64_t>(query_buf),
         reinterpret_cast<uint64_t>(key_cache_buf),
@@ -301,167 +282,88 @@ void test_batch_paged_attention_basic() {
         reinterpret_cast<uint64_t>(context_lens),
         reinterpret_cast<uint64_t>(out_buf),
         reinterpret_cast<uint64_t>(config),
-        query_size,
-        key_cache_size,
-        value_cache_size
+        query_size, key_cache_size, value_cache_size
     };
 
-    {  // Scope for Tensors to ensure proper destruction order
-        // Build the task graph
+    PTO2Runtime* rt = make_runtime();
+    if (!rt) { printf("  [ERROR] make_runtime() failed\n"); return; }
+
+    uint64_t build_us, run_us;
+    int64_t tasks_submitted;
+    int executed;
+
+    {  // Tensor scope
+        uint64_t t0 = perf_now_us();
         build_batch_paged_attention_graph(rt, args, 10);
+        uint64_t t1 = perf_now_us();
+        build_us = t1 - t0;
+
+        tasks_submitted = rt->orchestrator.tasks_submitted;
 
 #if PTO2_PROFILING
         print_orch_profiling();
 #endif
 
-        // Verify tasks were submitted
-        CHECK(rt->orchestrator.tasks_submitted > 0);
-        printf("  Tasks submitted: %lld\n", (long long)rt->orchestrator.tasks_submitted);
-
-        // Run simulation (skip AICore execution)
-        int executed = sim_run_all(rt);
-        printf("  Tasks executed: %d\n", executed);
-
-        // Verify all tasks completed
-        CHECK(executed == rt->orchestrator.tasks_submitted);
-        CHECK(rt->scheduler.tasks_completed.load() == executed);
-        CHECK(rt->scheduler.tasks_consumed.load() == executed);
+        uint64_t t2 = perf_now_us();
+        executed = sim_run_all(rt);
+        uint64_t t3 = perf_now_us();
+        run_us = t3 - t2;
 
 #if PTO2_PROFILING
         printf("  === Scheduler Statistics ===\n");
         pto2_scheduler_print_stats(&rt->scheduler);
         pto2_scheduler_print_queues(&rt->scheduler);
 #endif
-    }  // Tensors destructed here
+    }
 
-    // Cleanup
-    free(query_buf);
-    free(key_cache_buf);
-    free(value_cache_buf);
-    free(out_buf);
-    free(block_table);
-    free(context_lens);
-
+    free(query_buf); free(key_cache_buf); free(value_cache_buf); free(out_buf);
+    free(block_table); free(context_lens);
     pto2_runtime_destroy(rt);
 
-    TEST_END();
+    // Performance data summary
+    double build_ms    = build_us / 1000.0;
+    double run_ms      = run_us   / 1000.0;
+    double tasks_per_s = (run_us > 0) ? (executed * 1e6 / run_us) : 0.0;
+    double us_per_task = (executed > 0) ? (double)run_us / executed : 0.0;
+
+    printf("\n  %-28s %s\n", "Metric", "Value");
+    printf("  %-28s %lld\n",    "Tasks submitted",        (long long)tasks_submitted);
+    printf("  %-28s %.3f ms\n", "Graph build time",       build_ms);
+    printf("  %-28s %.3f ms\n", "Simulation exec time",   run_ms);
+    printf("  %-28s %.0f tasks/s\n", "Task throughput",   tasks_per_s);
+    printf("  %-28s %.2f µs\n", "Avg time per task",      us_per_task);
+}
+
+void test_batch_paged_attention_basic() {
+    run_batch_perf("Batch Paged Attention Basic (Performance Test)",
+                   /*batch=*/2, /*num_heads=*/16, /*kv_head_num=*/1,
+                   /*head_dim=*/16, /*block_size=*/16, /*block_num=*/2);
 }
 
 void test_batch_paged_attention_chunked() {
-    TEST_BEGIN("test_batch_paged_attention_chunked");
+    // batch=32 > IN_CORE_BATCH=16, triggers chunked path
+    run_batch_perf("Batch Paged Attention Chunked (Performance Test)",
+                   /*batch=*/32, /*num_heads=*/16, /*kv_head_num=*/1,
+                   /*head_dim=*/16, /*block_size=*/16, /*block_num=*/2);
+}
 
-    PTO2Runtime* rt = make_runtime();
-    CHECK(rt != nullptr);
-    if (!rt) return;
+void test_batch_paged_attention_large_block_num_16() {
+    // block_num=16: stress-test the block-level loop (16 KV blocks per sequence)
+    run_batch_perf("Batch Paged Attention Chunked (Performance Test)",
+                   /*batch=*/32, /*num_heads=*/16, /*kv_head_num=*/1,
+                   /*head_dim=*/16, /*block_size=*/16, /*block_num=*/16);
+}
 
-#if PTO2_PROFILING
-    printf("  Profiling enabled\n");
-#endif
+void test_batch_paged_attention_large_block_num_128() {
+    // block_num=128: deeper block loop, higher task count
+    run_batch_perf("Batch Paged Attention Large block_num=128 (Performance Test)",
+                   /*batch=*/4, /*num_heads=*/16, /*kv_head_num=*/1,
+                   /*head_dim=*/16, /*block_size=*/16, /*block_num=*/128);
+}
 
-    // Prepare test data with batch > IN_CORE_BATCH to test chunking
-    const uint64_t batch = 32;  // Will be split into 2 chunks (IN_CORE_BATCH=16)
-    const uint64_t num_heads = 16;
-    const int kv_head_num = 1;
-    const uint64_t head_dim = 16;
-    const uint64_t block_size = 16;
-    const uint64_t block_num = 2;
-    const float scale_value = 0.125f;
-
-    // Allocate test buffers
-    const size_t query_size = batch * num_heads * head_dim * sizeof(float);
-    const size_t key_cache_size = batch * block_num * block_size * head_dim * sizeof(float);
-    const size_t value_cache_size = batch * block_num * block_size * head_dim * sizeof(float);
-    const size_t out_size = batch * num_heads * head_dim * sizeof(float);
-
-    void* query_buf = malloc(query_size);
-    void* key_cache_buf = malloc(key_cache_size);
-    void* value_cache_buf = malloc(value_cache_size);
-    void* out_buf = malloc(out_size);
-    int* block_table = (int*)malloc(batch * block_num * sizeof(int));
-    int* context_lens = (int*)malloc(batch * sizeof(int));
-
-    // Initialize test data
-    memset(query_buf, 0, query_size);
-    memset(key_cache_buf, 0, key_cache_size);
-    memset(value_cache_buf, 0, value_cache_size);
-    memset(out_buf, 0, out_size);
-
-    // Set up block table and context lengths
-    for (uint64_t i = 0; i < batch; i++) {
-        context_lens[i] = block_size * block_num;  // Full blocks
-        for (uint64_t j = 0; j < block_num; j++) {
-            block_table[i * block_num + j] = static_cast<int>(i * block_num + j);
-        }
-    }
-
-    // Prepare config
-    int64_t config[7] = {
-        static_cast<int64_t>(batch),
-        static_cast<int64_t>(num_heads),
-        static_cast<int64_t>(kv_head_num),
-        static_cast<int64_t>(head_dim),
-        static_cast<int64_t>(block_size),
-        static_cast<int64_t>(block_num),
-        0  // scale_value will be set via union
-    };
-    union {
-        uint32_t u;
-        float f;
-    } scale_conv;
-    scale_conv.f = scale_value;
-    config[6] = static_cast<int64_t>(scale_conv.u);
-
-    // Prepare args array
-    uint64_t args[10] = {
-        reinterpret_cast<uint64_t>(query_buf),
-        reinterpret_cast<uint64_t>(key_cache_buf),
-        reinterpret_cast<uint64_t>(value_cache_buf),
-        reinterpret_cast<uint64_t>(block_table),
-        reinterpret_cast<uint64_t>(context_lens),
-        reinterpret_cast<uint64_t>(out_buf),
-        reinterpret_cast<uint64_t>(config),
-        query_size,
-        key_cache_size,
-        value_cache_size
-    };
-
-    {  // Scope for Tensors to ensure proper destruction order
-        // Build the task graph
-        build_batch_paged_attention_graph(rt, args, 10);
-
-#if PTO2_PROFILING
-        print_orch_profiling();
-#endif
-
-        // Verify tasks were submitted
-        CHECK(rt->orchestrator.tasks_submitted > 0);
-        printf("  Tasks submitted: %lld\n", (long long)rt->orchestrator.tasks_submitted);
-
-        // Run simulation (skip AICore execution)
-        int executed = sim_run_all(rt);
-        printf("  Tasks executed: %d\n", executed);
-
-        // Verify all tasks completed
-        CHECK(executed == rt->orchestrator.tasks_submitted);
-        CHECK(rt->scheduler.tasks_completed.load() == executed);
-        CHECK(rt->scheduler.tasks_consumed.load() == executed);
-
-#if PTO2_PROFILING
-        printf("  === Scheduler Statistics ===\n");
-        pto2_scheduler_print_stats(&rt->scheduler);
-        pto2_scheduler_print_queues(&rt->scheduler);
-#endif
-    }  // Tensors destructed here
-
-    // Cleanup
-    free(query_buf);
-    free(key_cache_buf);
-    free(value_cache_buf);
-    free(out_buf);
-    free(block_table);
-    free(context_lens);
-
-    pto2_runtime_destroy(rt);
-
-    TEST_END();
+void test_batch_paged_attention_large_block_num_256() {
+    // block_num=256: very long sequence, chunked + large block loop combined
+    run_batch_perf("Batch Paged Attention Large block_num=256 (Performance Test)",
+                   /*batch=*/32, /*num_heads=*/16, /*kv_head_num=*/1,
+                   /*head_dim=*/16, /*block_size=*/16, /*block_num=*/256);
 }

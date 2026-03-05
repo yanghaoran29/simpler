@@ -23,7 +23,7 @@ void unified_log_warn(const char* func, const char* fmt, ...) {
 
 void unified_log_info([[maybe_unused]] const char* func,
                       [[maybe_unused]] const char* fmt, ...) {
-    // 测试期间静默 INFO
+    // Silence INFO during tests
 }
 
 void unified_log_debug([[maybe_unused]] const char* func,

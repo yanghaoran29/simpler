@@ -7,6 +7,7 @@
 #include "test_common.h"
 #include "pto_runtime2.h"
 #include "common/platform_config.h"
+#include <time.h>
 #include <chrono>
 
 /**
@@ -23,11 +24,25 @@ uint64_t float_to_u64(float f) {
 }
 
 /**
- * Create a small runtime for testing
+ * Monotonic clock in microseconds, for performance measurement
+ */
+uint64_t perf_now_us() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+/**
+ * Create a runtime for testing.
+ *
+ * task_window_size must be larger than the maximum number of tasks in any single
+ * PTO2_SCOPE. For batch paged attention with block_num=256:
+ *   max tasks per scope = 1 (AIV_HUB) + 256 * 4 (QK/SF/PV/UPDATE) = 1025
+ * Use 4096 to safely cover all test cases including block_num=256 with margin.
  */
 PTO2Runtime* make_runtime() {
     return pto2_runtime_create_custom(PTO2_MODE_SIMULATE,
-        /*task_window_size=*/512,        // Larger window for paged attention
+        /*task_window_size=*/4096,
         /*heap_size=*/32 * 1024 * 1024,  // 32 MB for intermediate buffers
         /*dep_list_size=*/1024);
 }
@@ -91,7 +106,7 @@ void print_orch_profiling() {
     printf("    fanin:      %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.fanin_cycle),    pd.fanin_cycle    * 100.0 / orch_total);
     printf("    finalize:   %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.finalize_cycle), pd.finalize_cycle * 100.0 / orch_total);
     printf("    scope:      %8.3f us  (%4.1f%%)\n", cycles_to_us(pd.scope_end_cycle),pd.scope_end_cycle* 100.0 / orch_total);
-    printf("    others:     %8.3f us\n", cycles_to_us(elapsed) - cycles_to_us(orch_total));
+    printf("    others:     %8.3f us  (%4.1f%%)\n\n", cycles_to_us(elapsed - orch_total), (elapsed - orch_total) * 100.0 / orch_total);
     printf("    total:      %8.3f us\n", cycles_to_us(orch_total));
 }
 #else
