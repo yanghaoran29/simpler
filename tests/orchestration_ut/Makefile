@@ -19,6 +19,17 @@ ORCH_CPU   ?= 0
 SCHED_CPU0 ?= 1
 SCHED_CPU1 ?= 2
 SCHED_CPU2 ?= 3
+SCHED_CPU3 ?= 4
+SCHED_CPU4 ?= 5
+SCHED_CPU5 ?= 6
+SCHED_CPU6 ?= 7
+SCHED_CPU7 ?= 8
+
+# ─── Platform configuration parameters ────────────────────────────────────────
+PLATFORM_MAX_BLOCKDIM ?= 24
+PLATFORM_AIC_CORES_PER_BLOCKDIM ?= 1
+PLATFORM_AIV_CORES_PER_BLOCKDIM ?= 2
+PLATFORM_MAX_AICPU_THREADS ?= 4
 
 # Timeout in seconds for run targets (uses system 'timeout' command)
 TIMEOUT ?= 600
@@ -46,7 +57,16 @@ CXXFLAGS := -std=c++17 -O0 -ggdb3 -fno-omit-frame-pointer \
             -DORCH_CPU=$(ORCH_CPU) \
             -DSCHED_CPU0=$(SCHED_CPU0) \
             -DSCHED_CPU1=$(SCHED_CPU1) \
-            -DSCHED_CPU2=$(SCHED_CPU2)
+            -DSCHED_CPU2=$(SCHED_CPU2) \
+            -DSCHED_CPU3=$(SCHED_CPU3) \
+            -DSCHED_CPU4=$(SCHED_CPU4) \
+            -DSCHED_CPU5=$(SCHED_CPU5) \
+            -DSCHED_CPU6=$(SCHED_CPU6) \
+            -DSCHED_CPU7=$(SCHED_CPU7) \
+            -DPLATFORM_MAX_BLOCKDIM=$(PLATFORM_MAX_BLOCKDIM) \
+            -DPLATFORM_AIC_CORES_PER_BLOCKDIM=$(PLATFORM_AIC_CORES_PER_BLOCKDIM) \
+            -DPLATFORM_AIV_CORES_PER_BLOCKDIM=$(PLATFORM_AIV_CORES_PER_BLOCKDIM) \
+            -DPLATFORM_MAX_AICPU_THREADS=$(PLATFORM_MAX_AICPU_THREADS)
 
 # ─── Static library paths ─────────────────────────────────────────────────────
 STATIC_LIBSTDCXX := $(HOME)/Ascend/cann-8.5.0/tools/hcc/aarch64-target-linux-gnu/lib64/libstdc++.a
@@ -90,7 +110,8 @@ COMMON_TEST_SRCS := \
 
 # Functional test sources
 FUNC_TEST_SRCS := \
-    $(FUNC_DIR)/test_cpu_affinity.cpp
+    $(FUNC_DIR)/test_cpu_affinity.cpp \
+    $(FUNC_DIR)/test_platform_config.cpp
 
 # Performance test sources
 PERF_TEST_SRCS := \
@@ -166,3 +187,136 @@ run-perf: $(TARGET)
 clean:
 	rm -rf $(BUILD_DIR)
 	@echo "Clean complete"
+
+# ─── Multi-configuration testing ──────────────────────────────────────────────
+# Test platform configuration with different compile-time parameters
+
+test-config1:
+	@echo ""
+	@echo "========================================"
+	@echo "  Testing Configuration 1: Default"
+	@echo "  BLOCKDIM=24, AIC=1, AIV=2, THREADS=4"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=24 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=2 \
+	         PLATFORM_MAX_AICPU_THREADS=4 \
+	         build
+	@$(TARGET) --func
+
+test-config2:
+	@echo ""
+	@echo "========================================"
+	@echo "  Testing Configuration 2: Large Scale"
+	@echo "  BLOCKDIM=24, AIC=1, AIV=2, THREADS=4"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=24 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=3 \
+	         PLATFORM_MAX_AICPU_THREADS=4 \
+	         build
+	@$(TARGET) --func
+
+test-config3:
+	@echo ""
+	@echo "========================================"
+	@echo "  Testing Configuration 3: Small Scale"
+	@echo "  BLOCKDIM=32, AIC=1, AIV=2, THREADS=8"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=32 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=2 \
+	         PLATFORM_MAX_AICPU_THREADS=8 \
+	         build
+	@$(TARGET) --func
+
+test-config4:
+	@echo ""
+	@echo "========================================"
+	@echo "  Testing Configuration 4: Balanced"
+	@echo "  BLOCKDIM=32, AIC=1, AIV=3, THREADS=8"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=32 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=3 \
+	         PLATFORM_MAX_AICPU_THREADS=8 \
+	         build
+	@$(TARGET) --func
+
+# Run all configuration tests
+test-all-configs: test-config1 test-config2 test-config3 test-config4
+	@echo ""
+	@echo "========================================"
+	@echo "  All Configuration Tests Complete"
+	@echo "========================================"
+
+# ─── Performance test configurations ──────────────────────────────────────────
+perf-config1:
+	@echo ""
+	@echo "========================================"
+	@echo "  Performance Test - Config 1"
+	@echo "  BLOCKDIM=24, AIC=1, AIV=2, THREADS=4"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=24 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=2 \
+	         PLATFORM_MAX_AICPU_THREADS=4 \
+	         build
+	@$(TARGET) --perf
+
+perf-config2:
+	@echo ""
+	@echo "========================================"
+	@echo "  Performance Test - Config 2"
+	@echo "  BLOCKDIM=32, AIC=1, AIV=3, THREADS=4"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=32 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=3 \
+	         PLATFORM_MAX_AICPU_THREADS=4 \
+	         build
+	@$(TARGET) --perf
+
+perf-config3:
+	@echo ""
+	@echo "========================================"
+	@echo "  Performance Test - Config 3"
+	@echo "  BLOCKDIM=32, AIC=1, AIV=2, THREADS=8"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=32 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=2 \
+	         PLATFORM_MAX_AICPU_THREADS=8 \
+	         build
+	@$(TARGET) --perf
+
+perf-config4:
+	@echo ""
+	@echo "========================================"
+	@echo "  Performance Test - Config 4"
+	@echo "  BLOCKDIM=32, AIC=1, AIV=3, THREADS=8"
+	@echo "========================================"
+	@$(MAKE) clean
+	@$(MAKE) PLATFORM_MAX_BLOCKDIM=32 \
+	         PLATFORM_AIC_CORES_PER_BLOCKDIM=1 \
+	         PLATFORM_AIV_CORES_PER_BLOCKDIM=3 \
+	         PLATFORM_MAX_AICPU_THREADS=8 \
+	         build
+	@$(TARGET) --perf
+
+# Run all performance configuration tests
+perf-all-configs: perf-config1 perf-config2 perf-config3 perf-config4
+	@echo ""
+	@echo "========================================"
+	@echo "  All Performance Tests Complete"
+	@echo "========================================"
+
+.PHONY: test-config1 test-config2 test-config3 test-config4 test-all-configs
+.PHONY: perf-config1 perf-config2 perf-config3 perf-config4 perf-all-configs

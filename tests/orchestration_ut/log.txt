@@ -1,0 +1,337 @@
+
+========================================
+  Running orchestration_ut (all)
+========================================
+========================================
+Orchestration Unit Tests
+========================================
+
+----------------------------------------
+Functional Tests
+----------------------------------------
+
+[1/5] Platform Configuration Tests
+
+=== Platform Configuration - Base Parameters ===
+  PLATFORM_MAX_BLOCKDIM = 32
+  PLATFORM_AIC_CORES_PER_BLOCKDIM = 1
+  PLATFORM_AIV_CORES_PER_BLOCKDIM = 3
+  PLATFORM_MAX_AICPU_THREADS = 8
+  PASS: 6, FAIL: 0
+
+=== Platform Configuration - Derived Limits ===
+  PLATFORM_MAX_AIC_PER_THREAD = 32
+  PLATFORM_MAX_AIV_PER_THREAD = 96
+  PLATFORM_MAX_CORES_PER_THREAD = 128
+  PLATFORM_MAX_CORES = 128
+  PASS: 10, FAIL: 0
+
+=== Platform Configuration - Consistency Check ===
+  PLATFORM_CORES_PER_BLOCKDIM = 4 (expected: 4)
+  PASS: 13, FAIL: 0
+
+=== Platform Configuration - Summary ===
+
+  ┌─────────────────────────────────────────────────────┐
+  │         Platform Configuration Summary             │
+  ├─────────────────────────────────────────────────────┤
+  │ Base Configuration:                                 │
+  │   MAX_BLOCKDIM              : 32                   │
+  │   AIC_CORES_PER_BLOCKDIM    : 1                    │
+  │   AIV_CORES_PER_BLOCKDIM    : 3                    │
+  │   CORES_PER_BLOCKDIM        : 4                    │
+  │   MAX_AICPU_THREADS         : 8                    │
+  ├─────────────────────────────────────────────────────┤
+  │ Derived Limits:                                     │
+  │   MAX_AIC_PER_THREAD        : 32                   │
+  │   MAX_AIV_PER_THREAD        : 96                   │
+  │   MAX_CORES_PER_THREAD      : 128                  │
+  │   MAX_CORES                 : 128                  │
+  ├─────────────────────────────────────────────────────┤
+  │ Calculated Ratios:                                  │
+  │   AIC/AIV ratio per block   : 1:3                 │
+  │   Total AIC cores           : 32                   │
+  │   Total AIV cores           : 96                   │
+  └─────────────────────────────────────────────────────┘
+
+  PASS: 13, FAIL: 0
+
+[2/5] 
+=== CPU Affinity - Without Binding (Observe OS Free Scheduling) ===
+  System CPU cores: 320
+  Launching 8 AICPU threads (Thread 0-6: scheduler, Thread 7: orchestrator)
+
+  Thread ID    Role            Bound Core     Actual Core   
+  ----------------------------------------------------------
+  Thread 0     scheduler       -1             255           
+  Thread 1     scheduler       -1             257           
+  Thread 2     scheduler       -1             263           
+  Thread 3     scheduler       -1             278           
+  Thread 4     scheduler       -1             244           
+  Thread 5     scheduler       -1             262           
+  Thread 6     scheduler       -1             265           
+  Thread 7     orchestrator    -1             275           
+
+  Note: Without binding, threads may run on any core (OS decides)
+        bound_cpu should be -1 (no specific binding)
+  PASS: 13, FAIL: 0
+
+[3/5] 
+=== CPU Affinity - With Binding (Default: orch→0, sched[i]→i+1) ===
+  System CPU cores: 320
+  Launching 8 AICPU threads (Thread 0-6: scheduler, Thread 7: orchestrator)
+
+  Thread ID    Role            Target Core  Bound Core     Actual Core    Result  
+  ----------------------------------------------------------------------------------
+  Thread 0     scheduler       1            1              1              OK
+  Thread 1     scheduler       2            2              2              OK
+  Thread 2     scheduler       3            3              3              OK
+  Thread 3     scheduler       4            4              4              OK
+  Thread 4     scheduler       5            5              5              OK
+  Thread 5     scheduler       6            6              6              OK
+  Thread 6     scheduler       7            7              7              OK
+  Thread 7     orchestrator    0            0              0              OK
+
+  Summary: 8/8 threads successfully bound
+  PASS: 13, FAIL: 0
+
+[4/5] 
+=== CPU Affinity - With Binding (Custom: user-specified cores) ===
+  System CPU cores: 320
+  Launching 8 AICPU threads (Thread 0-6: scheduler, Thread 7: orchestrator)
+
+  Thread ID    Role            Target Core  Bound Core     Actual Core    Result  
+  ----------------------------------------------------------------------------------
+  Thread 0     scheduler       1            1              1              OK
+  Thread 1     scheduler       2            2              2              OK
+  Thread 2     scheduler       3            3              3              OK
+  Thread 3     scheduler       4            4              4              OK
+  Thread 4     scheduler       5            5              5              OK
+  Thread 5     scheduler       6            6              6              OK
+  Thread 6     scheduler       7            7              7              OK
+  Thread 7     orchestrator    0            0              0              OK
+
+  Summary: 8/8 threads successfully bound
+  PASS: 13, FAIL: 0
+
+[5/5] 
+=== CPU Affinity - Comparison (With vs Without Binding) ===
+  System CPU cores: 320
+
+  --- Summary Comparison ---
+  Thread ID    Role            Scenario A (Actual)    Scenario B (Actual)   
+--------------------------------------------------------------------------
+  Thread 0     scheduler       Core 256                Core 1                  <- Binding effective
+  Thread 1     scheduler       Core 279                Core 2                  <- Binding effective
+  Thread 2     scheduler       Core 246                Core 3                  <- Binding effective
+  Thread 3     scheduler       Core 266                Core 4                  <- Binding effective
+  Thread 4     scheduler       Core 269                Core 5                  <- Binding effective
+  Thread 5     scheduler       Core 240                Core 6                  <- Binding effective
+  Thread 6     scheduler       Core 261                Core 7                  <- Binding effective
+  Thread 7     orchestrator    Core 242                Core 0                  <- Binding effective
+
+  Conclusion: 8/8 threads successfully bound
+  PASS: 21, FAIL: 0
+
+========================================
+Functional Tests Summary: PASS=21, FAIL=0
+========================================
+
+----------------------------------------
+Performance Tests
+----------------------------------------
+
+[1/6] 
+=== Paged Attention Basic (Performance Test) ===
+  CPU affinity: orchestrator → core 0
+  Config: batch=2, num_heads=4, head_dim=8, block_size=4, block_num=2
+  batch = 2, num_heads = 4, head_dim = 8
+  Total tasks submitted: 18
+  === Orchestrator Profiling (18 submits) ===
+    start_time: 1772763738901415.500 us
+    end_time:   1772763738901453.500 us
+    sync:          1.540 us  ( 4.7%)
+    alloc:         2.500 us  ( 7.7%)
+    params:        2.920 us  ( 8.9%)
+    lookup:        6.880 us  (21.1%)
+    heap:          2.900 us  ( 8.9%)
+    insert:        5.700 us  (17.5%)
+    fanin:         3.880 us  (11.9%)
+    finalize:      4.540 us  (13.9%)
+    scope:         1.780 us  ( 5.5%)
+    others:        5.040 us  (15.4%)
+
+    total:        32.640 us
+  Simulation execution:  10 us (0.010 ms)
+  === Scheduler Statistics ===
+
+  Metric                       Value
+  Tasks submitted              18
+  Graph build time             0.047 ms
+  Simulation exec time         0.011 ms
+  Task throughput              1636364 tasks/s
+  Avg time per task            0.61 µs
+
+[2/6] 
+=== Batch Paged Attention Basic (Performance Test) ===
+  CPU affinity: orchestrator → core 0
+  Config: batch=2, num_heads=16, head_dim=16, block_size=16, block_num=2
+  batch = 2, num_heads = 16, head_dim = 16, q_tile = 16
+  Total tasks submitted: 9
+  Expected tasks: 9 (num_chunks=1, max_bn=2, IN_CORE_BATCH=16)
+  === Orchestrator Profiling (9 submits) ===
+    start_time: 1772763738907877.250 us
+    end_time:   1772763738907896.000 us
+    sync:          0.780 us  ( 4.7%)
+    alloc:         0.940 us  ( 5.7%)
+    params:        1.660 us  (10.0%)
+    lookup:        3.520 us  (21.2%)
+    heap:          1.440 us  ( 8.7%)
+    insert:        3.240 us  (19.5%)
+    fanin:         1.840 us  (11.1%)
+    finalize:      2.480 us  (15.0%)
+    scope:         0.680 us  ( 4.1%)
+    others:        2.380 us  (14.4%)
+
+    total:        16.580 us
+  Simulation execution:  5 us (0.005 ms)
+  === Scheduler Statistics ===
+
+  Metric                       Value
+  Tasks submitted              9
+  Graph build time             0.026 ms
+  Simulation exec time         0.006 ms
+  Task throughput              1500000 tasks/s
+  Avg time per task            0.67 µs
+
+[3/6] 
+=== Batch Paged Attention Chunked (Performance Test) ===
+  CPU affinity: orchestrator → core 0
+  Config: batch=32, num_heads=16, head_dim=16, block_size=16, block_num=2
+  batch = 32, num_heads = 16, head_dim = 16, q_tile = 16
+  Total tasks submitted: 18
+  Expected tasks: 18 (num_chunks=2, max_bn=2, IN_CORE_BATCH=16)
+  === Orchestrator Profiling (18 submits) ===
+    start_time: 1772763738912458.250 us
+    end_time:   1772763738912491.500 us
+    sync:          1.120 us  ( 4.0%)
+    alloc:         1.920 us  ( 6.9%)
+    params:        3.320 us  (12.0%)
+    lookup:        4.880 us  (17.6%)
+    heap:          2.320 us  ( 8.4%)
+    insert:        5.740 us  (20.7%)
+    fanin:         3.480 us  (12.5%)
+    finalize:      3.860 us  (13.9%)
+    scope:         1.100 us  ( 4.0%)
+    others:        5.720 us  (20.6%)
+
+    total:        27.740 us
+  Simulation execution:  9 us (0.009 ms)
+  === Scheduler Statistics ===
+
+  Metric                       Value
+  Tasks submitted              18
+  Graph build time             0.038 ms
+  Simulation exec time         0.010 ms
+  Task throughput              1800000 tasks/s
+  Avg time per task            0.56 µs
+
+[4/6] 
+=== Batch Paged Attention Chunked (Performance Test) ===
+  CPU affinity: orchestrator → core 0
+  Config: batch=32, num_heads=16, head_dim=16, block_size=16, block_num=16
+  batch = 32, num_heads = 16, head_dim = 16, q_tile = 16
+  Total tasks submitted: 130
+  Expected tasks: 130 (num_chunks=2, max_bn=16, IN_CORE_BATCH=16)
+  === Orchestrator Profiling (130 submits) ===
+    start_time: 1772763738915941.750 us
+    end_time:   1772763738916160.500 us
+    sync:          7.000 us  ( 4.0%)
+    alloc:        11.420 us  ( 6.5%)
+    params:       22.000 us  (12.5%)
+    lookup:       37.100 us  (21.0%)
+    heap:         15.220 us  ( 8.6%)
+    insert:       29.980 us  (17.0%)
+    fanin:        26.680 us  (15.1%)
+    finalize:     22.560 us  (12.8%)
+    scope:         4.360 us  ( 2.5%)
+    others:       42.620 us  (24.2%)
+
+    total:       176.320 us
+  Simulation execution:  61 us (0.061 ms)
+  === Scheduler Statistics ===
+
+  Metric                       Value
+  Tasks submitted              130
+  Graph build time             0.225 ms
+  Simulation exec time         0.062 ms
+  Task throughput              2096774 tasks/s
+  Avg time per task            0.48 µs
+
+[5/6] 
+=== Batch Paged Attention Large block_num=128 (Performance Test) ===
+  CPU affinity: orchestrator → core 0
+  Config: batch=4, num_heads=16, head_dim=16, block_size=16, block_num=128
+  batch = 4, num_heads = 16, head_dim = 16, q_tile = 16
+  Total tasks submitted: 513
+  Expected tasks: 513 (num_chunks=1, max_bn=128, IN_CORE_BATCH=16)
+  === Orchestrator Profiling (513 submits) ===
+    start_time: 1772763738920421.250 us
+    end_time:   1772763738921273.000 us
+    sync:         27.640 us  ( 4.1%)
+    alloc:        45.160 us  ( 6.7%)
+    params:       85.740 us  (12.8%)
+    lookup:      148.600 us  (22.2%)
+    heap:         57.600 us  ( 8.6%)
+    insert:      103.420 us  (15.4%)
+    fanin:       104.220 us  (15.6%)
+    finalize:     84.760 us  (12.7%)
+    scope:        12.460 us  ( 1.9%)
+    others:      181.760 us  (27.1%)
+
+    total:       669.600 us
+  Simulation execution:  142 us (0.142 ms)
+  === Scheduler Statistics ===
+
+  Metric                       Value
+  Tasks submitted              513
+  Graph build time             0.868 ms
+  Simulation exec time         0.144 ms
+  Task throughput              2381944 tasks/s
+  Avg time per task            0.42 µs
+
+[6/6] 
+=== Batch Paged Attention Large block_num=256 (Performance Test) ===
+  CPU affinity: orchestrator → core 0
+  Config: batch=32, num_heads=16, head_dim=16, block_size=16, block_num=256
+  batch = 32, num_heads = 16, head_dim = 16, q_tile = 16
+  Total tasks submitted: 2050
+  Expected tasks: 2050 (num_chunks=2, max_bn=256, IN_CORE_BATCH=16)
+  === Orchestrator Profiling (2050 submits) ===
+    start_time: 1772763738926071.750 us
+    end_time:   1772763738929383.750 us
+    sync:        110.400 us  ( 4.2%)
+    alloc:       163.420 us  ( 6.2%)
+    params:      325.520 us  (12.4%)
+    lookup:      588.240 us  (22.3%)
+    heap:        227.980 us  ( 8.7%)
+    insert:      422.520 us  (16.0%)
+    fanin:       403.800 us  (15.3%)
+    finalize:    345.060 us  (13.1%)
+    scope:        47.940 us  ( 1.8%)
+    others:      677.340 us  (25.7%)
+
+    total:      2634.880 us
+  Simulation execution:  268 us (0.268 ms)
+  === Scheduler Statistics ===
+
+  Metric                       Value
+  Tasks submitted              2050
+  Graph build time             3.340 ms
+  Simulation exec time         0.269 ms
+  Task throughput              2862454 tasks/s
+  Avg time per task            0.35 µs
+
+========================================
+Performance Tests Complete
+========================================
