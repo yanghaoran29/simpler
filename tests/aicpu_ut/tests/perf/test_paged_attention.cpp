@@ -47,6 +47,21 @@ static const PerfTestCase PERF_CASES[] = {
 static_assert(PERF_CASE_IDX >= 0 && PERF_CASE_IDX < (int)(sizeof(PERF_CASES) / sizeof(PERF_CASES[0])),
               "PERF_CASE_IDX out of range");
 
+// ─── Global data segment buffers (avoid stack/heap for large arrays) ───────────
+// Sized for PERF_CASES[]: batch=2, num_heads=4, head_dim=8, block_size=4, block_num=2
+static constexpr size_t GLOBAL_QUERY_SIZE       = 2 * 4 * 8 * sizeof(float);
+static constexpr size_t GLOBAL_KV_SIZE          = 2 * 2 * 4 * 8 * sizeof(float);
+static constexpr size_t GLOBAL_OUT_SIZE         = 2 * 4 * 8 * sizeof(float);
+static constexpr size_t GLOBAL_BLOCK_TABLE_CNT  = 2 * 2;
+static constexpr size_t GLOBAL_CONTEXT_LENS_CNT = 2;
+
+static float    g_query_buf[GLOBAL_QUERY_SIZE / sizeof(float)];
+static float    g_key_cache_buf[GLOBAL_KV_SIZE / sizeof(float)];
+static float    g_value_cache_buf[GLOBAL_KV_SIZE / sizeof(float)];
+static float    g_out_buf[GLOBAL_OUT_SIZE / sizeof(float)];
+static int      g_block_table[GLOBAL_BLOCK_TABLE_CNT];
+static int      g_context_lens[GLOBAL_CONTEXT_LENS_CNT];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // [2] Paged Attention Orchestration Logic (extracted from paged_attention_orch.cpp)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -252,17 +267,12 @@ static void run_paged_attention_case(const PerfTestCase& tc) {
     const size_t value_cache_size = batch * block_num * block_size * head_dim * sizeof(float);
     const size_t out_size         = batch * num_heads * head_dim * sizeof(float);
 
-    void* query_buf       = malloc(query_size);
-    void* key_cache_buf   = malloc(key_cache_size);
-    void* value_cache_buf = malloc(value_cache_size);
-    void* out_buf         = malloc(out_size);
-    int*  block_table     = (int*)malloc(batch * block_num * sizeof(int));
-    int*  context_lens    = (int*)malloc(batch * sizeof(int));
-
-    memset(query_buf, 0, query_size);
-    memset(key_cache_buf, 0, key_cache_size);
-    memset(value_cache_buf, 0, value_cache_size);
-    memset(out_buf, 0, out_size);
+    void* query_buf       = static_cast<void*>(g_query_buf);
+    void* key_cache_buf   = static_cast<void*>(g_key_cache_buf);
+    void* value_cache_buf = static_cast<void*>(g_value_cache_buf);
+    void* out_buf         = static_cast<void*>(g_out_buf);
+    int*  block_table     = g_block_table;
+    int*  context_lens    = g_context_lens;
 
     for (uint64_t i = 0; i < batch; i++) {
         context_lens[i] = (i < (uint64_t)tc.context_lens_count) ? tc.context_lens[i]
@@ -308,8 +318,6 @@ static void run_paged_attention_case(const PerfTestCase& tc) {
 #endif
     }
 
-    free(query_buf); free(key_cache_buf); free(value_cache_buf); free(out_buf);
-    free(block_table); free(context_lens);
     pto2_runtime_destroy(rt);
 
     // Performance data summary

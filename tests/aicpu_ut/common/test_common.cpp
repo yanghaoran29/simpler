@@ -116,7 +116,6 @@ int sim_run_all(PTO2Runtime* rt, int max_rounds) {
 #if PTO2_PROFILING
     g_sched_prof_data = {};
 #endif
-    auto t_start = std::chrono::high_resolution_clock::now();
 
     int total = 0;
     for (int r = 0; r < max_rounds; ++r) {
@@ -129,16 +128,11 @@ int sim_run_all(PTO2Runtime* rt, int max_rounds) {
         if (n == 0) break;
     }
 
-    auto t_end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
-
-    printf("  Simulation execution:  %lld us (%.3f ms)\n",
-           (long long)duration.count(), duration.count() / 1000.0);
-
     return total;
 }
 
 #if PTO2_PROFILING
+#if PTO2_ORCH_PROFILING
 void print_orch_profiling() {
     PTO2OrchProfilingData pd = pto2_orchestrator_get_profiling();
     uint64_t orch_total = pd.sync_cycle + pd.alloc_cycle + pd.params_cycle
@@ -159,6 +153,9 @@ void print_orch_profiling() {
     printf("\n");
     printf("    total:      %8.3f us\n", cycles_to_us(orch_total));
 }
+#else
+void print_orch_profiling() {}
+#endif
 
 void print_sched_profiling(PTO2Runtime* rt) {
     const char* wt_names[] = {"CUBE", "VECTOR", "AI_CPU", "ACCELERATOR"};
@@ -166,7 +163,7 @@ void print_sched_profiling(PTO2Runtime* rt) {
     for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++)
         total += g_sched_prof_data.tasks_dispatched[i];
 
-    printf("  === Scheduler Profiling (%lld tasks) ===\n", (long long)total);
+    printf("\n  === Scheduler Profiling (%lld tasks) ===\n", (long long)total);
     for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
         int64_t n = g_sched_prof_data.tasks_dispatched[i];
         if (n == 0) continue;

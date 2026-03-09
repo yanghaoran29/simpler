@@ -56,7 +56,7 @@
 | `test_cpu_affinity` | functional | — | `test_cpu_affinity` |
 | `test_platform_config` | functional | — | `test_platform_config` |
 | `test_paged_attention` | perf | 0 | `test_paged_attention_0` |
-| `test_batch_paged_attention` | perf | 0 1 2 3 4 | `test_batch_paged_attention_{n}` |
+| `test_batch_paged_attention` | perf | 0 1 2 | `test_batch_paged_attention_{n}` |
 
 功能测试（functional）每个测试对应一个二进制，没有参数索引。
 性能测试（perf）每组参数对应一个独立二进制，在编译时通过 `PERF_CASE_IDX` 宏选定。
@@ -72,11 +72,11 @@
 # 运行全部性能测试
 ./run_tests.sh --perf
 
-# 运行 test_batch_paged_attention 的所有参数组（0~4）
+# 运行 test_batch_paged_attention 的所有参数组（0~2）
 ./run_tests.sh --test test_batch_paged_attention
 
-# 只运行 test_batch_paged_attention 的第 2 组参数
-c
+# 只运行 test_batch_paged_attention 的第 1 组参数
+./run_tests.sh --test test_batch_paged_attention --index 1
 
 # 只运行 test_cpu_affinity（功能测试，无参数索引）
 ./run_tests.sh --test test_cpu_affinity

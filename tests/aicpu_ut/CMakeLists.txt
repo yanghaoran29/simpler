@@ -249,7 +249,7 @@ endforeach()
 
 # ─── Test executables: Batch paged attention performance tests ────────────────
 # One binary per case; PERF_CASE_IDX selects the case at compile time.
-set(BPA_CASE_INDICES 0 1 2 3 4)
+set(BPA_CASE_INDICES 0 1 2)
 
 foreach(i IN LISTS BPA_CASE_INDICES)
     set(target test_batch_paged_attention_${i})

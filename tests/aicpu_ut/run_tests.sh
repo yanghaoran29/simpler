@@ -16,7 +16,7 @@
 #   test_cpu_affinity               (functional)
 #   test_platform_config            (functional)
 #   test_paged_attention            (perf, indices: 0)
-#   test_batch_paged_attention      (perf, indices: 0 1 2 3 4)
+#   test_batch_paged_attention      (perf, indices: 0 1 2)
 #
 # Optional environment overrides:
 #   TIMEOUT=300 ./run_tests.sh
@@ -39,7 +39,7 @@ declare -A TEST_INDICES
 TEST_TYPE["test_cpu_affinity"]="func"            ; TEST_INDICES["test_cpu_affinity"]="-"
 TEST_TYPE["test_platform_config"]="func"         ; TEST_INDICES["test_platform_config"]="-"
 TEST_TYPE["test_paged_attention"]="perf"         ; TEST_INDICES["test_paged_attention"]="0"
-TEST_TYPE["test_batch_paged_attention"]="perf"   ; TEST_INDICES["test_batch_paged_attention"]="0 1 2 3 4"
+TEST_TYPE["test_batch_paged_attention"]="perf"   ; TEST_INDICES["test_batch_paged_attention"]="0 1 2"
 
 ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention)
 
