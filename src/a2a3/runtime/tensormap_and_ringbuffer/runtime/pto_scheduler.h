@@ -264,6 +264,9 @@ struct PTO2SchedulerState {
     // Dependency list pool reference
     PTO2DepListPool* dep_pool;
 
+    /** 当前测试场景下下发任务不要求 fanin_rc==fanin_cnt：为 true 时任务在 fanin_rc>=1 即视为可下发 */
+    bool ut_dispatch_without_fanin_satisfied;
+
     // Statistics
 #if PTO2_PROFILING
     std::atomic<int64_t> tasks_completed;
@@ -406,7 +409,9 @@ struct PTO2SchedulerState {
         // release in init_task, making fanin_count visible — plain load suffices.
         int32_t new_refcount = fanin_refcount[slot].fetch_add(1, std::memory_order_acq_rel) + 1;
 
-        if (new_refcount == task->fanin_count) {
+        bool ready = ut_dispatch_without_fanin_satisfied ? (new_refcount >= 1)
+                                                        : (new_refcount == task->fanin_count);
+        if (ready) {
             PTO2TaskState expected = PTO2_TASK_PENDING;
             if (task_state[slot].compare_exchange_strong(
                     expected, PTO2_TASK_READY, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -425,7 +430,9 @@ struct PTO2SchedulerState {
         int32_t new_refcount = fanin_refcount[slot].fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
 
-        if (new_refcount == task->fanin_count) {
+        bool ready = ut_dispatch_without_fanin_satisfied ? (new_refcount >= 1)
+                                                        : (new_refcount == task->fanin_count);
+        if (ready) {
             PTO2TaskState expected = PTO2_TASK_PENDING;
             if (task_state[slot].compare_exchange_strong(
                     expected, PTO2_TASK_READY, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -535,10 +542,12 @@ struct PTO2SchedulerState {
         PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
 #endif
 
+        // 完成任务时同时调用 release_fanin：对 fanout 中每个 consumer 调用 release_fanin_and_check_ready
         // Fanout: notify consumers
 #if PTO2_SCHED_PROFILING
         uint64_t fanout_atomics = 0, push_wait = 0;
 #endif
+
         while (current != nullptr) {
             int32_t consumer_id = current->task_id;
             PTO2TaskDescriptor* consumer = pto2_sm_get_task(sm_handle, consumer_id);
@@ -656,6 +665,20 @@ struct PTO2SchedProfilingData {
  * Returns accumulated profiling data and resets counters.
  */
 PTO2SchedProfilingData pto2_scheduler_get_profiling(int thread_idx);
+
+/**
+ * Print scheduler profiling data for the given thread to DEV_ALWAYS.
+ * Calls pto2_scheduler_get_profiling() internally (resets counters).
+ */
+void pto2_print_sched_profiling(int thread_idx);
+#endif
+
+#if PTO2_ORCH_PROFILING
+/**
+ * Print orchestrator profiling data to DEV_ALWAYS.
+ * Calls pto2_orchestrator_get_profiling() internally (resets counters).
+ */
+void pto2_print_orch_profiling();
 #endif
 
 #endif // PTO_SCHEDULER_H

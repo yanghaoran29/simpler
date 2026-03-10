@@ -9,7 +9,9 @@
 #   ./run_tests.sh --test <name>                   # run one test (all parameter sets)
 #   ./run_tests.sh --test <name> --idx <n>         # run one specific parameter set
 #   ./run_tests.sh --build-only                    # build without running
-#   ./run_tests.sh --no-profiling                  # disable PTO2_PROFILING macro
+#   ./run_tests.sh --no-profiling                  # disable all profiling (PTO2_*_PROFILING=OFF)
+#   ./run_tests.sh --no-sched-profiling            # disable only PTO2_SCHED_PROFILING
+#   ./run_tests.sh --no-orch-profiling             # disable only PTO2_ORCH_PROFILING
 #   ./run_tests.sh --list                          # list all available tests
 #
 # Available tests:
@@ -24,6 +26,7 @@
 #   PLATFORM_MAX_BLOCKDIM=32 ./run_tests.sh
 #   BUILD_DIR=/tmp/my_build ./run_tests.sh
 #   PTO2_PROFILING=OFF ./run_tests.sh
+#   PTO2_SCHED_PROFILING=OFF PTO2_ORCH_PROFILING=ON ./run_tests.sh
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e
@@ -62,7 +65,10 @@ PLATFORM_AIC_CORES_PER_BLOCKDIM=${PLATFORM_AIC_CORES_PER_BLOCKDIM:-1}
 PLATFORM_AIV_CORES_PER_BLOCKDIM=${PLATFORM_AIV_CORES_PER_BLOCKDIM:-2}
 PLATFORM_MAX_AICPU_THREADS=${PLATFORM_MAX_AICPU_THREADS:-4}
 
+# Profiling: default all ON. --no-profiling sets all OFF. PTO2_PROFILING is OFF only when both SCHED and ORCH are OFF.
 PTO2_PROFILING=${PTO2_PROFILING:-ON}
+PTO2_SCHED_PROFILING=${PTO2_SCHED_PROFILING:-ON}
+PTO2_ORCH_PROFILING=${PTO2_ORCH_PROFILING:-ON}
 
 RUN_FUNC=true
 RUN_PERF=true
@@ -76,7 +82,9 @@ while [[ $# -gt 0 ]]; do
         --func)         RUN_PERF=false; shift ;;
         --perf)         RUN_FUNC=false; shift ;;
         --build-only)   BUILD_ONLY=true; shift ;;
-        --no-profiling) PTO2_PROFILING=OFF; shift ;;
+        --no-profiling)       PTO2_PROFILING=OFF; PTO2_SCHED_PROFILING=OFF; PTO2_ORCH_PROFILING=OFF; shift ;;
+        --no-sched-profiling) PTO2_SCHED_PROFILING=OFF; shift ;;
+        --no-orch-profiling)  PTO2_ORCH_PROFILING=OFF; shift ;;
         --test)
             if [[ -z "${2:-}" ]]; then
                 echo "--test requires a test name argument." >&2; exit 1
@@ -127,6 +135,13 @@ if [ -n "$FILTER_TEST" ]; then
             exit 1
         fi
     fi
+fi
+
+# PTO2_PROFILING is OFF only when both PTO2_SCHED_PROFILING and PTO2_ORCH_PROFILING are OFF
+if [ "$PTO2_SCHED_PROFILING" = "OFF" ] && [ "$PTO2_ORCH_PROFILING" = "OFF" ]; then
+    PTO2_PROFILING=OFF
+else
+    PTO2_PROFILING=ON
 fi
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -198,7 +213,7 @@ echo "  Configuring with CMake"
 echo "============================================================"
 echo "  Build dir : $BUILD_DIR"
 echo "  Source dir: $SCRIPT_DIR"
-echo "  Profiling : $PTO2_PROFILING"
+echo "  Profiling : PTO2_PROFILING=$PTO2_PROFILING PTO2_SCHED_PROFILING=$PTO2_SCHED_PROFILING PTO2_ORCH_PROFILING=$PTO2_ORCH_PROFILING"
 
 mkdir -p "$BUILD_DIR"
 
@@ -216,7 +231,9 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
     -DPLATFORM_AIC_CORES_PER_BLOCKDIM="$PLATFORM_AIC_CORES_PER_BLOCKDIM" \
     -DPLATFORM_AIV_CORES_PER_BLOCKDIM="$PLATFORM_AIV_CORES_PER_BLOCKDIM" \
     -DPLATFORM_MAX_AICPU_THREADS="$PLATFORM_MAX_AICPU_THREADS" \
-    -DPTO2_PROFILING="$PTO2_PROFILING"
+    -DPTO2_PROFILING="$PTO2_PROFILING" \
+    -DPTO2_SCHED_PROFILING="$PTO2_SCHED_PROFILING" \
+    -DPTO2_ORCH_PROFILING="$PTO2_ORCH_PROFILING"
 
 # ─── Step 2: Build ────────────────────────────────────────────────────────────
 echo ""

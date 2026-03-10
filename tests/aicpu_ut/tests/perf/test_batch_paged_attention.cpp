@@ -17,8 +17,8 @@
  *
  * Test cases:
  *   - Case1:       batch=64, num_heads=16, head_dim=128, block_size=128, context_len=8193
- *   - CaseVarSeq2: batch=2,  context_lens=[8193, 4096]
- *   - CaseVarSeq4: batch=4,  context_lens=[8193, 4096, 1024, 256]
+ *   - CaseVarSeq2: batch=2,  context_lens=[8192, 4096]
+ *   - CaseVarSeq4: batch=4,  context_lens=[8192, 4096, 1024, 256]
  *
  * Build:
  *   cd simpler/tests/orchestration_ut && make build && make run
@@ -30,11 +30,17 @@
 #include "pto_runtime2.h"
 #include "test_common.h"
 #include "json_cases.h"
+#if defined(PTO2_SIM_AICORE_UT)
+#include "aicpu_sim_api.h"
+#endif
 #include "common/platform_config.h"
 #include "cpu_affinity.h"
 #include <cstring>
 #include <algorithm>
 #include <cstdint>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 // ─── Embedded test cases ──────────────────────────────────────────────────────
 // Set PERF_CASE_IDX at compile time to select the case (0, 1, or 2).
@@ -46,17 +52,17 @@ static const PerfTestCase PERF_CASES[] = {
     {   // 0: Case1
         "Case1 (batch=64, num_heads=16, head_dim=128, block_size=128, context_len=8193)",
         64, 16, 1, 128, 128, 256, 1.0f,
-        {8193}, 1,
+        {8193}, 1,  // Changed from 8192 to 8193 to align with device_tests
     },
     {   // 1: CaseVarSeq2
-        "CaseVarSeq2 (batch=2, context_lens=[8193,4096])",
+        "CaseVarSeq2 (batch=2, context_lens=[8192,4096])",
         2, 16, 1, 128, 128, 256, 1.0f,
-        {8193, 4096}, 2,
+        {8192, 4096}, 2,
     },
     {   // 2: CaseVarSeq4
-        "CaseVarSeq4 (batch=4, context_lens=[8193,4096,1024,256])",
+        "CaseVarSeq4 (batch=4, context_lens=[8192,4096,1024,256])",
         4, 16, 1, 128, 128, 256, 1.0f,
-        {8193, 4096, 1024, 256}, 4,
+        {8192, 4096, 1024, 256}, 4,
     },
 };
 
@@ -93,18 +99,17 @@ static int   g_context_lens[GLOBAL_MAX_BATCH];
 #define FUNC_AIC_HUB 4
 #define FUNC_AIV_HUB 5
 
+// Synchronization flags for concurrent orchestrator/scheduler threads
+static std::atomic<bool> g_orchestration_started(false);
+
 /**
  * Batch Paged Attention orchestration function
  *
- * This is adapted from batch_paged_attention/paged_attention_orch.cpp, but:
- * - Uses PTO2Runtime directly instead of PTO2Runtime* from orchestration API
- * - All Tensor objects must be in a local scope to ensure proper destruction
- * - Implements chunked batched architecture with IN_CORE_BATCH
+ * This is adapted from batch_paged_attention/paged_attention_orch.cpp.
  */
 static void build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;  // Suppress unused warning
 
-    TensorPool::set_instance(&rt->orchestrator.tensor_pool);
 
     // Extract device pointers
     void* host_query = reinterpret_cast<void*>(args[0]);
@@ -305,7 +310,7 @@ static void run_batch_perf(const PerfTestCase& tc) {
 
     const size_t query_size       = batch * num_heads * head_dim * sizeof(float);
     const size_t kv_cache_size    = batch * block_num * block_size * head_dim * sizeof(float);
-    const size_t out_size         = batch * num_heads * head_dim * sizeof(float);
+    (void)(batch * num_heads * head_dim * sizeof(float));  // out_size unused
 
     void* query_buf       = static_cast<void*>(g_query_buf);
     void* kv_cache_buf    = static_cast<void*>(g_kv_cache_buf);
@@ -318,8 +323,17 @@ static void run_batch_perf(const PerfTestCase& tc) {
     void* value_cache_buf = kv_cache_buf;
 
     for (uint64_t i = 0; i < batch; i++) {
-        context_lens[i] = (i < (uint64_t)tc.context_lens_count) ? tc.context_lens[i]
-                                                                  : (int)(block_size * block_num);
+        // Align with device_tests golden.py behavior:
+        // - If multiple context_lens specified: cycle through them
+        // - If single context_len specified: use it for all batches
+        // This avoids using block_size * block_num (max_model_len) which causes task count mismatch
+        if (tc.context_lens_count > 0) {
+            // Cycle through the provided context_lens array
+            context_lens[i] = tc.context_lens[i % tc.context_lens_count];
+        } else {
+            // Fallback: use max sequence length if no context_lens specified
+            context_lens[i] = (int)(block_size * block_num);
+        }
         for (uint64_t j = 0; j < block_num; j++)
             block_table[i * block_num + j] = static_cast<int>(i * block_num + j);
     }
@@ -347,6 +361,11 @@ static void run_batch_perf(const PerfTestCase& tc) {
     PTO2Runtime* rt = make_runtime();
     if (!rt) { printf("  [ERROR] make_runtime() failed\n"); return; }
 
+#if defined(PTO2_SIM_AICORE_UT)
+    // 当前测试场景：下发任务不检查依赖，fanin_rc>=1 即可下发（必须在建图前设置，init_task 才会生效）
+    rt->scheduler.ut_dispatch_without_fanin_satisfied = true;
+#endif
+
     {  // Tensor scope
         build_batch_paged_attention_graph(rt, args, 10);
 
@@ -354,7 +373,12 @@ static void run_batch_perf(const PerfTestCase& tc) {
         print_orch_profiling();
 #endif
 
-        sim_run_all(rt);
+#if defined(PTO2_SIM_AICORE_UT)
+        if (aicpu_sim_run_pto2(rt, 3) != 0)
+            printf("  [ERROR] aicpu_sim_run_pto2 failed\n");
+#else
+        sim_run_with_resolve_and_dispatch(rt, 3);
+#endif
 
 #if PTO2_PROFILING
         print_sched_profiling(rt);

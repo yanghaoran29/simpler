@@ -24,7 +24,6 @@ examples/scripts/_deps/
 
 # Profiling files
 outputs
-perf.data
 
 # Mid-work documentation
 .docs

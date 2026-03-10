@@ -209,7 +209,11 @@ constexpr uint32_t PLATFORM_MAX_PHYSICAL_CORES = 25;
 #define TASK_FIN_STATE     1
 
 #define EXTRACT_TASK_ID(regval)    ((int)((regval) & TASK_ID_MASK))
+#ifdef PTO2_SIM_AICORE_UT
+#define EXTRACT_TASK_STATE(regval) TASK_FIN_STATE
+#else
 #define EXTRACT_TASK_STATE(regval) ((int)(((regval) & TASK_STATE_MASK) >> 31))
+#endif
 #define MAKE_ACK_VALUE(task_id)    ((uint64_t)((task_id) & TASK_ID_MASK))
 #define MAKE_FIN_VALUE(task_id)    ((uint64_t)(((task_id) & TASK_ID_MASK) | TASK_STATE_MASK))
 

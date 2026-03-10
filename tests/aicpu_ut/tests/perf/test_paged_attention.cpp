@@ -24,6 +24,9 @@
 #include "pto_runtime2.h"
 #include "test_common.h"
 #include "json_cases.h"
+#if defined(PTO2_SIM_AICORE_UT)
+#include "aicpu_sim_api.h"
+#endif
 #include "common/platform_config.h"
 #include "cpu_affinity.h"
 #include <cstring>
@@ -83,7 +86,6 @@ static int      g_context_lens[GLOBAL_CONTEXT_LENS_CNT];
 static void build_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;  // Suppress unused warning
 
-    TensorPool::set_instance(&rt->orchestrator.tensor_pool);
 
     // Extract device pointers
     void* host_query = reinterpret_cast<void*>(args[0]);
@@ -265,7 +267,7 @@ static void run_paged_attention_case(const PerfTestCase& tc) {
     const size_t query_size       = batch * num_heads * head_dim * sizeof(float);
     const size_t key_cache_size   = batch * block_num * block_size * head_dim * sizeof(float);
     const size_t value_cache_size = batch * block_num * block_size * head_dim * sizeof(float);
-    const size_t out_size         = batch * num_heads * head_dim * sizeof(float);
+    (void)(batch * num_heads * head_dim * sizeof(float));  // out_size unused
 
     void* query_buf       = static_cast<void*>(g_query_buf);
     void* key_cache_buf   = static_cast<void*>(g_key_cache_buf);
@@ -311,7 +313,12 @@ static void run_paged_attention_case(const PerfTestCase& tc) {
         print_orch_profiling();
 #endif
 
-        sim_run_all(rt);
+#if defined(PTO2_SIM_AICORE_UT)
+        if (aicpu_sim_run_pto2(rt, 3) != 0)
+            printf("  [ERROR] aicpu_sim_run_pto2 failed\n");
+#else
+        sim_run_with_resolve_and_dispatch(rt, 3);
+#endif
 
 #if PTO2_PROFILING
         print_sched_profiling(rt);

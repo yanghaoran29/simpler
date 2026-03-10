@@ -40,15 +40,27 @@ set(PLATFORM_AIV_CORES_PER_BLOCKDIM  "2"  CACHE STRING "AIV cores per blockdim")
 set(PLATFORM_MAX_AICPU_THREADS       "4"  CACHE STRING "Max AICPU threads")
 
 # ─── Profiling control ────────────────────────────────────────────────────────
+# PTO2_PROFILING: master switch (typically ON when either SCHED or ORCH is ON).
+# PTO2_SCHED_PROFILING / PTO2_ORCH_PROFILING: can be toggled independently via run_tests.sh.
 option(PTO2_PROFILING "Enable PTO2 profiling instrumentation" ON)
+option(PTO2_SCHED_PROFILING "Enable scheduler profiling" ON)
+option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" ON)
+
+# ─── Sim AICore / 0-core paths (for aicpu_ut perf) ─────────────────────────────
+# When ON: enables cores_total_num_==0, sim_aicore_mode, core_num==0 drain loop in executor.
+# Define PTO2_SIM_AICORE_UT=1 so that executor/Runtime sim branches are compiled in.
+# Default ON for aicpu_ut so that perf tests get current behavior when executor is linked.
+option(PTO2_SIM_AICORE_UT "Enable sim AICore and 0-core paths (aicpu_ut perf)" ON)
 
 # ─── Source directories ────────────────────────────────────────────────────────
 set(ROOT_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 set(RUNTIME_DIR ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/runtime)
+set(AICPU_DIR   ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/aicpu)
 set(ORCH_DIR    ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/orchestration)
 set(COMMON_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/common)
 set(FUNC_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional)
 set(PERF_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/tests/perf)
+set(PLATFORM_AICPU_DIR ${ROOT_DIR}/src/a2a3/platform/src/aicpu)
 
 # ─── Common include directories ───────────────────────────────────────────────
 set(COMMON_INCLUDES
@@ -57,6 +69,9 @@ set(COMMON_INCLUDES
     ${ORCH_DIR}
     ${COMMON_DIR}
 )
+if(PTO2_SIM_AICORE_UT)
+    list(APPEND COMMON_INCLUDES ${AICPU_DIR} ${ROOT_DIR}/src/a2a3/platform/sim/aicpu)
+endif()
 
 # ─── Common compile definitions ───────────────────────────────────────────────
 set(COMMON_COMPILE_DEFS
@@ -76,8 +91,15 @@ set(COMMON_COMPILE_DEFS
 )
 if(PTO2_PROFILING)
     list(APPEND COMMON_COMPILE_DEFS PTO2_PROFILING=1)
-    list(APPEND COMMON_COMPILE_DEFS PTO2_ORCH_PROFILING=1)
+endif()
+if(PTO2_SCHED_PROFILING)
     list(APPEND COMMON_COMPILE_DEFS PTO2_SCHED_PROFILING=1)
+endif()
+if(PTO2_ORCH_PROFILING)
+    list(APPEND COMMON_COMPILE_DEFS PTO2_ORCH_PROFILING=1)
+endif()
+if(PTO2_SIM_AICORE_UT)
+    list(APPEND COMMON_COMPILE_DEFS PTO2_SIM_AICORE_UT=1)
 endif()
 
 # ─── Common compile options ───────────────────────────────────────────────────
@@ -102,6 +124,15 @@ set(RUNTIME_SRCS
     ${ORCH_DIR}/common.cpp
     ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/device_time.cpp
 )
+if(PTO2_SIM_AICORE_UT)
+    list(APPEND RUNTIME_SRCS
+        ${RUNTIME_DIR}/runtime.cpp
+        ${AICPU_DIR}/aicpu_executor.cpp
+        ${PLATFORM_AICPU_DIR}/platform_regs.cpp
+        ${PLATFORM_AICPU_DIR}/performance_collector_aicpu.cpp
+        ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/cache_ops.cpp
+    )
+endif()
 
 # ─── Common test source files ─────────────────────────────────────────────────
 set(COMMON_TEST_SRCS
