@@ -94,6 +94,19 @@ struct alignas(64) PTO2ReadyQueue {
         return true;
     }
 
+    // Push under exclusive enqueue_lock — plain store on enqueue_pos, no CAS retry.
+    // Caller must hold the scheduler's enqueue_lock.
+    bool push_locked(int32_t task_id) {
+        uint64_t pos = enqueue_pos.load(std::memory_order_relaxed);
+        PTO2ReadyQueueSlot* slot = &slots[pos & mask];
+        int64_t seq = slot->sequence.load(std::memory_order_acquire);
+        if (seq != (int64_t)pos) return false;  // Queue full
+        enqueue_pos.store(pos + 1, std::memory_order_relaxed);
+        slot->task_id = task_id;
+        slot->sequence.store((int64_t)(pos + 1), std::memory_order_release);
+        return true;
+    }
+
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
     bool push(int32_t task_id, uint64_t& atomic_count, uint64_t& wait_cycle) {
         uint64_t pos;
@@ -162,6 +175,35 @@ struct alignas(64) PTO2ReadyQueue {
         return task_id;
     }
 
+    // Batch pop: dequeues up to max_count items, returns actual count popped.
+    int32_t pop_batch(int32_t* out, int max_count) {
+        int count = 0;
+        uint64_t d = dequeue_pos.load(std::memory_order_relaxed);
+        uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
+        int to_try = (d < e) ? (int)(e - d) : 0;
+        if (to_try > max_count) to_try = max_count;
+        for (int i = 0; i < to_try; i++) {
+            uint64_t pos;
+            PTO2ReadyQueueSlot* slot;
+            while (true) {
+                pos = dequeue_pos.load(std::memory_order_relaxed);
+                slot = &slots[pos & mask];
+                int64_t seq = slot->sequence.load(std::memory_order_acquire);
+                int64_t diff = seq - (int64_t)(pos + 1);
+                if (diff == 0) {
+                    if (dequeue_pos.compare_exchange_weak(pos, pos + 1,
+                            std::memory_order_relaxed, std::memory_order_relaxed))
+                        break;
+                } else if (diff < 0) {
+                    return count;  // Queue emptied by concurrent consumer
+                }
+            }
+            out[count++] = slot->task_id;
+            slot->sequence.store((int64_t)(pos + mask + 1), std::memory_order_release);
+        }
+        return count;
+    }
+
 #if PTO2_SCHED_PROFILING
     int32_t pop(uint64_t& atomic_count, uint64_t& wait_cycle) {
         // Fast-path: skip slot load when queue is clearly empty
@@ -207,6 +249,52 @@ struct alignas(64) PTO2ReadyQueue {
         int32_t task_id = slot->task_id;
         slot->sequence.store((int64_t)(pos + mask + 1), std::memory_order_release);
         return task_id;
+    }
+
+    int32_t pop_batch(int32_t* out, int max_count,
+                      uint64_t& atomic_count, uint64_t& wait_cycle) {
+        int count = 0;
+        uint64_t d = dequeue_pos.load(std::memory_order_relaxed);
+        uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
+        atomic_count += 2;  // dequeue_pos.load + enqueue_pos.load
+        int to_try = (d < e) ? (int)(e - d) : 0;
+        if (to_try > max_count) to_try = max_count;
+        for (int i = 0; i < to_try; i++) {
+            uint64_t pos;
+            PTO2ReadyQueueSlot* slot;
+            uint64_t t0 = get_sys_cnt_aicpu();
+            bool contended = false;
+            uint32_t atomic_ops = 0;
+            while (true) {
+                pos = dequeue_pos.load(std::memory_order_relaxed);
+                slot = &slots[pos & mask];
+                int64_t seq = slot->sequence.load(std::memory_order_acquire);
+                int64_t diff = seq - (int64_t)(pos + 1);
+                atomic_ops += 2;  // dequeue_pos.load + sequence.load
+                if (diff == 0) {
+                    if (dequeue_pos.compare_exchange_weak(pos, pos + 1,
+                            std::memory_order_relaxed, std::memory_order_relaxed)) {
+                        atomic_ops++;  // successful CAS
+                        break;
+                    }
+                    contended = true;
+                    atomic_ops++;  // failed CAS
+                } else if (diff < 0) {
+                    atomic_count += atomic_ops;
+                    return count;  // Queue emptied by concurrent consumer
+                } else {
+                    contended = true;
+                }
+            }
+            atomic_ops++;  // final sequence.store
+            atomic_count += atomic_ops;
+            if (contended) {
+                wait_cycle += (get_sys_cnt_aicpu() - t0);
+            }
+            out[count++] = slot->task_id;
+            slot->sequence.store((int64_t)(pos + mask + 1), std::memory_order_release);
+        }
+        return count;
     }
 #endif
 };
@@ -270,10 +358,24 @@ struct PTO2SchedulerState {
     std::atomic<int64_t> tasks_consumed;
 #endif
     std::atomic<int32_t> ring_advance_lock{0};  // Try-lock for advance_ring_pointers
+    std::atomic<int32_t> enqueue_lock{0};        // Spinlock: serialises batch push to ready_queues
 
     // =========================================================================
     // Inline hot-path methods
     // =========================================================================
+
+    void enqueue_lock_acquire() {
+        int32_t exp = 0;
+        while (!enqueue_lock.compare_exchange_weak(exp, 1,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
+            exp = 0;
+            SPIN_WAIT_HINT();
+        }
+    }
+
+    void enqueue_lock_release() {
+        enqueue_lock.store(0, std::memory_order_release);
+    }
 
     int32_t pto2_task_slot(int32_t task_id) {
         return task_id & task_window_mask;
@@ -417,6 +519,22 @@ struct PTO2SchedulerState {
         return false;
     }
 
+#if PTO2_BATCH_ENQUEUE
+    // Batch-enqueue variant: one atomic per task (fetch_add only), push deferred.
+    // Returns true if the task just became READY; caller must enqueue it.
+    bool check_fanin_ready(int32_t task_id, PTO2TaskDescriptor* task) {
+        int32_t slot = pto2_task_slot(task_id);
+        // Exactly one thread will observe new_refcount == fanin_count, so a plain
+        // store suffices to transition PENDING→READY — no CAS needed.
+        int32_t new_refcount = fanin_refcount[slot].fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (new_refcount == task->fanin_count) {
+            task_state[slot].store(PTO2_TASK_READY, std::memory_order_release);
+            return true;
+        }
+        return false;
+    }
+#endif
+
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
     bool release_fanin_and_check_ready(int32_t task_id, PTO2TaskDescriptor* task,
                                         uint64_t& atomic_count, uint64_t& push_wait) {
@@ -467,10 +585,21 @@ struct PTO2SchedulerState {
         return ready_queues[worker_type].pop();
     }
 
+    int32_t get_ready_tasks_batch(PTO2WorkerType worker_type,
+                                   int32_t* out, int max_count) {
+        return ready_queues[worker_type].pop_batch(out, max_count);
+    }
+
 #if PTO2_SCHED_PROFILING
     int32_t get_ready_task(PTO2WorkerType worker_type,
                            uint64_t& atomic_count, uint64_t& wait_cycle) {
         return ready_queues[worker_type].pop(atomic_count, wait_cycle);
+    }
+
+    int32_t get_ready_tasks_batch(PTO2WorkerType worker_type,
+                                   int32_t* out, int max_count,
+                                   uint64_t& atomic_count, uint64_t& wait_cycle) {
+        return ready_queues[worker_type].pop_batch(out, max_count, atomic_count, wait_cycle);
     }
 #endif
 
@@ -604,6 +733,166 @@ struct PTO2SchedulerState {
 
         return stats;
     }
+#if PTO2_BATCH_ENQUEUE
+    // Optimised on_task_complete: one atomic per fanout consumer, one lock/unlock
+    // to batch-push all ready consumers.
+    //
+    // Versus the default implementation, per completed task this eliminates:
+    //   - one CAS (task_state PENDING→READY) per ready consumer
+    //   - N-1 enqueue_pos CAS rounds in the Vyukov push (replaced by one spinlock)
+    //
+    // Trade-off: enqueue_lock serialises concurrent batch pushes from different
+    // worker threads, but contention is brief (only while advancing enqueue_pos
+    // for each ready consumer).
+#if PTO2_SCHED_PROFILING
+    PTO2CompletionStats on_task_complete_batch(int32_t task_id, int thread_idx) {
+#else
+    PTO2CompletionStats on_task_complete_batch(int32_t task_id) {
+#endif
+        PTO2CompletionStats stats = {0, 0, 0};
+        int32_t slot = pto2_task_slot(task_id);
+        PTO2TaskDescriptor* task = pto2_sm_get_task(sm_handle, task_id);
+
+#if PTO2_PROFILING
+        tasks_completed.fetch_add(1, std::memory_order_relaxed);
+#endif
+
+#if PTO2_SCHED_PROFILING
+        extern uint64_t g_sched_lock_cycle[], g_sched_fanout_cycle[];
+        extern uint64_t g_sched_fanin_cycle[], g_sched_self_consumed_cycle[];
+        extern uint64_t g_sched_lock_atomic_count[], g_sched_lock_wait_cycle[];
+        extern uint64_t g_sched_fanout_atomic_count[], g_sched_push_wait_cycle[];
+        extern uint64_t g_sched_fanin_atomic_count[], g_sched_self_atomic_count[];
+        extern uint64_t g_sched_complete_count[];
+        uint64_t lock_atomics = 0, lock_wait = 0;
+        PTO2_SCHED_CYCLE_START();
+#endif
+
+        // Mark COMPLETED and snapshot the fanout list under fanout_lock
+#if PTO2_SCHED_PROFILING
+        pto2_fanout_lock(task, lock_atomics, lock_wait);
+#else
+        pto2_fanout_lock(task);
+#endif
+        task_state[slot].store(PTO2_TASK_COMPLETED, std::memory_order_release);
+        PTO2DepListEntry* current = task->fanout_head;  // Protected by fanout_lock
+        pto2_fanout_unlock(task);
+
+#if PTO2_SCHED_PROFILING
+        lock_atomics += 2;  // state.store + unlock.store
+        g_sched_lock_atomic_count[thread_idx] += lock_atomics;
+        g_sched_lock_wait_cycle[thread_idx] += lock_wait;
+        PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
+#endif
+
+        // Fanout: one atomic per consumer — collect ready consumers locally,
+        // then batch-enqueue with a single lock/unlock.
+#if PTO2_SCHED_PROFILING
+        uint64_t fanout_atomics = 0, push_wait = 0;
+#endif
+        int32_t ready_ids[128];
+        PTO2WorkerType ready_types[128];
+        int32_t ready_count = 0;
+
+        while (current != nullptr) {
+            int32_t consumer_id = current->task_id;
+            int32_t consumer_slot = pto2_task_slot(consumer_id);
+            PTO2TaskDescriptor* consumer = pto2_sm_get_task(sm_handle, consumer_id);
+#if PTO2_PROFILING
+            stats.fanout_edges++;
+#endif
+            int32_t new_rc = fanin_refcount[consumer_slot].fetch_add(1, std::memory_order_acq_rel) + 1;
+#if PTO2_SCHED_PROFILING
+            fanout_atomics += 1;
+#endif
+            if (new_rc == consumer->fanin_count) {
+                task_state[consumer_slot].store(PTO2_TASK_READY, std::memory_order_release);
+                ready_ids[ready_count] = consumer_id;
+                ready_types[ready_count] = (PTO2WorkerType)consumer->worker_type;
+                ready_count++;
+#if PTO2_SCHED_PROFILING
+                fanout_atomics += 1;
+#endif
+#if PTO2_PROFILING
+                stats.tasks_enqueued++;
+#endif
+            }
+            current = current->next;
+        }
+
+        if (ready_count == 1) {
+            // Single ready consumer: direct lock-free push, no spinlock needed.
+#if PTO2_SCHED_PROFILING
+            ready_queues[ready_types[0]].push(ready_ids[0], fanout_atomics, push_wait);
+#else
+            ready_queues[ready_types[0]].push(ready_ids[0]);
+#endif
+        } else if (ready_count > 1) {
+            // Multiple ready consumers: batch-push under enqueue_lock.
+#if PTO2_SCHED_PROFILING
+            uint64_t t0 = get_sys_cnt_aicpu();
+#endif
+            enqueue_lock_acquire();
+#if PTO2_SCHED_PROFILING
+            push_wait += (get_sys_cnt_aicpu() - t0);
+            fanout_atomics += 1;
+#endif
+            for (int32_t i = 0; i < ready_count; i++) {
+                ready_queues[ready_types[i]].push_locked(ready_ids[i]);
+#if PTO2_SCHED_PROFILING
+                fanout_atomics += 4;
+#endif
+            }
+            enqueue_lock_release();
+#if PTO2_SCHED_PROFILING
+            fanout_atomics += 1;
+#endif
+        }
+
+#if PTO2_SCHED_PROFILING
+        g_sched_fanout_atomic_count[thread_idx] += fanout_atomics;
+        g_sched_push_wait_cycle[thread_idx] += push_wait;
+        PTO2_SCHED_CYCLE_LAP(g_sched_fanout_cycle[thread_idx]);
+#endif
+
+        // Fanin: release producers
+#if PTO2_SCHED_PROFILING
+        uint64_t fanin_atomics = 0;
+#endif
+        current = task->fanin_head;
+        while (current != nullptr) {
+            int32_t producer_id = current->task_id;
+#if PTO2_SCHED_PROFILING
+            release_producer(producer_id, fanin_atomics);
+#else
+            release_producer(producer_id);
+#endif
+#if PTO2_PROFILING
+            stats.fanin_edges++;
+#endif
+            current = current->next;
+        }
+
+#if PTO2_SCHED_PROFILING
+        g_sched_fanin_atomic_count[thread_idx] += fanin_atomics;
+        PTO2_SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
+#endif
+
+        // Self consumed check
+#if PTO2_SCHED_PROFILING
+        uint64_t self_atomics = 0;
+        check_and_handle_consumed(task_id, task, self_atomics);
+        g_sched_self_atomic_count[thread_idx] += self_atomics;
+        PTO2_SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
+        g_sched_complete_count[thread_idx]++;
+#else
+        check_and_handle_consumed(task_id, task);
+#endif
+
+        return stats;
+    }
+#endif  // PTO2_BATCH_ENQUEUE
+
 };
 
 // =============================================================================

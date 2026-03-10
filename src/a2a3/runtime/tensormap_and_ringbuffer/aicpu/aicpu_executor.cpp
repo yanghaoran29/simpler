@@ -553,26 +553,28 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
 #endif
             if (completed_match) {
                 int32_t task_id = executing_task_ids_[core_id];
+#if PTO2_BATCH_ENQUEUE
+#if PTO2_SCHED_PROFILING
+                PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
+                PTO2CompletionStats cstats = rt->scheduler.on_task_complete_batch(task_id, thread_idx);
+#else
+                PTO2CompletionStats cstats = rt->scheduler.on_task_complete_batch(task_id);
+#endif
+#else  // !PTO2_BATCH_ENQUEUE
 #if PTO2_SCHED_PROFILING
                 PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
                 PTO2CompletionStats cstats = rt->scheduler.on_task_complete(task_id, thread_idx);
-                notify_edges_total += cstats.fanout_edges;
-                if (cstats.fanout_edges > notify_max_degree) notify_max_degree = cstats.fanout_edges;
-                notify_tasks_enqueued += cstats.tasks_enqueued;
-                fanin_edges_total += cstats.fanin_edges;
-                if (cstats.fanin_edges > fanin_max_degree) fanin_max_degree = cstats.fanin_edges;
-                phase_complete_count++;
-#elif PTO2_PROFILING
-                PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
-                PTO2CompletionStats cstats = rt->scheduler.on_task_complete(task_id);
-                notify_edges_total += cstats.fanout_edges;
-                if (cstats.fanout_edges > notify_max_degree) notify_max_degree = cstats.fanout_edges;
-                notify_tasks_enqueued += cstats.tasks_enqueued;
-                fanin_edges_total += cstats.fanin_edges;
-                if (cstats.fanin_edges > fanin_max_degree) fanin_max_degree = cstats.fanin_edges;
-                phase_complete_count++;
 #else
-                rt->scheduler.on_task_complete(task_id);
+                PTO2CompletionStats cstats = rt->scheduler.on_task_complete(task_id);
+#endif
+#endif  // PTO2_BATCH_ENQUEUE
+#if PTO2_PROFILING
+                notify_edges_total += cstats.fanout_edges;
+                if (cstats.fanout_edges > notify_max_degree) notify_max_degree = cstats.fanout_edges;
+                notify_tasks_enqueued += cstats.tasks_enqueued;
+                fanin_edges_total += cstats.fanin_edges;
+                if (cstats.fanin_edges > fanin_max_degree) fanin_max_degree = cstats.fanin_edges;
+                phase_complete_count++;
 #endif
                 executing_task_ids_[core_id] = AICPU_TASK_INVALID;
 
@@ -629,47 +631,79 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
 
         // Phase 2: Dispatch ready tasks to idle cores (register-based dispatch)
         if (cur_thread_tasks_in_flight < core_num) {
-            bool cube_queue_empty = false, vector_queue_empty = false;
-            for (int i = 0; i < core_num; i++) {
-                if (cube_queue_empty && vector_queue_empty) {
-#if PTO2_SCHED_PROFILING
-                    pop_miss++;
-#endif
-                    break;
+#if PTO2_BATCH_DISPATCH
+            auto dispatch_batch = [&]() {
+                // Pass 1: Collect idle cores and count by worker type
+                int idle_cores[RUNTIME_MAX_WORKER];
+                PTO2WorkerType idle_wts[RUNTIME_MAX_WORKER];
+                int idle_count = 0;
+                int aic_idle = 0, aiv_idle = 0;
+                for (int i = 0; i < core_num; i++) {
+                    int core_id = cur_thread_cores[i];
+                    uint64_t reg_addr = core_id_to_reg_addr_[core_id];
+                    uint64_t reg_val = read_reg(reg_addr, RegId::COND);
+                    int reg_state = EXTRACT_TASK_STATE(reg_val);
+                    if (reg_state == TASK_FIN_STATE && executing_task_ids_[core_id] == AICPU_TASK_INVALID) {
+                        Handshake* h = &hank[core_id];
+                        PTO2WorkerType wt = (h->core_type == CoreType::AIC) ? PTO2_WORKER_CUBE : PTO2_WORKER_VECTOR;
+                        idle_cores[idle_count] = core_id;
+                        idle_wts[idle_count] = wt;
+                        idle_count++;
+                        if (wt == PTO2_WORKER_CUBE) aic_idle++;
+                        else                        aiv_idle++;
+                    }
                 }
-                int core_id = cur_thread_cores[i];
-                // Skip cores that are still executing (avoid unnecessary MMIO read)
-                if (executing_task_ids_[core_id] != AICPU_TASK_INVALID) continue;
 
-                uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-                uint64_t reg_val = read_reg(reg_addr, RegId::COND);
-                int reg_state = EXTRACT_TASK_STATE(reg_val);
-                if (reg_state == TASK_FIN_STATE) {
-                    Handshake* h = &hank[core_id];
-                    PTO2WorkerType wt = (h->core_type == CoreType::AIC) ? PTO2_WORKER_CUBE : PTO2_WORKER_VECTOR;
+                if (idle_count > 0) {
+                    // Pass 2: Batch pop ready tasks per worker type
+                    int32_t aic_tasks[RUNTIME_MAX_WORKER];
+                    int32_t aiv_tasks[RUNTIME_MAX_WORKER];
 #if PTO2_SCHED_PROFILING
                     extern uint64_t g_sched_pop_atomic_count[], g_sched_pop_wait_cycle[];
                     uint64_t t_pop_start = get_sys_cnt_aicpu();
-                    int32_t task_id = rt->scheduler.get_ready_task(wt,
-                                         g_sched_pop_atomic_count[thread_idx],
-                                         g_sched_pop_wait_cycle[thread_idx]);
+                    int aic_fetched = rt->scheduler.get_ready_tasks_batch(PTO2_WORKER_CUBE,
+                                          aic_tasks, aic_idle,
+                                          g_sched_pop_atomic_count[thread_idx],
+                                          g_sched_pop_wait_cycle[thread_idx]);
+                    int aiv_fetched = rt->scheduler.get_ready_tasks_batch(PTO2_WORKER_VECTOR,
+                                          aiv_tasks, aiv_idle,
+                                          g_sched_pop_atomic_count[thread_idx],
+                                          g_sched_pop_wait_cycle[thread_idx]);
                     sched_dispatch_pop_cycle += (get_sys_cnt_aicpu() - t_pop_start);
 #else
-                    int32_t task_id = rt->scheduler.get_ready_task(wt);
+                    int aic_fetched = rt->scheduler.get_ready_tasks_batch(
+                                          PTO2_WORKER_CUBE, aic_tasks, aic_idle);
+                    int aiv_fetched = rt->scheduler.get_ready_tasks_batch(
+                                          PTO2_WORKER_VECTOR, aiv_tasks, aiv_idle);
 #endif
-                    if (task_id >= 0) {
 #if PTO2_PROFILING
-                        pop_hit++;
+                    pop_hit  += aic_fetched + aiv_fetched;
+                    pop_miss += idle_count - (aic_fetched + aiv_fetched);
+#endif
+                    // Pass 3: Dispatch fetched tasks to idle cores
+                    int aic_idx = 0, aiv_idx = 0;
+                    for (int i = 0; i < idle_count; i++) {
+                        int core_id = idle_cores[i];
+                        PTO2WorkerType wt = idle_wts[i];
+                        int32_t task_id;
+                        if (wt == PTO2_WORKER_CUBE) {
+                            if (aic_idx >= aic_fetched) continue;
+                            task_id = aic_tasks[aic_idx++];
+                        } else {
+                            if (aiv_idx >= aiv_fetched) continue;
+                            task_id = aiv_tasks[aiv_idx++];
+                        }
+#if PTO2_PROFILING
                         phase_dispatch_count++;
 #endif
 #if PTO2_SCHED_PROFILING
                         uint64_t t_setup_start = get_sys_cnt_aicpu();
 #endif
+                        uint64_t reg_addr = core_id_to_reg_addr_[core_id];
                         PTO2TaskDescriptor* task = &task_descriptors[task_id & window_mask];
                         PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
                         build_pto2_payload(payload, runtime, task, task_descriptors, dep_list_pool, window_size);
 #if PTO2_PROFILING
-                        // Performance profiling: check if buffer needs switching
                         if (profiling_enabled) {
                             dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();
                             if (core_dispatch_counts_[core_id] >= PLATFORM_PROF_BUFFER_SIZE) {
@@ -687,15 +721,80 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                         sched_dispatch_setup_cycle += (get_sys_cnt_aicpu() - t_setup_start);
 #endif
                         DEV_DEBUG("Thread %d: Dispatching PTO2 task %d to core %d", thread_idx, task_id, core_id);
-                    } else {
-                        if (wt == PTO2_WORKER_CUBE) cube_queue_empty = true;
-                        else vector_queue_empty = true;
-#if PTO2_PROFILING
-                        pop_miss++;
-#endif
                     }
                 }
-            }
+            };
+            dispatch_batch();
+#else
+            auto dispatch_sequential = [&]() {
+                bool cube_queue_empty = false, vector_queue_empty = false;
+                for (int i = 0; i < core_num; i++) {
+                    if (cube_queue_empty && vector_queue_empty) {
+#if PTO2_SCHED_PROFILING
+                        pop_miss++;
+#endif
+                        break;
+                    }
+                    int core_id = cur_thread_cores[i];
+                    if (executing_task_ids_[core_id] != AICPU_TASK_INVALID) continue;
+
+                    uint64_t reg_addr = core_id_to_reg_addr_[core_id];
+                    uint64_t reg_val = read_reg(reg_addr, RegId::COND);
+                    int reg_state = EXTRACT_TASK_STATE(reg_val);
+                    if (reg_state == TASK_FIN_STATE) {
+                        Handshake* h = &hank[core_id];
+                        PTO2WorkerType wt = (h->core_type == CoreType::AIC) ? PTO2_WORKER_CUBE : PTO2_WORKER_VECTOR;
+#if PTO2_SCHED_PROFILING
+                        extern uint64_t g_sched_pop_atomic_count[], g_sched_pop_wait_cycle[];
+                        uint64_t t_pop_start = get_sys_cnt_aicpu();
+                        int32_t task_id = rt->scheduler.get_ready_task(wt,
+                                             g_sched_pop_atomic_count[thread_idx],
+                                             g_sched_pop_wait_cycle[thread_idx]);
+                        sched_dispatch_pop_cycle += (get_sys_cnt_aicpu() - t_pop_start);
+#else
+                        int32_t task_id = rt->scheduler.get_ready_task(wt);
+#endif
+                        if (task_id >= 0) {
+#if PTO2_PROFILING
+                            pop_hit++;
+                            phase_dispatch_count++;
+#endif
+#if PTO2_SCHED_PROFILING
+                            uint64_t t_setup_start = get_sys_cnt_aicpu();
+#endif
+                            PTO2TaskDescriptor* task = &task_descriptors[task_id & window_mask];
+                            PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
+                            build_pto2_payload(payload, runtime, task, task_descriptors, dep_list_pool, window_size);
+#if PTO2_PROFILING
+                            if (profiling_enabled) {
+                                dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();
+                                if (core_dispatch_counts_[core_id] >= PLATFORM_PROF_BUFFER_SIZE) {
+                                    perf_aicpu_switch_buffer(runtime, core_id, thread_idx);
+                                    core_dispatch_counts_[core_id] = 0;
+                                }
+                                core_dispatch_counts_[core_id]++;
+                            }
+#endif
+                            write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(task_id + 1));
+                            executing_task_ids_[core_id] = task_id;
+                            cur_thread_tasks_in_flight++;
+                            made_progress = true;
+#if PTO2_SCHED_PROFILING
+                            sched_dispatch_setup_cycle += (get_sys_cnt_aicpu() - t_setup_start);
+#endif
+                            DEV_DEBUG("Thread %d: Dispatching PTO2 task %d to core %d", thread_idx, task_id, core_id);
+                        } else {
+                            if (wt == PTO2_WORKER_CUBE) cube_queue_empty = true;
+                            else vector_queue_empty = true;
+#if PTO2_PROFILING
+                            pop_miss++;
+#endif
+                        }
+                    }
+                }
+            };
+            dispatch_sequential();
+#endif
         }
         CYCLE_COUNT_LAP(sched_dispatch_cycle);
 #if PTO2_PROFILING
