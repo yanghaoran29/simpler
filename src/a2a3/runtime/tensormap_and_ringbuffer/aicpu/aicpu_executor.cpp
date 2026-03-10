@@ -591,7 +591,7 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                     uint32_t count = perf_buf->count;
                     if (count > 0) {
                         PerfRecord* record = &perf_buf->records[count - 1];
-                        if (record->task_id == static_cast<uint32_t>(payload->task_id)) {
+                        if (record->task_id == static_cast<uint32_t>(task_id)) {
                             perf_aicpu_record_dispatch_and_finish_time(record,
                                                                         dispatch_timestamps_[core_id],
                                                                         finish_ts);
