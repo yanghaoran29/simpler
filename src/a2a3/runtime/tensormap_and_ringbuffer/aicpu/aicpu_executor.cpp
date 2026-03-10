@@ -555,14 +555,12 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                 int32_t task_id = executing_task_ids_[core_id];
 #if PTO2_BATCH_ENQUEUE
 #if PTO2_SCHED_PROFILING
-                PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
                 PTO2CompletionStats cstats = rt->scheduler.on_task_complete_batch(task_id, thread_idx);
 #else
                 PTO2CompletionStats cstats = rt->scheduler.on_task_complete_batch(task_id);
 #endif
 #else  // !PTO2_BATCH_ENQUEUE
 #if PTO2_SCHED_PROFILING
-                PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
                 PTO2CompletionStats cstats = rt->scheduler.on_task_complete(task_id, thread_idx);
 #else
                 PTO2CompletionStats cstats = rt->scheduler.on_task_complete(task_id);
