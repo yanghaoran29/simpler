@@ -77,3 +77,5 @@ set_target_properties(aicpu_kernel PROPERTIES
     # This matches the hardcoded paths in Python/C++ code
     SUFFIX ".so"
 )
+
+# Compile-time macro overrides are passed via CXXFLAGS (picked up by cmake from environment).

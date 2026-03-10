@@ -36,6 +36,10 @@ class BuildTarget:
             f"-DCUSTOM_INCLUDE_DIRS={inc}",
             f"-DCUSTOM_SOURCE_DIRS={src}",
         ]
+        # Pass extra CXXFLAGS from environment (e.g. compile-time macro overrides).
+        # Format: space-separated -D flags, e.g.
+        #   CXXFLAGS="-DPTO2_BATCH_DISPATCH=1 -DPTO2_BATCH_ENQUEUE=0"
+        # CMake picks up CXXFLAGS on first configure of a fresh build dir.
         if logger.isEnabledFor(logging.DEBUG):
             args.append("--log-level=VERBOSE")
         return args
