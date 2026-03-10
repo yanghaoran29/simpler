@@ -74,4 +74,3 @@ target_link_directories(aicpu_kernel
 # Output name
 set_target_properties(aicpu_kernel PROPERTIES OUTPUT_NAME aicpu_kernel)
 
-# Compile-time macro overrides are passed via CXXFLAGS (picked up by cmake from environment).
