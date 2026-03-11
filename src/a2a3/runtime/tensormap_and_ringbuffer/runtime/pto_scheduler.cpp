@@ -99,6 +99,34 @@ void pto2_ready_queue_destroy(PTO2ReadyQueue* queue) {
 }
 
 // =============================================================================
+// BLKRING Implementation
+// =============================================================================
+
+bool pto2_blkring_init(PTO2BlkReadyQueue* q, uint32_t block_capacity) {
+    q->slots = static_cast<PTO2BlkRingSlot*>(
+        malloc(block_capacity * sizeof(PTO2BlkRingSlot)));
+    if (!q->slots) {
+        return false;
+    }
+    q->block_capacity = block_capacity;
+    q->mask           = block_capacity - 1;
+    q->enqueue_pos.store(0, std::memory_order_relaxed);
+    q->dequeue_pos.store(0, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < block_capacity; i++) {
+        q->slots[i].sequence.store(static_cast<int32_t>(i), std::memory_order_relaxed);
+        q->slots[i].count = 0;
+    }
+    return true;
+}
+
+void pto2_blkring_destroy(PTO2BlkReadyQueue* q) {
+    if (q->slots) {
+        free(q->slots);
+        q->slots = nullptr;
+    }
+}
+
+// =============================================================================
 // Scheduler Initialization
 // =============================================================================
 
@@ -158,6 +186,26 @@ bool pto2_scheduler_init(PTO2SchedulerState* sched,
         }
     }
 
+    // Initialize BLKRING batch queues
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
+        if (!pto2_blkring_init(&sched->blk_ready_queues[i], PTO2_BLKRING_BLOCK_CAPACITY)) {
+            // Cleanup BLKRING on failure
+            for (int j = 0; j < i; j++) {
+                pto2_blkring_destroy(&sched->blk_ready_queues[j]);
+            }
+            for (int j = 0; j < PTO2_NUM_WORKER_TYPES; j++) {
+                pto2_ready_queue_destroy(&sched->ready_queues[j]);
+            }
+            delete[] sched->fanout_refcount;
+            delete[] sched->fanin_refcount;
+            delete[] sched->task_state;
+            sched->fanout_refcount = nullptr;
+            sched->fanin_refcount = nullptr;
+            sched->task_state = nullptr;
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -169,6 +217,9 @@ void pto2_scheduler_destroy(PTO2SchedulerState* sched) {
 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         pto2_ready_queue_destroy(&sched->ready_queues[i]);
+    }
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
+        pto2_blkring_destroy(&sched->blk_ready_queues[i]);
     }
 }
 
@@ -195,6 +246,13 @@ void pto2_scheduler_print_queues(PTO2SchedulerState* sched) {
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         LOG_INFO("  %s: count=%" PRIu64, shape_names[i],
                  sched->ready_queues[i].size());
+    }
+
+    LOG_INFO("=== BLKRING Queues ===");
+    const char* worker_names[] = {"AIC", "AIV"};
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
+        LOG_INFO("  blk %s: approx_blocks=%" PRIu64, worker_names[i],
+                 sched->blk_ready_queues[i].approx_size());
     }
 
     LOG_INFO("====================");

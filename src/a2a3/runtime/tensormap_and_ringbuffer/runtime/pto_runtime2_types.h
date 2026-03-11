@@ -83,6 +83,30 @@
 // Ready queue
 #define PTO2_READY_QUEUE_SIZE     65536   // Per-shape queue size
 
+// =============================================================================
+// Scheduler Profiling
+// =============================================================================
+
+#ifndef PTO2_SCHED_PROFILING
+#define PTO2_SCHED_PROFILING 0  // 0 = off; 1 = phase breakdown (complete/dispatch/scan/idle) in device log
+#endif
+
+// =============================================================================
+// BLKRING Configuration (batch-mode ready queue)
+// =============================================================================
+
+#ifndef PTO2_BLKRING_BLOCK_SIZE
+#define PTO2_BLKRING_BLOCK_SIZE 2   // task_ids per block; must satisfy: 8 + 4*N <= 64
+#endif
+// Number of block slots — keeps total task capacity equal to the Vyukov queue
+#define PTO2_BLKRING_BLOCK_CAPACITY  (PTO2_READY_QUEUE_SIZE / PTO2_BLKRING_BLOCK_SIZE)
+// Max tasks dispatched per dispatch_ready_tasks_blkring call.
+// Default: BLOCK_SIZE — one pop_block exactly fills the dispatch budget.
+// 0 = fill all idle cores; any positive value caps at N.
+#ifndef PTO2_BLKRING_DISPATCH_WIDTH
+#define PTO2_BLKRING_DISPATCH_WIDTH 0
+#endif
+
 // Memory alignment
 #define PTO2_ALIGN_SIZE           64      // Cache line alignment
 #define PTO2_PACKED_OUTPUT_ALIGN  1024    // Each output in packed buffer aligned to 1024B; gap is padding

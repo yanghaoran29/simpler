@@ -24,6 +24,7 @@
 #include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
 #include "pto_ring_buffer.h"
+#include "pto_blkring.h"
 
 #include "common/core_type.h"
 
@@ -304,6 +305,14 @@ struct PTO2SchedulerState {
     // Ready queues (one per resource shape)
     PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
 
+    // Block-granularity MPMC queues (amortise CAS cost by BLOCK_SIZE)
+    PTO2BlkReadyQueue blk_ready_queues[PTO2_NUM_WORKER_TYPES];
+
+    template<CoreType CT>
+    int32_t blk_get_ready_tasks(int32_t* out_ids) {
+        return blk_ready_queues[static_cast<int32_t>(CT)].pop_block(out_ids);
+    }
+
     // Statistics
 #if PTO2_SCHED_PROFILING
     std::atomic<int64_t> tasks_completed;
@@ -426,7 +435,8 @@ struct PTO2SchedulerState {
 
     bool release_fanin_and_check_ready(int32_t task_id,
                                         PTO2TaskDescriptor* task,
-                                        PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                        PTO2LocalReadyBuffer* local_bufs = nullptr,
+                                        PTO2BlkPendingBuffer* blk_pending = nullptr) {
         PTO2TaskSlotState& slot_state = get_slot_state_by_task_id(task_id);
 
         // Atomically increment fanin_refcount and check if all producers are done
@@ -444,6 +454,15 @@ struct PTO2SchedulerState {
                 pushed_local = local_bufs[buf_idx].try_push(task_id);
             }
             if (!pushed_local) {
+                if (blk_pending) {
+                    int32_t wt = -1;
+                    if (shape == PTO2ResourceShape::AIC_ONLY)  wt = static_cast<int32_t>(CoreType::AIC);
+                    else if (shape == PTO2ResourceShape::AIV_X1) wt = static_cast<int32_t>(CoreType::AIV);
+                    if (wt >= 0) {
+                        blk_pending->add(task_id, wt, blk_ready_queues);
+                        return true;
+                    }
+                }
                 ready_queues[static_cast<int32_t>(shape)].push(task_id);
             }
             return true;
@@ -454,7 +473,8 @@ struct PTO2SchedulerState {
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
     bool release_fanin_and_check_ready(int32_t task_id, PTO2TaskDescriptor* task,
                                         uint64_t& atomic_count, uint64_t& push_wait,
-                                        PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                        PTO2LocalReadyBuffer* local_bufs = nullptr,
+                                        PTO2BlkPendingBuffer* blk_pending = nullptr) {
         PTO2TaskSlotState& slot_state = get_slot_state_by_task_id(task_id);
 
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -473,6 +493,15 @@ struct PTO2SchedulerState {
                     pushed_local = local_bufs[buf_idx].try_push(task_id);
                 }
                 if (!pushed_local) {
+                    if (blk_pending) {
+                        int32_t wt = -1;
+                        if (shape == PTO2ResourceShape::AIC_ONLY)  wt = static_cast<int32_t>(CoreType::AIC);
+                        else if (shape == PTO2ResourceShape::AIV_X1) wt = static_cast<int32_t>(CoreType::AIV);
+                        if (wt >= 0) {
+                            blk_pending->add(task_id, wt, blk_ready_queues);
+                            return true;
+                        }
+                    }
                     ready_queues[static_cast<int32_t>(shape)].push(task_id, atomic_count, push_wait);
                 }
                 return true;
@@ -539,7 +568,13 @@ struct PTO2SchedulerState {
         int32_t slot = get_task_slot(task_id);
         PTO2TaskDescriptor& task = pto2_sm_get_task_by_slot(sm_handle, slot);
         PTO2ResourceShape shape = pto2_active_mask_to_shape(task.active_mask);
-        ready_queues[static_cast<int32_t>(shape)].push(task_id);
+        if (shape == PTO2ResourceShape::AIC_ONLY) {
+            blk_ready_queues[static_cast<int32_t>(CoreType::AIC)].push_block(&task_id, 1);
+        } else if (shape == PTO2ResourceShape::AIV_X1) {
+            blk_ready_queues[static_cast<int32_t>(CoreType::AIV)].push_block(&task_id, 1);
+        } else {
+            ready_queues[static_cast<int32_t>(shape)].push(task_id);
+        }
     }
 
     void on_scope_end(const int32_t* task_ids, int32_t count) {
@@ -581,15 +616,21 @@ struct PTO2SchedulerState {
      */
 #if PTO2_SCHED_PROFILING
     PTO2CompletionStats on_mixed_task_complete(int32_t mixed_task_id, int thread_idx,
-                                               PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                               PTO2LocalReadyBuffer* local_bufs = nullptr
+                                               , PTO2BlkPendingBuffer* blk_pending = nullptr
+                                               ) {
         PTO2CompletionStats stats = {0, 0, 0, true};
 #elif PTO2_PROFILING
     PTO2CompletionStats on_mixed_task_complete(int32_t mixed_task_id,
-                                               PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                               PTO2LocalReadyBuffer* local_bufs = nullptr
+                                               , PTO2BlkPendingBuffer* blk_pending = nullptr
+                                               ) {
         PTO2CompletionStats stats = {0, 0, 0, true};
 #else
     void on_mixed_task_complete(int32_t mixed_task_id,
-                                PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                PTO2LocalReadyBuffer* local_bufs = nullptr
+                                , PTO2BlkPendingBuffer* blk_pending = nullptr
+                                ) {
 #endif
         PTO2TaskSlotState& slot_state = get_slot_state_by_task_id(mixed_task_id);
 
@@ -629,20 +670,28 @@ struct PTO2SchedulerState {
 #endif
 #if PTO2_SCHED_PROFILING
             if (release_fanin_and_check_ready(consumer_id, consumer,
-                                               fanout_atomics, push_wait, local_bufs)) {
+                                               fanout_atomics, push_wait, local_bufs
+                                               , blk_pending
+                                               )) {
 #if PTO2_PROFILING
                 stats.tasks_enqueued++;
 #endif
             }
 #elif PTO2_PROFILING
-            if (release_fanin_and_check_ready(consumer_id, consumer, local_bufs)) {
+            if (release_fanin_and_check_ready(consumer_id, consumer, local_bufs
+                , blk_pending
+                )) {
                 stats.tasks_enqueued++;
             }
 #else
-            release_fanin_and_check_ready(consumer_id, consumer, local_bufs);
+            release_fanin_and_check_ready(consumer_id, consumer, local_bufs
+                , blk_pending
+                );
 #endif
             current = current->next;
         }
+
+        if (blk_pending) { blk_pending->flush_all(blk_ready_queues); }
 
 #if PTO2_SCHED_PROFILING
         g_sched_fanout_atomic_count[thread_idx] += fanout_atomics;

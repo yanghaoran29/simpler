@@ -280,6 +280,7 @@ struct AicpuExecutor {
         ,
         uint64_t& sched_complete_perf_cycle
 #endif
+        , PTO2BlkPendingBuffer* blk_pending = nullptr
     ) {
         for (int32_t i = ct.running_count - 1; i >= 0; i--) {
             int32_t core_id = ct.running[i];
@@ -308,19 +309,27 @@ struct AicpuExecutor {
                 bool mixed_complete = rt->scheduler.on_subtask_complete(mixed_task_id, subslot);
                 if (mixed_complete) {
 #if PTO2_SCHED_PROFILING
-                    PTO2CompletionStats cstats = rt->scheduler.on_mixed_task_complete(mixed_task_id, thread_idx, local_bufs);
+                    PTO2CompletionStats cstats = rt->scheduler.on_mixed_task_complete(
+                        mixed_task_id, thread_idx, local_bufs
+                        , blk_pending
+                    );
                     notify_edges_total += cstats.fanout_edges;
                     if (cstats.fanout_edges > notify_max_degree) notify_max_degree = cstats.fanout_edges;
                     notify_tasks_enqueued += cstats.tasks_enqueued;
                     phase_complete_count++;
 #elif PTO2_PROFILING
-                    PTO2CompletionStats cstats = rt->scheduler.on_mixed_task_complete(mixed_task_id, local_bufs);
+                    PTO2CompletionStats cstats = rt->scheduler.on_mixed_task_complete(
+                        mixed_task_id, local_bufs
+                        , blk_pending
+                    );
                     notify_edges_total += cstats.fanout_edges;
                     if (cstats.fanout_edges > notify_max_degree) notify_max_degree = cstats.fanout_edges;
                     notify_tasks_enqueued += cstats.tasks_enqueued;
                     phase_complete_count++;
 #else
-                    rt->scheduler.on_mixed_task_complete(mixed_task_id, local_bufs);
+                    rt->scheduler.on_mixed_task_complete(mixed_task_id, local_bufs
+                        , blk_pending
+                    );
 #endif
                     if (deferred_release_count < 64) {
                         deferred_release_ids[deferred_release_count++] = mixed_task_id;
@@ -501,6 +510,54 @@ struct AicpuExecutor {
         ct.move_idle_to_running(idle_idx);
         tracker.core_idle[core_id] = false;
         executing_task_ids[core_id] = task_id;
+    }
+    template <CoreType CT>
+    void dispatch_ready_tasks_blkring(Runtime* runtime,
+        int32_t /*thread_idx*/,
+        CoreTypeTracker& ct,
+        bool* core_idle,
+        int32_t* executing_task_ids,
+        bool& made_progress,
+        PTO2TaskDescriptor* task_descriptors,
+        PTO2TaskPayload* task_payloads,
+        int32_t window_mask,
+        int32_t* overflow_ids,
+        int32_t& overflow_count
+    ) {
+#if PTO2_BLKRING_DISPATCH_WIDTH == 0
+        const int32_t max_dispatch = ct.idle_count;
+#else
+        const int32_t max_dispatch = PTO2_BLKRING_DISPATCH_WIDTH < ct.idle_count
+                                     ? PTO2_BLKRING_DISPATCH_WIDTH : ct.idle_count;
+#endif
+        int32_t dispatched = 0;
+        while (ct.idle_count > 0 && dispatched < max_dispatch) {
+            int32_t blk_ids[PTO2_BLKRING_BLOCK_SIZE];
+            int32_t n = rt->scheduler.blk_ready_queues[static_cast<int32_t>(CT)].pop_block(blk_ids);
+            if (n == 0) break;
+            for (int32_t i = 0; i < n; i++) {
+                int32_t task_id = blk_ids[i];
+                if (ct.idle_count > 0 && dispatched < max_dispatch) {
+                    int32_t idle_idx = ct.idle_count - 1;
+                    int32_t core_id = ct.idle[idle_idx];
+                    PTO2TaskDescriptor* task = &task_descriptors[task_id & window_mask];
+                    PTO2TaskPayload* task_pl = &task_payloads[task_id & window_mask];
+                    PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
+                    constexpr PTO2SubtaskSlot subslot =
+                        (CT == CoreType::AIC) ? PTO2SubtaskSlot::AIC : PTO2SubtaskSlot::AIV0;
+                    build_pto2_payload(payload, runtime, task, task_pl, subslot, CT);
+                    write_reg(core_id_to_reg_addr_[core_id], RegId::DATA_MAIN_BASE,
+                              static_cast<uint64_t>(task_id + 1));
+                    ct.move_idle_to_running(idle_idx);
+                    core_idle[core_id] = false;
+                    executing_task_ids[core_id] = task_id;
+                    made_progress = true;
+                    dispatched++;
+                } else {
+                    overflow_ids[overflow_count++] = task_id;
+                }
+            }
+        }
     }
 };
 
@@ -957,6 +1014,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
     PTO2LocalReadyBuffer local_bufs[PTO2_LOCAL_DISPATCH_TYPE_NUM];  // [0]=AIC, [1]=AIV
     local_bufs[0].reset(local_aic_ids, LOCAL_READY_CAP_PER_TYPE);
     local_bufs[1].reset(local_aiv_ids, LOCAL_READY_CAP_PER_TYPE);
+    PTO2BlkPendingBuffer blk_pending;
+    blk_pending.reset();
     int32_t deferred_release_ids[256];
     int32_t deferred_release_count = 0;
 
@@ -1028,6 +1087,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #if PTO2_SCHED_PROFILING
                 , sched_complete_perf_cycle
 #endif
+                , &blk_pending
             );
         }
 
@@ -1047,7 +1107,14 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #if PTO2_SCHED_PROFILING
                 , sched_complete_perf_cycle
 #endif
+                , &blk_pending
             );
+        }
+
+        // Safety flush: ensure any tasks buffered during Phase 1 are visible in blk_ready_queues.
+        // Normally flushed inside on_mixed_task_complete; this handles edge cases.
+        if (blk_pending.any_pending()) {
+            blk_pending.flush_all(rt->scheduler.blk_ready_queues);
         }
         if (completed_this_turn > 0) {
 #if PTO2_SCHED_PROFILING
@@ -1155,7 +1222,13 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
         for (int i = 0; i < overflow_count; i++) {
             PTO2TaskDescriptor* task = &task_descriptors[overflow_ids[i] & window_mask];
             PTO2ResourceShape shape = pto2_active_mask_to_shape(task->active_mask);
-            rt->scheduler.ready_queues[static_cast<int32_t>(shape)].push(overflow_ids[i]);
+            if (shape == PTO2ResourceShape::AIC_ONLY) {
+                rt->scheduler.blk_ready_queues[static_cast<int32_t>(CoreType::AIC)].push_block(&overflow_ids[i], 1);
+            } else if (shape == PTO2ResourceShape::AIV_X1) {
+                rt->scheduler.blk_ready_queues[static_cast<int32_t>(CoreType::AIV)].push_block(&overflow_ids[i], 1);
+            } else {
+                rt->scheduler.ready_queues[static_cast<int32_t>(shape)].push(overflow_ids[i]);
+            }
         }
 
         // Phase 3: Global dispatch — fill remaining idle cores from global readyQ (cluster-based)
@@ -1228,6 +1301,35 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                     thread_idx, shape_name(shape), task_id, ci);
             }
         }
+
+        // Phase 3b: BLKRING dispatch — drain blk_ready_queues for AIC_ONLY and AIV_X1 tasks
+        if (tracker.aic().idle_count > 0 &&
+                rt->scheduler.blk_ready_queues[static_cast<int32_t>(CoreType::AIC)].approx_size() > 0) {
+            int32_t blkring_overflow_ids[PTO2_BLKRING_BLOCK_SIZE];
+            int32_t blkring_overflow_count = 0;
+            dispatch_ready_tasks_blkring<CoreType::AIC>(runtime, thread_idx,
+                tracker.aic(), tracker.core_idle, executing_task_ids, made_progress,
+                task_descriptors, task_payloads, window_mask,
+                blkring_overflow_ids, blkring_overflow_count);
+            for (int k = 0; k < blkring_overflow_count; k++) {
+                rt->scheduler.blk_ready_queues[static_cast<int32_t>(CoreType::AIC)].push_block(&blkring_overflow_ids[k], 1);
+            }
+        }
+        if (tracker.aiv().idle_count > 0 &&
+                rt->scheduler.blk_ready_queues[static_cast<int32_t>(CoreType::AIV)].approx_size() > 0) {
+            int32_t blkring_overflow_ids[PTO2_BLKRING_BLOCK_SIZE];
+            int32_t blkring_overflow_count = 0;
+            dispatch_ready_tasks_blkring<CoreType::AIV>(runtime, thread_idx,
+                tracker.aiv(), tracker.core_idle, executing_task_ids, made_progress,
+                task_descriptors, task_payloads, window_mask,
+                blkring_overflow_ids, blkring_overflow_count);
+            for (int k = 0; k < blkring_overflow_count; k++) {
+                rt->scheduler.blk_ready_queues[static_cast<int32_t>(CoreType::AIV)].push_block(&blkring_overflow_ids[k], 1);
+            }
+        }
+#if PTO2_PROFILING
+        try_pushed |= made_progress;
+#endif
 
 #if PTO2_PROFILING
         if (!try_pushed) {
