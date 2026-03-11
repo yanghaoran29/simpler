@@ -58,6 +58,7 @@ static uint32_t g_orch_submit_idx = 0;
 uint64_t g_orch_alloc_wait_cycle = 0;
 uint64_t g_orch_heap_wait_cycle = 0;
 uint64_t g_orch_fanin_wait_cycle = 0;
+uint64_t g_orch_finalize_wait_cycle = 0;
 uint64_t g_orch_alloc_atomic_count = 0;
 uint64_t g_orch_params_atomic_count = 0;
 uint64_t g_orch_heap_atomic_count = 0;
@@ -70,6 +71,7 @@ uint64_t g_orch_scope_end_atomic_count = 0;
 uint64_t g_orch_fanin_atomic_count = 0;
 uint64_t g_orch_fanin_wait_cycle = 0;
 uint64_t g_orch_finalize_atomic_count = 0;
+uint64_t g_orch_finalize_wait_cycle = 0;
 uint64_t g_orch_scope_end_atomic_count = 0;
 #endif
 #define CYCLE_COUNT_START() uint64_t _t0 = get_sys_cnt_aicpu(), _t1

@@ -17,8 +17,14 @@
 // Scheduler Profiling Counters
 // =============================================================================
 
-#if PTO2_SCHED_PROFILING
+#if PTO2_SCHED_PROFILING || PTO2_ORCH_PROFILING || PTO2_PROFILING
 #include "common/platform_config.h"
+#endif
+#if PTO2_ORCH_PROFILING
+#include "pto_orchestrator.h"
+#endif
+
+#if PTO2_SCHED_PROFILING
 
 uint64_t g_sched_lock_cycle[PLATFORM_MAX_AICPU_THREADS] = {};
 uint64_t g_sched_fanout_cycle[PLATFORM_MAX_AICPU_THREADS] = {};
@@ -199,3 +205,119 @@ void pto2_scheduler_print_queues(PTO2SchedulerState* sched) {
 
     LOG_INFO("====================");
 }
+
+// =============================================================================
+// Profiling Print Functions
+// =============================================================================
+
+#if PTO2_SCHED_PROFILING
+void pto2_print_sched_profiling(int thread_idx) {
+    PTO2SchedProfilingData sp = pto2_scheduler_get_profiling(thread_idx);
+    uint64_t total = sp.lock_cycle + sp.fanout_cycle + sp.fanin_cycle + sp.self_consumed_cycle;
+    if (total == 0) total = 1;
+
+    LOG_ALWAYS("Thread %d: === Scheduler Profiling: %lld tasks, total=%.3fus ===",
+        thread_idx, (long long)sp.complete_count, cycles_to_us(total));
+    LOG_ALWAYS("Thread %d:   lock+state   : %.3fus  work=%.3fus wait=%.3fus  atomics=%llu",
+        thread_idx, cycles_to_us(sp.lock_cycle),
+        cycles_to_us(sp.lock_cycle - sp.lock_wait_cycle), cycles_to_us(sp.lock_wait_cycle),
+        (unsigned long long)sp.lock_atomic_count);
+    LOG_ALWAYS("Thread %d:   fanout       : %.3fus  work=%.3fus wait=%.3fus  atomics=%llu",
+        thread_idx, cycles_to_us(sp.fanout_cycle),
+        cycles_to_us(sp.fanout_cycle - sp.push_wait_cycle), cycles_to_us(sp.push_wait_cycle),
+        (unsigned long long)sp.fanout_atomic_count);
+    LOG_ALWAYS("Thread %d:   fanin        : %.3fus  atomics=%llu",
+        thread_idx, cycles_to_us(sp.fanin_cycle),
+        (unsigned long long)sp.fanin_atomic_count);
+    LOG_ALWAYS("Thread %d:   self_consumed: %.3fus  atomics=%llu",
+        thread_idx, cycles_to_us(sp.self_consumed_cycle),
+        (unsigned long long)sp.self_atomic_count);
+    LOG_ALWAYS("Thread %d:   pop_wait     : %.3fus  atomics=%llu",
+        thread_idx, cycles_to_us(sp.pop_wait_cycle),
+        (unsigned long long)sp.pop_atomic_count);
+    if (sp.complete_count > 0) {
+        LOG_ALWAYS("Thread %d:   avg/task     : %.3fus",
+            thread_idx, cycles_to_us(total) / sp.complete_count);
+    }
+}
+#endif
+
+#if PTO2_ORCH_PROFILING
+
+void pto2_print_orch_profiling() {
+    PTO2OrchProfilingData p = pto2_orchestrator_get_profiling();
+    uint64_t total = p.sync_cycle + p.alloc_cycle + p.params_cycle +
+                     p.lookup_cycle + p.heap_cycle + p.insert_cycle +
+                     p.fanin_cycle;
+    if (total == 0) total = 1;
+
+    LOG_ALWAYS("  Orchestrator Profiling: %lld tasks, total=%.3fus",
+        (long long)p.submit_count, cycles_to_us(total));
+    LOG_ALWAYS("  sync_tensormap : %.3fus (%.1f%%)",
+        cycles_to_us(p.sync_cycle), p.sync_cycle * 100.0 / total);
+    LOG_ALWAYS("  task_ring_alloc: %.3fus  work=%.3fus wait=%.3fus  atomics=%llu",
+        cycles_to_us(p.alloc_cycle),
+        cycles_to_us(p.alloc_cycle - p.alloc_wait_cycle), cycles_to_us(p.alloc_wait_cycle),
+        (unsigned long long)p.alloc_atomic_count);
+    LOG_ALWAYS("  param_copy     : %.3fus  atomics=%llu",
+        cycles_to_us(p.params_cycle), (unsigned long long)p.params_atomic_count);
+    LOG_ALWAYS("  lookup+dep     : %.3fus", cycles_to_us(p.lookup_cycle));
+    LOG_ALWAYS("  heap_alloc     : %.3fus  work=%.3fus wait=%.3fus  atomics=%llu",
+        cycles_to_us(p.heap_cycle),
+        cycles_to_us(p.heap_cycle - p.heap_wait_cycle), cycles_to_us(p.heap_wait_cycle),
+        (unsigned long long)p.heap_atomic_count);
+    LOG_ALWAYS("  tensormap_ins  : %.3fus", cycles_to_us(p.insert_cycle));
+    LOG_ALWAYS("  fanin+ready    : %.3fus  work=%.3fus wait=%.3fus  atomics=%llu",
+        cycles_to_us(p.fanin_cycle),
+        cycles_to_us(p.fanin_cycle - p.fanin_wait_cycle), cycles_to_us(p.fanin_wait_cycle),
+        (unsigned long long)p.fanin_atomic_count);
+    LOG_ALWAYS("  finalize+SM    : wait=%.3fus  atomics=%llu",
+        cycles_to_us(p.finalize_wait_cycle),
+        (unsigned long long)p.finalize_atomic_count);
+    LOG_ALWAYS("  scope_end      : %.3fus  atomics=%llu",
+        cycles_to_us(p.scope_end_cycle), (unsigned long long)p.scope_end_atomic_count);
+    if (p.submit_count > 0) {
+        LOG_ALWAYS("  avg/task       : %.3fus", cycles_to_us(total) / p.submit_count);
+    }
+}
+#endif
+
+#if PTO2_PROFILING
+void pto2_print_sim_sched_summary(const PTO2SimSchedSummary* s, int64_t tasks_completed, int64_t tasks_consumed) {
+    if (s == nullptr) return;
+    static const char* wt_names[] = {"CUBE", "VECTOR", "AI_CPU", "ACCELERATOR"};
+    int64_t total = 0;
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++)
+        total += s->tasks_dispatched[i];
+
+    double sched_cpu_us = 0.0;
+    if (total > 0) {
+        uint64_t sc = s->dispatch_cycle + s->complete_cycle;
+        sched_cpu_us = cycles_to_us(sc) / (double)total;
+    }
+    LOG_ALWAYS("");
+    LOG_ALWAYS("  ---------------------------- Task execution vs Scheduler overhead ----------------------------");
+#if defined(PTO2_SIM_AICORE_UT)
+    LOG_ALWAYS("    Per-task (all):  Avg Latency (dispatch→finish) = N/A (sim)");
+#else
+    LOG_ALWAYS("    Per-task (all):  Avg Latency (dispatch→finish) = 0.00 us");
+#endif
+    LOG_ALWAYS("    Sched CPU (sim): %.2f us/task", sched_cpu_us);
+    LOG_ALWAYS("    (Sched CPU = scheduler thread CPU per task)");
+    LOG_ALWAYS("    Scheduler Profiling (%lld tasks)", (long long)total);
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
+        int64_t n = s->tasks_dispatched[i];
+        if (n == 0) continue;
+        LOG_ALWAYS("      %-12s %6lld tasks  (%4.1f%%)",
+            wt_names[i], (long long)n, total > 0 ? n * 100.0 / total : 0.0);
+    }
+    LOG_ALWAYS("    fanout:          %lld edges, max_degree=%d, enqueued=%lld",
+        (long long)s->fanout_edges_total, s->fanout_max_degree, (long long)s->tasks_enqueued_by_completion);
+    LOG_ALWAYS("    fanin:           %lld edges, max_degree=%d",
+        (long long)s->fanin_edges_total, s->fanin_max_degree);
+    LOG_ALWAYS("    sim_rounds:      %lld total, %lld with_progress",
+        (long long)s->rounds_total, (long long)s->rounds_with_progress);
+    LOG_ALWAYS("    tasks_completed: %lld  tasks_consumed: %lld",
+        (long long)tasks_completed, (long long)tasks_consumed);
+}
+#endif

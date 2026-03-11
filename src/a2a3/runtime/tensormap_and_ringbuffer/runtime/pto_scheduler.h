@@ -49,17 +49,16 @@ struct PTO2ReadyQueueSlot {
 /**
  * Thread-local ready buffer for local-first dispatch optimization.
  *
- * Two buffers per scheduling thread, one per CoreType (AIC=0, AIV=1).
+ * One buffer per scheduling thread (mixed worker types).
  * Initialized once before the scheduling loop; must be empty at
  * the start of each iteration (verified by always_assert).
  *
- * Phase 1 fills per-CoreType buffers via on_task_complete().
- * dispatch_ready_tasks_to_idle_cores drains them: local-first via
- * get_ready_task, then remaining tasks pushed to global readyQ.
+ * Phase 1 fills this buffer via on_task_complete().
+ * Phase 2 drains it: matched tasks dispatch to idle cores,
+ * unmatched tasks are stored in an overflow array for Phase 3.
+ * Phase 3 pushes overflow to global readyQ and fills remaining
+ * idle cores from global readyQ.
  */
-// Number of CoreType values eligible for local dispatch (AIC=0, AIV=1)
-static constexpr int PTO2_LOCAL_DISPATCH_TYPE_NUM = 2;
-
 struct PTO2LocalReadyBuffer {
     int32_t* task_ids = nullptr;  // Points to caller's stack array
     int count = 0;
@@ -304,6 +303,10 @@ struct PTO2SchedulerState {
     // Ready queues (one per resource shape)
     PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
 
+    // Dependency list pool reference
+    PTO2DepListPool* dep_pool;
+
+
     // Statistics
 #if PTO2_SCHED_PROFILING
     std::atomic<int64_t> tasks_completed;
@@ -426,7 +429,7 @@ struct PTO2SchedulerState {
 
     bool release_fanin_and_check_ready(int32_t task_id,
                                         PTO2TaskDescriptor* task,
-                                        PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                        PTO2LocalReadyBuffer* local_buf = nullptr) {
         PTO2TaskSlotState& slot_state = get_slot_state_by_task_id(task_id);
 
         // Atomically increment fanin_refcount and check if all producers are done
@@ -434,19 +437,22 @@ struct PTO2SchedulerState {
         // release in init_task, making fanin_count visible — plain load suffices.
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-        if (new_refcount == slot_state.fanin_count) {
-            // Local-first: try per-CoreType thread-local buffer before global queue
-            // Route by active_mask: AIC-containing tasks → buf[0], AIV-only → buf[1]
-            PTO2ResourceShape shape = pto2_active_mask_to_shape(task->active_mask);
-            bool pushed_local = false;
-            if (local_bufs) {
-                int32_t buf_idx = (task->active_mask & 0x01) ? 0 : 1;
-                pushed_local = local_bufs[buf_idx].try_push(task_id);
+        bool ready = (new_refcount == slot_state.fanin_count);
+        if (ready) {
+            PTO2TaskState expected = PTO2_TASK_PENDING;
+            if (slot_state.task_state.compare_exchange_strong(
+                    expected, PTO2_TASK_READY, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                // Local-first: try thread-local buffer before global queue
+                PTO2ResourceShape shape = pto2_active_mask_to_shape(task->active_mask);
+                bool pushed_local = false;
+                if (local_buf) {
+                    pushed_local = local_buf->try_push(task_id);
+                }
+                if (!pushed_local) {
+                    ready_queues[static_cast<int32_t>(shape)].push(task_id);
+                }
+                return true;
             }
-            if (!pushed_local) {
-                ready_queues[static_cast<int32_t>(shape)].push(task_id);
-            }
-            return true;
         }
         return false;
     }
@@ -454,23 +460,23 @@ struct PTO2SchedulerState {
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
     bool release_fanin_and_check_ready(int32_t task_id, PTO2TaskDescriptor* task,
                                         uint64_t& atomic_count, uint64_t& push_wait,
-                                        PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                        PTO2LocalReadyBuffer* local_buf = nullptr) {
         PTO2TaskSlotState& slot_state = get_slot_state_by_task_id(task_id);
 
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
 
-        if (new_refcount == slot_state.fanin_count) {
+        bool ready = (new_refcount == slot_state.fanin_count);
+        if (ready) {
             PTO2TaskState expected = PTO2_TASK_PENDING;
             if (slot_state.task_state.compare_exchange_strong(
                     expected, PTO2_TASK_READY, std::memory_order_acq_rel, std::memory_order_acquire)) {
                 atomic_count += 1;  // CAS(task_state PENDING→READY)
-                // Local-first: try per-CoreType thread-local buffer before global queue
+                // Local-first: try thread-local buffer before global queue
                 PTO2ResourceShape shape = pto2_active_mask_to_shape(task->active_mask);
                 bool pushed_local = false;
-                if (local_bufs) {
-                    int32_t buf_idx = (task->active_mask & 0x01) ? 0 : 1;
-                    pushed_local = local_bufs[buf_idx].try_push(task_id);
+                if (local_buf) {
+                    pushed_local = local_buf->try_push(task_id);
                 }
                 if (!pushed_local) {
                     ready_queues[static_cast<int32_t>(shape)].push(task_id, atomic_count, push_wait);
@@ -506,28 +512,9 @@ struct PTO2SchedulerState {
         return ready_queues[static_cast<int32_t>(shape)].pop();
     }
 
-    template<CoreType CT>
-    int32_t get_ready_task(PTO2LocalReadyBuffer* local_bufs) {
-        constexpr int ct = static_cast<int>(CT);
-        if (local_bufs && local_bufs[ct].count > 0) {
-            return local_bufs[ct].pop();
-        }
-        return ready_queues[ct].pop();
-    }
-
 #if PTO2_SCHED_PROFILING
     int32_t get_ready_task(PTO2ResourceShape shape, uint64_t& atomic_count, uint64_t& wait_cycle) {
         return ready_queues[static_cast<int32_t>(shape)].pop(atomic_count, wait_cycle);
-    }
-
-    template<CoreType CT>
-    int32_t get_ready_task(PTO2LocalReadyBuffer* local_bufs,
-                           uint64_t& atomic_count, uint64_t& wait_cycle) {
-        constexpr int ct = static_cast<int>(CT);
-        if (local_bufs && local_bufs[ct].count > 0) {
-            return local_bufs[ct].pop();
-        }
-        return ready_queues[ct].pop(atomic_count, wait_cycle);
     }
 #endif
 
@@ -555,6 +542,7 @@ struct PTO2SchedulerState {
 #endif
     }
 
+
     /**
      * Two-stage completion: first stage.
      * Called when a single subtask (AIC, AIV0, or AIV1) finishes.
@@ -581,15 +569,15 @@ struct PTO2SchedulerState {
      */
 #if PTO2_SCHED_PROFILING
     PTO2CompletionStats on_mixed_task_complete(int32_t mixed_task_id, int thread_idx,
-                                               PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                               PTO2LocalReadyBuffer* local_buf = nullptr) {
         PTO2CompletionStats stats = {0, 0, 0, true};
 #elif PTO2_PROFILING
     PTO2CompletionStats on_mixed_task_complete(int32_t mixed_task_id,
-                                               PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                               PTO2LocalReadyBuffer* local_buf = nullptr) {
         PTO2CompletionStats stats = {0, 0, 0, true};
 #else
     void on_mixed_task_complete(int32_t mixed_task_id,
-                                PTO2LocalReadyBuffer* local_bufs = nullptr) {
+                                PTO2LocalReadyBuffer* local_buf = nullptr) {
 #endif
         PTO2TaskSlotState& slot_state = get_slot_state_by_task_id(mixed_task_id);
 
@@ -617,10 +605,12 @@ struct PTO2SchedulerState {
         PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
 #endif
 
+        // 完成任务时同时调用 release_fanin：对 fanout 中每个 consumer 调用 release_fanin_and_check_ready
         // Fanout: notify consumers
 #if PTO2_SCHED_PROFILING
         uint64_t fanout_atomics = 0, push_wait = 0;
 #endif
+
         while (current != nullptr) {
             int32_t consumer_id = current->task_id;
             PTO2TaskDescriptor* consumer = pto2_sm_get_task(sm_handle, consumer_id);
@@ -629,17 +619,17 @@ struct PTO2SchedulerState {
 #endif
 #if PTO2_SCHED_PROFILING
             if (release_fanin_and_check_ready(consumer_id, consumer,
-                                               fanout_atomics, push_wait, local_bufs)) {
+                                               fanout_atomics, push_wait, local_buf)) {
 #if PTO2_PROFILING
                 stats.tasks_enqueued++;
 #endif
             }
 #elif PTO2_PROFILING
-            if (release_fanin_and_check_ready(consumer_id, consumer, local_bufs)) {
+            if (release_fanin_and_check_ready(consumer_id, consumer, local_buf)) {
                 stats.tasks_enqueued++;
             }
 #else
-            release_fanin_and_check_ready(consumer_id, consumer, local_bufs);
+            release_fanin_and_check_ready(consumer_id, consumer, local_buf);
 #endif
             current = current->next;
         }
@@ -749,6 +739,42 @@ struct PTO2SchedProfilingData {
  * Returns accumulated profiling data and resets counters.
  */
 PTO2SchedProfilingData pto2_scheduler_get_profiling(int thread_idx);
+
+/**
+ * Print scheduler profiling data for the given thread to DEV_ALWAYS.
+ * Calls pto2_scheduler_get_profiling() internally (resets counters).
+ */
+void pto2_print_sched_profiling(int thread_idx);
+#endif
+
+#if PTO2_ORCH_PROFILING
+/**
+ * Print orchestrator profiling data to DEV_ALWAYS.
+ * Calls pto2_orchestrator_get_profiling() internally (resets counters).
+ */
+void pto2_print_orch_profiling();
+#endif
+
+#if PTO2_PROFILING
+/**
+ * Sim/summary scheduler profiling (used by aicpu_ut run_tests.sh).
+ * Same layout as test layer aggregation so test_common can pass g_sched_prof_data.
+ */
+struct PTO2SimSchedSummary {
+    int64_t tasks_dispatched[4];
+    int64_t fanout_edges_total;
+    int32_t fanout_max_degree;
+    int64_t tasks_enqueued_by_completion;
+    int64_t fanin_edges_total;
+    int32_t fanin_max_degree;
+    int64_t rounds_total;
+    int64_t rounds_with_progress;
+    uint64_t dispatch_cycle;
+    uint64_t complete_cycle;
+};
+
+/** Print Task Statistics + Scheduler overhead table (format aligned with swimlane_converter). */
+void pto2_print_sim_sched_summary(const PTO2SimSchedSummary* s, int64_t tasks_completed, int64_t tasks_consumed);
 #endif
 
 #endif // PTO_SCHEDULER_H

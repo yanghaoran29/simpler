@@ -170,4 +170,16 @@ void perf_aicpu_write_core_assignments(const int core_assignments[][PLATFORM_MAX
  */
 void perf_aicpu_flush_phase_buffers(int thread_idx);
 
+/**
+ * Update perf profiling header with latest scheduler state (scan phase)
+ *
+ * Writes this thread's loop count and completed count to the phase header
+ * so the host can poll progress. Called once per scheduler loop iteration.
+ *
+ * @param thread_idx Scheduler thread index
+ * @param loop_count Current loop iteration number
+ * @param completed_count Total tasks completed so far (this thread or global)
+ */
+void perf_aicpu_update_sched_header(int thread_idx, uint64_t loop_count, uint64_t completed_count);
+
 #endif  // PLATFORM_AICPU_PERFORMANCE_COLLECTOR_AICPU_H_
