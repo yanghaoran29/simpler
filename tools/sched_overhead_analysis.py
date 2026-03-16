@@ -3,9 +3,7 @@
 
 Analyzes scheduling overhead from two sources:
   1. Per-task perf profiling data (perf_swimlane_*.json)
-  2. AICPU scheduler loop breakdown:
-     - From perf JSON Phase data (version >= 2, preferred)
-     - From device log (fallback for older data or PTO2_SCHED_PROFILING=1 details)
+  2. AICPU scheduler loop breakdown (device log)
 
 Usage:
     python sched_overhead_analysis.py                          # auto-select latest files
@@ -32,72 +30,6 @@ def auto_select_perf_json():
     if not files:
         raise FileNotFoundError(f"No perf_swimlane_*.json files found in {outputs_dir}")
     return files[0]
-
-
-def parse_scheduler_from_json_phases(data):
-    """Extract scheduler Phase breakdown from perf_swimlane JSON (version >= 2).
-
-    Computes per-thread loop counts, task counts, and phase totals
-    from aicpu_scheduler_phases records.
-
-    Returns:
-        dict: Thread data keyed by thread index, same schema as parse_scheduler_threads.
-              Returns empty dict if Phase data not available.
-    """
-    if data.get('version', 1) < 2:
-        return {}
-    phases_by_thread = data.get('aicpu_scheduler_phases', [])
-    if not phases_by_thread:
-        return {}
-
-    # Map JSON phase names to internal names
-    phase_map = {
-        'complete': 'complete',
-        'dispatch': 'dispatch',
-        'scan': 'scan',
-        'idle': 'idle',
-    }
-
-    threads = {}
-    for tid, records in enumerate(phases_by_thread):
-        if not records:
-            continue
-
-        phase_us = {p: 0.0 for p in ['complete', 'scan', 'dispatch', 'idle']}
-        total_tasks = 0
-        max_loop_iter = 0
-
-        for rec in records:
-            phase = phase_map.get(rec.get('phase', ''))
-            if phase is None:
-                continue
-            dur = rec.get('end_time_us', 0) - rec.get('start_time_us', 0)
-            if dur > 0:
-                phase_us[phase] += dur
-            if rec.get('tasks_processed', 0) > 0 and phase == 'complete':
-                total_tasks += rec['tasks_processed']
-            loop_iter = rec.get('loop_iter', 0)
-            if loop_iter > max_loop_iter:
-                max_loop_iter = loop_iter
-
-        total_us = sum(phase_us.values())
-        loops = max_loop_iter
-        tasks_per_loop = total_tasks / loops if loops > 0 else 0.0
-
-        t = {
-            'completed': total_tasks,
-            'total_us': total_us,
-            'loops': loops,
-            'tasks_per_loop': tasks_per_loop,
-            'format': 'json_phase',
-        }
-        for p, us in phase_us.items():
-            t[f'{p}_us'] = us
-            t[f'{p}_pct'] = us / total_us * 100 if total_us > 0 else 0
-
-        threads[tid] = t
-
-    return threads
 
 
 def parse_scheduler_threads(log_path):
@@ -128,6 +60,7 @@ def parse_scheduler_threads(log_path):
                 }
 
             # Summary format: Thread N: Scheduler summary: total_time=Xus, loops=Y, tasks_scheduled=Z
+            # Merge with existing thread dict so Phase Breakdown data (complete_us, etc.) is kept.
             m = re.search(r'Thread (\d+): Scheduler summary: total_time=([\d.]+)us, loops=(\d+), tasks_scheduled=(\d+)', line)
             if m:
                 tid = int(m.group(1))
@@ -135,18 +68,22 @@ def parse_scheduler_threads(log_path):
                 loops = int(m.group(3))
                 completed = int(m.group(4))
                 tasks_per_loop = completed / loops if loops > 0 else 0.0
+                entry = {
+                    'completed': completed,
+                    'total_us': total_us,
+                    'loops': loops,
+                    'tasks_per_loop': tasks_per_loop,
+                    'format': 'summary',
+                }
                 if tid in threads:
-                    # Enrich existing entry (e.g. two-level) with loop stats
-                    threads[tid]['loops'] = loops
-                    threads[tid]['tasks_per_loop'] = tasks_per_loop
+                    threads[tid].update(entry)
                 else:
-                    threads[tid] = {
-                        'completed': completed,
-                        'total_us': total_us,
-                        'loops': loops,
-                        'tasks_per_loop': tasks_per_loop,
-                        'format': 'summary',
-                    }
+                    threads[tid] = entry
+
+            # New format phase lines: Thread N:   complete       : Xus (Y%)
+            m = re.search(r'Thread (\d+):\s+(complete|dispatch|scan|idle)\s+:\s+([\d.]+)us \(\s*([\d.]+)%\)', line)
+            if m:
+                tid = int(m.group(1))
 
             # New format: complete with fanout/fanin stats
             m = re.search(
@@ -243,12 +180,96 @@ def validate_perf_tasks_for_overhead_analysis(tasks):
     return True, ""
 
 
+def _section_header_80(title, pad_char='-'):
+    """Print an 80-char line with title centered, padded with pad_char."""
+    n = len(title)
+    left = (80 - n) // 2
+    right = 80 - n - left
+    print((pad_char * left) + title + (pad_char * right))
+
+
+def _section_header_96_indent2(title, pad_char='-'):
+    """Print a 96-char line with 2-space indent and title centered in the remaining 94 chars."""
+    indent = '  '
+    content_len = 96 - len(indent)  # 94
+    n = len(title)
+    left = (content_len - n) // 2
+    right = content_len - n - left
+    print(indent + (pad_char * left) + title + (pad_char * right))
+
+
+def _run_part2_only(log_path, print_sources=True, log_label='sim log'):
+    """Run only Part 2 (scheduler loop + Phase breakdown) from a log file.
+    Used when --sim-log is provided and no perf JSON (e.g. after run_tests.sh aicpu_ut).
+    """
+    log_path = Path(log_path)
+    if not log_path.exists():
+        print(f"Error: Log not found: {log_path}", file=sys.stderr)
+        return 1
+    if print_sources:
+        print(f"{log_label}: {log_path}")
+    threads = parse_scheduler_threads(log_path)
+    n_threads = len(threads)
+    if n_threads == 0:
+        print("No scheduler thread lines found in log.", file=sys.stderr)
+        return 1
+    print()
+    _section_header_96_indent2("--- AICPU scheduler loop breakdown ---")
+    print()
+    indent = "  "
+    fmt2 = indent + "  {:<10} {:>7} {:>10} {:>12} {:>11}"
+    print(fmt2.format('Thread', 'Loops', 'Completed', 'Tasks/loop', 'Total (us)'))
+    print(indent + "  " + '-' * 54)
+    for tid in sorted(threads.keys()):
+        t = threads[tid]
+        loops = t.get('loops', 0)
+        tpl = t.get('tasks_per_loop', (t['completed'] / loops if loops > 0 else 0))
+        print(fmt2.format('T' + str(tid), loops, t['completed'], f"{tpl:.3f}", f"{t['total_us']:.1f}"))
+    total_us = sum(t['total_us'] for t in threads.values())
+    total_completed = sum(t['completed'] for t in threads.values())
+    total_loops = sum(t.get('loops', 0) for t in threads.values())
+    avg_tpl = total_completed / total_loops if total_loops > 0 else 0
+    print(fmt2.format('SUM', total_loops, total_completed, f'{avg_tpl:.3f}', f'{total_us:.1f}'))
+    print()
+    phases = ['complete', 'scan', 'dispatch', 'idle']
+    phase_labels = {
+        'complete': 'Complete (poll handshake, resolve deps)',
+        'scan': 'Scan (update perf header)',
+        'dispatch': 'Dispatch (pop queue, build payload, flush)',
+        'idle': 'Idle (spinning, no progress)',
+    }
+    fmt3 = indent + "  {:<50} {:>11} {:>10} {:>14}"
+    print(fmt3.format('Phase', 'Total (us)', '% of total', 'Avg/task (us)'))
+    print(indent + "  " + '-' * 89)
+    for p in phases:
+        key = p + '_us'
+        tot = sum(t.get(key, 0) for t in threads.values())
+        pct = tot / total_us * 100 if total_us > 0 else 0
+        avg = tot / total_completed if total_completed > 0 else 0
+        print(fmt3.format(phase_labels[p], f'{tot:.1f}', f'{pct:.1f}%', f'{avg:.2f}'))
+    fanout_edges = sum(t.get('fanout_edges', 0) for t in threads.values())
+    fanout_max = max((t.get('fanout_max_degree', 0) for t in threads.values()), default=0)
+    fanout_avg = fanout_edges / total_completed if total_completed > 0 else 0
+    print(indent + f'  Fanout (notify consumers): total edges={fanout_edges}, max_degree={fanout_max}, avg_degree={fanout_avg:.1f}')
+    fanin_edges = sum(t.get('fanin_edges', 0) for t in threads.values())
+    fanin_max = max((t.get('fanin_max_degree', 0) for t in threads.values()), default=0)
+    fanin_avg = fanin_edges / total_completed if total_completed > 0 else 0
+    print(indent + f'  Fanin  (release producers): total edges={fanin_edges}, max_degree={fanin_max}, avg_degree={fanin_avg:.1f}')
+    print()
+    pop_hit = sum(t.get('pop_hit', 0) for t in threads.values())
+    pop_miss = sum(t.get('pop_miss', 0) for t in threads.values())
+    pop_total = pop_hit + pop_miss
+    pop_hit_rate = pop_hit / pop_total * 100 if pop_total > 0 else 0
+    print(indent + f'  Pop: hit={pop_hit}, miss={pop_miss}, hit_rate={pop_hit_rate:.1f}%')
+    return 0
+
+
 def run_analysis(perf_path, log_path, print_sources=True, selection_strategy=None):
     """Run scheduler overhead analysis report.
 
     Args:
         perf_path: Path to perf_swimlane_*.json.
-        log_path: Path to selected device log file.
+        log_path: Path to device log or sim log file.
         print_sources: Whether to print selected input files.
         selection_strategy: Optional human-readable device-log selection strategy.
 
@@ -262,12 +283,12 @@ def run_analysis(perf_path, log_path, print_sources=True, selection_strategy=Non
         print(f"Error: Perf JSON not found: {perf_path}", file=sys.stderr)
         return 1
     if not log_path.exists():
-        print(f"Error: Device log not found: {log_path}", file=sys.stderr)
+        print(f"Error: Log not found: {log_path}", file=sys.stderr)
         return 1
 
     if print_sources:
         print(f"Perf data:  {perf_path}")
-        print(f"Device log: {log_path}")
+        print(f"Log:        {log_path}")
         if selection_strategy:
             print(f"Selection:  {selection_strategy}")
         inferred_device_id = infer_device_id_from_log_path(log_path)
@@ -313,17 +334,12 @@ def run_analysis(perf_path, log_path, print_sources=True, selection_strategy=Non
     print(fmt.format('Tail OH (finish-end)', f'{all_tail:.1f}', f'{all_tail/n_total:.2f}', f'{all_tail/all_latency*100:.1f}%'))
     print()
 
-    # === Part 2: AICPU scheduler loop breakdown ===
-    # Prefer JSON Phase data (version >= 2), fall back to device log
-    threads = parse_scheduler_from_json_phases(data)
-    phase_source = 'perf JSON phase data'
-    if not threads:
-        threads = parse_scheduler_threads(log_path)
-        phase_source = 'device log'
+    # === Part 2: AICPU scheduler loop breakdown from log ===
+    threads = parse_scheduler_threads(log_path)
     n_threads = len(threads)
 
     print('=' * 90)
-    print('Part 2: AICPU scheduler loop breakdown (from ' + phase_source + ')')
+    print('Part 2: AICPU scheduler loop breakdown (from log)')
     print(f'  {n_threads} scheduler threads')
     print('=' * 90)
     print()
@@ -333,12 +349,14 @@ def run_analysis(perf_path, log_path, print_sources=True, selection_strategy=Non
     print('  ' + '-' * 54)
     for tid in sorted(threads.keys()):
         t = threads[tid]
-        print(fmt2.format('T'+str(tid), t['loops'], t['completed'], f"{t['tasks_per_loop']:.1f}", f"{t['total_us']:.1f}"))
+        loops = t.get('loops', 0)
+        tpl = t.get('tasks_per_loop', (t['completed'] / loops if loops > 0 else 0))
+        print(fmt2.format('T'+str(tid), loops, t['completed'], f"{tpl:.3f}", f"{t['total_us']:.1f}"))
     total_us = sum(t['total_us'] for t in threads.values())
     total_completed = sum(t['completed'] for t in threads.values())
-    total_loops = sum(t['loops'] for t in threads.values())
+    total_loops = sum(t.get('loops', 0) for t in threads.values())
     avg_tpl = total_completed / total_loops if total_loops > 0 else 0
-    print(fmt2.format('SUM', total_loops, total_completed, f'{avg_tpl:.1f}', f'{total_us:.1f}'))
+    print(fmt2.format('SUM', total_loops, total_completed, f'{avg_tpl:.3f}', f'{total_us:.1f}'))
     print()
 
     # Phase breakdown
@@ -361,6 +379,10 @@ def run_analysis(perf_path, log_path, print_sources=True, selection_strategy=Non
         pct = tot / total_us * 100 if total_us > 0 else 0
         avg = tot / total_completed if total_completed > 0 else 0
         print(fmt3.format(phase_labels[p], f'{tot:.1f}', f'{pct:.1f}%', f'{avg:.2f}'))
+    sum_phase_us = sum(phase_totals.values())
+    if total_us > 0 and sum_phase_us == 0:
+        print('  (Phase/Fanout/Fanin/Pop below are 0: log has no per-phase breakdown.)')
+        print('  To get Phase data: use --sim-log with aicpu_ut output, or run on device with PTO2_SCHED_PROFILING=ON.')
     print()
 
     # Fanout stats (from complete phase)
@@ -451,33 +473,42 @@ Examples:
     )
     parser.add_argument('--perf-json', help='Path to perf_swimlane_*.json file. If not specified, uses the latest in outputs/')
     parser.add_argument('--device-log', help='Path to device log file/path/glob. Overrides auto-resolution when provided')
+    parser.add_argument('--sim-log', help='Path to sim run log (e.g. outputs/aicpu_ut_sim_run.log). Part 2 uses this; if no perf JSON, only Part 2 is run.')
+    parser.add_argument('--no-sources', action='store_true', help='Do not print source/log file paths to stdout')
     parser.add_argument('-d', '--device-id', help='Device id for auto-selection from device-<id>')
     args = parser.parse_args()
 
-    # Resolve perf path
-    try:
-        perf_path = Path(args.perf_json) if args.perf_json else auto_select_perf_json()
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-
-    if not perf_path.exists():
-        print(f"Error: Perf JSON not found: {perf_path}", file=sys.stderr)
-        return 1
-
-    # Resolve device log path (strict in this standalone CLI)
-    log_path, strategy = resolve_device_log_path(
-        device_id=args.device_id,
-        device_log=args.device_log,
-        perf_path=perf_path,
-    )
-    if log_path is None:
-        print(f"Error: Failed to resolve device log ({strategy})", file=sys.stderr)
-        return 1
-
-    if not log_path.exists():
-        print(f"Error: Device log not found: {log_path}", file=sys.stderr)
-        return 1
+    sim_log_path = Path(args.sim_log) if args.sim_log else None
+    if sim_log_path is not None:
+        if not sim_log_path.exists():
+            print(f"Error: Sim log not found: {sim_log_path}", file=sys.stderr)
+            return 1
+        try:
+            perf_path = Path(args.perf_json) if args.perf_json else auto_select_perf_json()
+        except FileNotFoundError:
+            return _run_part2_only(sim_log_path, print_sources=not args.no_sources, log_label='Sim log (aicpu_ut)')
+        log_path = sim_log_path
+        strategy = 'Sim log (aicpu_ut)'
+    else:
+        try:
+            perf_path = Path(args.perf_json) if args.perf_json else auto_select_perf_json()
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        if not perf_path.exists():
+            print(f"Error: Perf JSON not found: {perf_path}", file=sys.stderr)
+            return 1
+        log_path, strategy = resolve_device_log_path(
+            device_id=args.device_id,
+            device_log=args.device_log,
+            perf_path=perf_path,
+        )
+        if log_path is None:
+            print(f"Error: Failed to resolve device log ({strategy})", file=sys.stderr)
+            return 1
+        if not log_path.exists():
+            print(f"Error: Device log not found: {log_path}", file=sys.stderr)
+            return 1
 
     return run_analysis(perf_path, log_path, print_sources=True, selection_strategy=strategy)
 

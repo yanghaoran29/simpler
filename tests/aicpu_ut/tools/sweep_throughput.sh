@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# sweep_throughput.sh — 参数扫描脚本：对 test_throughput idx=0 分三组变参各跑 5 次
+#
+# 默认值：X=10(layers), Y=6(deps), Z=5(overlap), W=320(layer0)
+# 分组：
+#   Group X  : X ∈ {5,8,10,16},         Y=6   Z=5   W=320
+#   Group YZ : (Y,Z) ∈ {(2,1),(4,3),(6,5)}, X=10        W=320
+#   Group W  : W ∈ {32,64,128,256,512,1024},  X=10  Y=6  Z=5
+#
+# 用法：
+#   bash tools/sweep_throughput.sh
+# 输出：outputs/sweep_throughput/<label>_run<n>.log
+# 任意一次测试失败立即退出。
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="${SCRIPT_DIR}/../outputs/sweep_throughput"
+mkdir -p "$LOG_DIR"
+
+RUNS=5
+
+# ─── 默认参数 ─────────────────────────────────────────────────────────────────
+DEF_X=10   # --layer-num
+DEF_Y=6    # --dependency
+DEF_Z=5    # --overlap
+DEF_W=320  # --layer0-task-num
+
+# ─── 单次运行 ─────────────────────────────────────────────────────────────────
+run_one() {
+    local X=$1 Y=$2 Z=$3 W=$4 label=$5 run_idx=$6
+    local log_file="${LOG_DIR}/${label}_run${run_idx}.log"
+    printf "  [%d/%d] → %s\n" "$run_idx" "$RUNS" "$(basename "$log_file")"
+    bash "${SCRIPT_DIR}/../run_tests.sh" \
+        --test test_throughput \
+        --layer-num    "$X" \
+        --dependency   "$Y" \
+        --overlap      "$Z" \
+        --layer0-task-num "$W" \
+        --profiling \
+        --idx 0 \
+        > "$log_file" 2>&1 || true
+    if ! grep -q "OVERALL: PASSED" "$log_file"; then
+        echo "  FAILED — see: $log_file" >&2
+        exit 1
+    fi
+}
+
+# ─── 一组参数跑 RUNS 次 ───────────────────────────────────────────────────────
+run_group() {
+    local X=$1 Y=$2 Z=$3 W=$4 label=$5
+    echo ""
+    echo "  X=$X  Y=$Y  Z=$Z  W=$W"
+    for run_idx in $(seq 1 "$RUNS"); do
+        run_one "$X" "$Y" "$Z" "$W" "$label" "$run_idx"
+    done
+}
+
+# ─── Group X ──────────────────────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━  Group X  (vary layers, D=${DEF_Y} O=${DEF_Z} W=${DEF_W})  ━━━━━━━━━━━━━━"
+for X in 5 8 10 16; do
+    run_group "$X" "$DEF_Y" "$DEF_Z" "$DEF_W" \
+        "grpX_n${X}_D${DEF_Y}_O${DEF_Z}_W${DEF_W}"
+done
+
+# ─── Group YZ ─────────────────────────────────────────────────────────────────
+echo ""
+echo "━━━━━━━━━━━━━  Group YZ  (vary deps/overlap, n=${DEF_X} W=${DEF_W})  ━━━━━━━━━━━━━━"
+for pair in "2 1" "4 3" "6 5"; do
+    Y=${pair% *}
+    Z=${pair#* }
+    run_group "$DEF_X" "$Y" "$Z" "$DEF_W" \
+        "grpYZ_n${DEF_X}_D${Y}_O${Z}_W${DEF_W}"
+done
+
+# ─── Group W ──────────────────────────────────────────────────────────────────
+echo ""
+echo "━━━━━━━━━━━━━━  Group W  (vary layer0, n=${DEF_X} D=${DEF_Y} O=${DEF_Z})  ━━━━━━━━━━━━━━"
+for W in 32 64 128 256 512 1024; do
+    run_group "$DEF_X" "$DEF_Y" "$DEF_Z" "$W" \
+        "grpW_n${DEF_X}_D${DEF_Y}_O${DEF_Z}_W${W}"
+done
+
+# ─── 汇总 ─────────────────────────────────────────────────────────────────────
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+total=$(( (4 + 4 + 6) * RUNS ))
+echo "  All done — ${total} runs passed."
+echo "  Logs: $LOG_DIR"

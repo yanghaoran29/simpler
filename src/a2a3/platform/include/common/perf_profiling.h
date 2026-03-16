@@ -313,6 +313,9 @@ struct AicpuPhaseHeader {
     uint32_t num_cores;              // Total number of cores with valid assignments
     int8_t core_to_thread[PLATFORM_MAX_CORES];  // core_id → scheduler thread index (-1 = unassigned)
     AicpuOrchSummary orch_summary;   // Orchestrator cumulative data
+    // Scheduler state written each loop (scan phase) for host polling
+    uint64_t last_sched_loop[PLATFORM_MAX_AICPU_THREADS];
+    uint64_t last_sched_completed[PLATFORM_MAX_AICPU_THREADS];
 } __attribute__((aligned(64)));
 
 // =============================================================================

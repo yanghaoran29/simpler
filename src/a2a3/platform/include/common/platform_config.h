@@ -23,22 +23,38 @@
 /**
  * Maximum block dimension supported by platform
  * This is the fundamental platform capacity constraint.
+ * Can be overridden via compile-time -D flag.
  */
+#ifndef PLATFORM_MAX_BLOCKDIM
 constexpr int PLATFORM_MAX_BLOCKDIM = 24;
+#endif
 
 /**
  * Core composition per block dimension
  * Current architecture: 1 block = 1 AIC cube + 2 AIV cubes
+ * Can be overridden via compile-time -D flags.
  */
-constexpr int PLATFORM_CORES_PER_BLOCKDIM = 3;
+#ifndef PLATFORM_AIC_CORES_PER_BLOCKDIM
 constexpr int PLATFORM_AIC_CORES_PER_BLOCKDIM = 1;
+#endif
+
+#ifndef PLATFORM_AIV_CORES_PER_BLOCKDIM
 constexpr int PLATFORM_AIV_CORES_PER_BLOCKDIM = 2;
+#endif
+
+#ifndef PLATFORM_CORES_PER_BLOCKDIM
+constexpr int PLATFORM_CORES_PER_BLOCKDIM =
+    PLATFORM_AIC_CORES_PER_BLOCKDIM + PLATFORM_AIV_CORES_PER_BLOCKDIM;
+#endif
 
 /**
  * Maximum AICPU scheduling threads
  * Determines parallelism level of the AICPU task scheduler.
+ * Can be overridden via compile-time -D flag.
  */
+#ifndef PLATFORM_MAX_AICPU_THREADS
 constexpr int PLATFORM_MAX_AICPU_THREADS = 4;
+#endif
 
 /**
  * Maximum AICPU launch threads (physical)
@@ -204,7 +220,11 @@ constexpr uint32_t PLATFORM_MAX_PHYSICAL_CORES = 25;
 #define TASK_FIN_STATE     1
 
 #define EXTRACT_TASK_ID(regval)    ((int)((regval) & TASK_ID_MASK))
+#ifdef PTO2_SIM_AICORE_UT
+#define EXTRACT_TASK_STATE(regval) TASK_FIN_STATE
+#else
 #define EXTRACT_TASK_STATE(regval) ((int)(((regval) & TASK_STATE_MASK) >> 31))
+#endif
 #define MAKE_ACK_VALUE(task_id)    ((uint64_t)((task_id) & TASK_ID_MASK))
 #define MAKE_FIN_VALUE(task_id)    ((uint64_t)(((task_id) & TASK_ID_MASK) | TASK_STATE_MASK))
 

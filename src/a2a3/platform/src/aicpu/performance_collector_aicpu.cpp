@@ -280,6 +280,8 @@ void perf_aicpu_init_phase_profiling(Runtime* runtime, int num_sched_threads, in
 
     memset(s_phase_header->core_to_thread, -1, sizeof(s_phase_header->core_to_thread));
     memset(&s_phase_header->orch_summary, 0, sizeof(AicpuOrchSummary));
+    memset(s_phase_header->last_sched_loop, 0, sizeof(s_phase_header->last_sched_loop));
+    memset(s_phase_header->last_sched_completed, 0, sizeof(s_phase_header->last_sched_completed));
 
     // Cache per-thread record pointers and clear buffers
     // Include all threads: scheduler + orchestrator (orchestrators may become schedulers)
@@ -535,4 +537,13 @@ void perf_aicpu_write_core_assignments(const int core_assignments[][PLATFORM_MAX
     wmb();
 
     LOG_INFO("Core-to-thread mapping written: %d cores, %d threads", total_cores, num_threads);
+}
+
+void perf_aicpu_update_sched_header(int thread_idx, uint64_t loop_count, uint64_t completed_count) {
+    if (s_phase_header == nullptr || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS) {
+        return;
+    }
+    s_phase_header->last_sched_loop[thread_idx] = loop_count;
+    s_phase_header->last_sched_completed[thread_idx] = completed_count;
+    wmb();
 }
