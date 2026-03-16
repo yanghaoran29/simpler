@@ -373,14 +373,7 @@ struct AicpuExecutor {
                         }
                         deferred_release_slot_states[deferred_release_count++] = &slot_state;
                     }
-                    // When PTO2_SIM_NO_EARLY_RETURN: keep current task for next drain so no release is dropped.
-                    // When not defined: do not push (same as before this option existed).
-#if defined(PTO2_SIM_AICORE_UT) && defined(PTO2_SIM_NO_EARLY_RETURN)
-                    deferred_release_slot_states[0] = &slot_state;
-                    deferred_release_count = 1;
-#else
                     (void)mixed_task_id;
-#endif
                 }
                 ct.move_running_to_idle(i);
                 core_idle[core_id] = true;
@@ -1087,24 +1080,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                     SPIN_WAIT_HINT();
                 }
                 if (completed_.load(std::memory_order_acquire)) {
-                    // When PTO2_SIM_NO_EARLY_RETURN: drain before break so consumed/fanin stay consistent.
-                    // When not defined: break immediately (same as before this option existed).
-#if defined(PTO2_SIM_AICORE_UT) && defined(PTO2_SIM_NO_EARLY_RETURN)
-                    while (deferred_release_count > 0) {
-#if PTO2_SCHED_PROFILING
-                        int32_t fe =
-                            rt->scheduler.on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                        int32_t fe = rt->scheduler.on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-                        (void)fe;
-#if PTO2_PROFILING
-                        fanin_edges_total += fe;
-                        if (fe > fanin_max_degree) fanin_max_degree = fe;
-#endif
-                        if (runtime && runtime->get_sim_aicore_mode()) pto2_sim_accumulate_fanin(fe);
-                    }
-#endif
                     break;
                 }
             }
@@ -1497,24 +1472,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
             if (idle_iterations > MAX_IDLE_ITERATIONS) {
                 DEV_ERROR("Thread %d: PTO2 timeout after %d idle iterations", thread_idx, idle_iterations);
-                // When PTO2_SIM_NO_EARLY_RETURN: drain before return so consumed/fanin stay consistent.
-                // When not defined: return -1 without drain (same as before this option existed).
-#if defined(PTO2_SIM_AICORE_UT) && defined(PTO2_SIM_NO_EARLY_RETURN)
-                while (deferred_release_count > 0) {
-#if PTO2_SCHED_PROFILING
-                    int32_t fe =
-                        rt->scheduler.on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                    int32_t fe = rt->scheduler.on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-                    (void)fe;
-#if PTO2_PROFILING
-                    fanin_edges_total += fe;
-                    if (fe > fanin_max_degree) fanin_max_degree = fe;
-#endif
-                    if (runtime && runtime->get_sim_aicore_mode()) pto2_sim_accumulate_fanin(fe);
-                }
-#endif
                 return -1;
             } else {
                 SPIN_WAIT_HINT();

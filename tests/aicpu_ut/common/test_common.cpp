@@ -566,36 +566,6 @@ void run_sched_checks(PTO2Runtime* rt, int num_sched) {
         g_pass++;
     }
 
-#if defined(PTO2_SIM_NO_EARLY_RETURN)
-    // P1: --no-early-return invariants
-    {
-        int64_t completed = (int64_t)rt->scheduler.tasks_completed.load(std::memory_order_relaxed);
-        int64_t consumed  = (int64_t)rt->scheduler.tasks_consumed.load(std::memory_order_relaxed);
-        int64_t fanout    = g_sched_prof_data.fanout_edges_total;
-        int64_t fanin     = g_sched_prof_data.fanin_edges_total;
-        if (completed != (int64_t)submitted) {
-            printf("  FAIL (P1 --no-early-return): tasks_completed (%lld) != submitted (%d)\n",
-                   (long long)completed, submitted);
-            g_fail++;
-        } else {
-            g_pass++;
-        }
-        if (consumed != completed) {
-            printf("  FAIL (P1 --no-early-return): tasks_consumed (%lld) != tasks_completed (%lld)\n",
-                   (long long)consumed, (long long)completed);
-            g_fail++;
-        } else {
-            g_pass++;
-        }
-        if (fanout != fanin) {
-            printf("  FAIL (P1 --no-early-return): fanout_edges (%lld) != fanin_edges (%lld)\n",
-                   (long long)fanout, (long long)fanin);
-            g_fail++;
-        } else {
-            g_pass++;
-        }
-    }
-#endif
 
 #if !defined(PTO2_SIM_AICORE_UT)
     // P2: each scheduler thread dispatched > 0 tasks (warning only, no g_fail increment)

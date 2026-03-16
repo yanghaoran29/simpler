@@ -40,7 +40,7 @@
 | `--build-only` | 仅构建，不运行任何测试 |
 | `--no-profiling` | 关闭 `PTO2_PROFILING` 宏（默认开启） |
 | `--sched-threads N` | 设置 Scheduler 线程数（仅 perf 测试生效，默认 3，范围 1～PLATFORM_MAX_AICPU_THREADS） |
-| `--no-early-return` | 开启「跳过 early return」：编译时定义 `PTO2_SIM_NO_EARLY_RETURN`，在 break/return 前先 drain `deferred_release`，使 `tasks_completed==tasks_consumed`、`fanin==fanout`，用于测试模拟的正确性；默认关闭 |
+| `--no-early-return` | （已废弃）旧版通过编译时定义 `PTO2_SIM_NO_EARLY_RETURN` 在 break/return 前先 drain `deferred_release`；当前分支已移除相关分支代码，该选项不再生效，仅保留参数占位以兼容旧脚本 |
 
 ### 辅助
 
@@ -65,7 +65,7 @@
 功能测试（functional）每个测试对应一个二进制，没有参数索引。
 性能测试（perf）每组参数对应一个独立二进制，在编译时通过 `PERF_CASE_IDX` 宏选定。
 
-**test_batch_paged_attention 与 --no-early-return：** 当使用 `--no-early-return` 时，会定义宏 `PTO2_SIM_NO_EARLY_RETURN`。在此条件下，`test_batch_paged_attention` 在 Scheduler Profiling 结束后会校验：`tasks_completed == tasks_consumed` 且 `fanout == fanin`。若任一不相等，会打印 `FAIL (--no-early-return): ...` 并将该用例判为失败（计入 Failed，进程退出码非 0）。
+**test_batch_paged_attention 与 --no-early-return（已废弃）：** 早期版本在启用 `--no-early-return` 时会定义宏 `PTO2_SIM_NO_EARLY_RETURN` 并在 Scheduler Profiling 结束后额外校验 `tasks_completed == tasks_consumed` 及 `fanout == fanin`。当前分支已移除该宏及相关分支逻辑，因此该选项不再影响执行结果，仅用于兼容旧命令行参数，不再进行额外校验。
 
 ---
 

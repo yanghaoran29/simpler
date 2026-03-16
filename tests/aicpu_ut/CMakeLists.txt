@@ -52,8 +52,6 @@ option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" ON)
 # Define PTO2_SIM_AICORE_UT=1 so that executor/Runtime sim branches are compiled in.
 # Default ON for aicpu_ut so that perf tests get current behavior when executor is linked.
 option(PTO2_SIM_AICORE_UT "Enable sim AICore and 0-core paths (aicpu_ut perf)" ON)
-# When ON (and PTO2_SIM_AICORE_UT): drain deferred_release before any break/return so completed==consumed, fanin==fanout. Default OFF.
-option(PTO2_SIM_NO_EARLY_RETURN "Skip early return: drain before break/return (PTO2_SIM_AICORE_UT only)" OFF)
 
 # ─── Source directories ────────────────────────────────────────────────────────
 set(ROOT_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/../..)
@@ -105,9 +103,6 @@ if(PTO2_ORCH_PROFILING)
 endif()
 if(PTO2_SIM_AICORE_UT)
     list(APPEND COMMON_COMPILE_DEFS PTO2_SIM_AICORE_UT=1)
-endif()
-if(PTO2_SIM_NO_EARLY_RETURN)
-    list(APPEND COMMON_COMPILE_DEFS PTO2_SIM_NO_EARLY_RETURN=1)
 endif()
 
 # ─── Optimization level ───────────────────────────────────────────────────────

@@ -133,7 +133,6 @@ run_case() {
 BUILD_DEFAULT="$OUT_DIR/build_default"       # O3, no profiling
 BUILD_PROFILING="$OUT_DIR/build_profiling"   # O3, full profiling
 BUILD_DEBUG="$OUT_DIR/build_debug"           # O0, no profiling
-BUILD_NER="$OUT_DIR/build_no_early_return"   # O3, PTO2_SIM_NO_EARLY_RETURN=ON
 
 CURRENT_BUILD="$BUILD_DEFAULT"
 
@@ -318,8 +317,7 @@ fi  # end !QUICK
     echo "  [Gaps / known limitations]"
     echo "    • test_linear_* not in DEFAULT_PERF_TESTS (must use --test test_linear_concurrent)"
     echo "    • test_paged_attention has only index 0 (single case file)"
-    echo "    • --no-early-return only meaningful with PTO2_SIM_NO_EARLY_RETURN build flag"
-    echo "      (run_tests.sh passes -DPTO2_SIM_NO_EARLY_RETURN=ON automatically)"
+    echo "    • --no-early-return 已废弃：PTO2_SIM_NO_EARLY_RETURN 分支代码已移除"
     echo ""
 } | tee -a "$SUMMARY" > "$ANALYSIS"
 
