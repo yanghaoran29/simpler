@@ -44,38 +44,33 @@ uint64_t get_platform_regs();
 }
 #endif
 
+// Sim AICore helpers (used internally when PTO2_SIM_AICORE_UT is enabled)
 #if defined(PTO2_SIM_AICORE_UT)
-/** When PTO2_SIM_AICORE_UT: read simulated COND from global s_sim_core_cond_value[core_id] */
 extern "C" uint64_t pto2_sim_read_cond_reg(int32_t core_id);
+extern "C" void pto2_sim_aicore_on_task_received(int32_t core_id, int32_t task_id);
+extern "C" void pto2_sim_aicore_set_idle(int32_t core_id);
+// Set/clear current sim core context for register access (implemented in platform_regs.cpp)
+void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
+void pto2_sim_clear_current_core();
 #endif
 
 /**
  * Read a register value from an AICore's register block
  *
- * @param reg_base_addr  Base address of the AICore's register block (0 in sim => use pto2_sim_read_cond_reg when sim_core_id >= 0)
+ * @param reg_base_addr  Base address of the AICore's register block
  * @param reg            Register identifier (C++ enum class)
  * @return Register value (zero-extended to uint64_t)
  */
-#if defined(PTO2_SIM_AICORE_UT)
-/** When PTO2_SIM_AICORE_UT: sim_core_id is used for sim COND read when reg_base_addr==0 and reg==COND. */
-uint64_t read_reg(uint64_t reg_base_addr, RegId reg, int32_t sim_core_id);
-#else
 uint64_t read_reg(uint64_t reg_base_addr, RegId reg);
-#endif
 
 /**
  * Write a value to an AICore's register
  *
- * @param reg_base_addr  Base address of the AICore's register block (0 in sim => use sim_aicore when sim_core_id >= 0)
+ * @param reg_base_addr  Base address of the AICore's register block
  * @param reg            Register identifier (C++ enum class)
  * @param value          Value to write (truncated to register width)
  */
-#if defined(PTO2_SIM_AICORE_UT)
-/** When PTO2_SIM_AICORE_UT: sim_core_id is used for sim dispatch when reg_base_addr==0 and reg==DATA_MAIN_BASE. */
-void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value, int32_t sim_core_id);
-#else
 void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value);
-#endif
 
 /**
  * Initialize AICore registers after core discovery

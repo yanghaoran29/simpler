@@ -45,12 +45,26 @@ static const int s_sched_cpus[] = {
     SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
 };
 static int s_actual_sched_cpu[PLATFORM_MAX_AICPU_THREADS];
+// Set/clear current sim core context for register access
+extern void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
+extern void pto2_sim_clear_current_core();
 #if PTO2_SCHED_PROFILING
 #include "pto_scheduler.h"
 static PTO2SchedProfilingData s_sched_prof_snapshot[PLATFORM_MAX_AICPU_THREADS] = {};
 // Order Phase Breakdown output by thread index (0, 1, 2, ...)
 static std::atomic<int> s_phase_print_turn(0);
 #endif
+#endif
+
+#if defined(PTO2_SIM_AICORE_UT)
+struct SimCoreGuard {
+    SimCoreGuard(int32_t core_id, bool is_sim) {
+        pto2_sim_set_current_core(core_id, is_sim);
+    }
+    ~SimCoreGuard() {
+        pto2_sim_clear_current_core();
+    }
+};
 #endif
 
 #if PTO2_PROFILING
@@ -313,10 +327,9 @@ struct AicpuExecutor {
 
             int32_t task_id = executing_task_ids[core_id];
 #if defined(PTO2_SIM_AICORE_UT)
-            uint64_t reg_val = read_reg(reg_addr, RegId::COND, core_id);
-#else
-            uint64_t reg_val = read_reg(reg_addr, RegId::COND);
+            SimCoreGuard guard(core_id, runtime->get_sim_aicore_mode() && reg_addr == 0);
 #endif
+            uint64_t reg_val = read_reg(reg_addr, RegId::COND);
             int32_t reg_task_id = EXTRACT_TASK_ID(reg_val);
             int32_t reg_state = EXTRACT_TASK_STATE(reg_val);
             bool done = reg_task_id == task_id && reg_state == TASK_FIN_STATE;
@@ -524,9 +537,13 @@ struct AicpuExecutor {
         }
 #endif
 #if defined(PTO2_SIM_AICORE_UT)
-        write_reg(core_id_to_reg_addr_[core_id], RegId::DATA_MAIN_BASE, static_cast<uint64_t>(task.mixed_task_id + 1), core_id);
-        if (runtime->get_sim_aicore_mode() && core_id_to_reg_addr_[core_id] == 0)
-            pto2_sim_accumulate_dispatch(static_cast<int>(core_type));
+        {
+            uint64_t reg_addr = core_id_to_reg_addr_[core_id];
+            SimCoreGuard guard(core_id, runtime->get_sim_aicore_mode() && reg_addr == 0);
+            write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(task.mixed_task_id + 1));
+            if (runtime->get_sim_aicore_mode() && reg_addr == 0)
+                pto2_sim_accumulate_dispatch(static_cast<int>(core_type));
+        }
 #else
         write_reg(core_id_to_reg_addr_[core_id], RegId::DATA_MAIN_BASE, static_cast<uint64_t>(task.mixed_task_id + 1));
 #endif
@@ -1431,11 +1448,11 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                         PTO2TaskSlotState& slot_state = sched->get_slot_state_by_task_id(sw_tid);
                         hw_kernel = slot_state.task->kernel_id[diag_slot];
                     }
+                    uint64_t reg_addr = core_id_to_reg_addr_[cid];
 #if defined(PTO2_SIM_AICORE_UT)
-                    uint64_t cond_reg = read_reg(core_id_to_reg_addr_[cid], RegId::COND, cid);
-#else
-                    uint64_t cond_reg = read_reg(core_id_to_reg_addr_[cid], RegId::COND);
+                    SimCoreGuard guard(cid, runtime->get_sim_aicore_mode() && reg_addr == 0);
 #endif
+                    uint64_t cond_reg = read_reg(reg_addr, RegId::COND);
                     DEV_ALWAYS("    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d",
                                cid, (unsigned)cond_reg,
                                EXTRACT_TASK_STATE(cond_reg), EXTRACT_TASK_ID(cond_reg),
@@ -1451,11 +1468,11 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                         PTO2TaskSlotState& slot_state = sched->get_slot_state_by_task_id(sw_tid);
                         hw_kernel = slot_state.task->kernel_id[diag_slot];
                     }
+                    uint64_t reg_addr = core_id_to_reg_addr_[cid];
 #if defined(PTO2_SIM_AICORE_UT)
-                    uint64_t cond_reg = read_reg(core_id_to_reg_addr_[cid], RegId::COND, cid);
-#else
-                    uint64_t cond_reg = read_reg(core_id_to_reg_addr_[cid], RegId::COND);
+                    SimCoreGuard guard(cid, runtime->get_sim_aicore_mode() && reg_addr == 0);
 #endif
+                    uint64_t cond_reg = read_reg(reg_addr, RegId::COND);
                     DEV_ALWAYS("    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d",
                                cid, (unsigned)cond_reg,
                                EXTRACT_TASK_STATE(cond_reg), EXTRACT_TASK_ID(cond_reg),
@@ -2185,10 +2202,9 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int32_t thread_idx,
 
         uint64_t reg_addr = core_id_to_reg_addr_[core_id];
 #if defined(PTO2_SIM_AICORE_UT)
-        uint64_t reg_val = read_reg(reg_addr, RegId::COND, core_id);
-#else
-        uint64_t reg_val = read_reg(reg_addr, RegId::COND);
+        SimCoreGuard guard(core_id, runtime && runtime->get_sim_aicore_mode() && reg_addr == 0);
 #endif
+        uint64_t reg_val = read_reg(reg_addr, RegId::COND);
         int32_t reg_task_id = EXTRACT_TASK_ID(reg_val);
         int32_t reg_state = EXTRACT_TASK_STATE(reg_val);
         int32_t task_id = executing_task_ids_[thread_idx][core_id];

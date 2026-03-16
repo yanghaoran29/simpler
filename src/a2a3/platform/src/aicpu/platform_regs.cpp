@@ -34,40 +34,32 @@ uint64_t get_platform_regs() {
 }
 
 #if defined(PTO2_SIM_AICORE_UT)
-uint64_t read_reg(uint64_t reg_base_addr, RegId reg, int32_t sim_core_id) {
-    if (sim_core_id >= 0 && reg_base_addr == 0 && reg == RegId::COND)
-        return pto2_sim_read_cond_reg(sim_core_id);  // sim_aicore.cpp
-    volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(
-        reg_base_addr + reg_offset(reg));
+// Thread-local context for sim AICore register access
+struct SimCoreContext {
+    int32_t core_id;
+    bool is_sim;
+};
 
-    __sync_synchronize();
+static thread_local SimCoreContext g_sim_core_ctx = { -1, false };
 
-    uint64_t value = static_cast<uint64_t>(*ptr);
-
-    __sync_synchronize();
-
-    return value;
+void pto2_sim_set_current_core(int32_t core_id, bool is_sim) {
+    g_sim_core_ctx.core_id = core_id;
+    g_sim_core_ctx.is_sim = is_sim;
 }
 
-void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value, int32_t sim_core_id) {
-    if (sim_core_id >= 0 && reg_base_addr == 0 && reg == RegId::DATA_MAIN_BASE) {
-        if (value == 0 || value == AICORE_EXIT_SIGNAL)
-            pto2_sim_aicore_set_idle(sim_core_id);  // sim_aicore.cpp
-        else
-            pto2_sim_aicore_on_task_received(sim_core_id, static_cast<int32_t>(value - 1));  // sim_aicore.cpp
-        return;
-    }
-    volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(
-        reg_base_addr + reg_offset(reg));
-
-    __sync_synchronize();
-
-    *ptr = static_cast<uint32_t>(value);
-
-    __sync_synchronize();
+void pto2_sim_clear_current_core() {
+    g_sim_core_ctx.core_id = -1;
+    g_sim_core_ctx.is_sim = false;
 }
-#else
+#endif
+
 uint64_t read_reg(uint64_t reg_base_addr, RegId reg) {
+#if defined(PTO2_SIM_AICORE_UT)
+    if (g_sim_core_ctx.is_sim && g_sim_core_ctx.core_id >= 0 &&
+        reg_base_addr == 0 && reg == RegId::COND) {
+        return pto2_sim_read_cond_reg(g_sim_core_ctx.core_id);  // sim_aicore.cpp
+    }
+#endif
     volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(
         reg_base_addr + reg_offset(reg));
 
@@ -81,6 +73,16 @@ uint64_t read_reg(uint64_t reg_base_addr, RegId reg) {
 }
 
 void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value) {
+#if defined(PTO2_SIM_AICORE_UT)
+    if (g_sim_core_ctx.is_sim && g_sim_core_ctx.core_id >= 0 &&
+        reg_base_addr == 0 && reg == RegId::DATA_MAIN_BASE) {
+        if (value == 0 || value == AICORE_EXIT_SIGNAL)
+            pto2_sim_aicore_set_idle(g_sim_core_ctx.core_id);  // sim_aicore.cpp
+        else
+            pto2_sim_aicore_on_task_received(g_sim_core_ctx.core_id, static_cast<int32_t>(value - 1));  // sim_aicore.cpp
+        return;
+    }
+#endif
     volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(
         reg_base_addr + reg_offset(reg));
 
@@ -90,7 +92,6 @@ void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value) {
 
     __sync_synchronize();
 }
-#endif
 
 void platform_init_aicore_regs(uint64_t reg_addr) {
 #if defined(PTO2_SIM_AICORE_UT)
