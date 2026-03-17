@@ -45,26 +45,12 @@ static const int s_sched_cpus[] = {
     SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
 };
 static int s_actual_sched_cpu[PLATFORM_MAX_AICPU_THREADS];
-// Set/clear current sim core context for register access
-extern void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
-extern void pto2_sim_clear_current_core();
 #if PTO2_SCHED_PROFILING
 #include "pto_scheduler.h"
 static PTO2SchedProfilingData s_sched_prof_snapshot[PLATFORM_MAX_AICPU_THREADS] = {};
 // Order Phase Breakdown output by thread index (0, 1, 2, ...)
 static std::atomic<int> s_phase_print_turn(0);
 #endif
-#endif
-
-#if defined(PTO2_SIM_AICORE_UT)
-struct SimCoreGuard {
-    SimCoreGuard(int32_t core_id, bool is_sim) {
-        pto2_sim_set_current_core(core_id, is_sim);
-    }
-    ~SimCoreGuard() {
-        pto2_sim_clear_current_core();
-    }
-};
 #endif
 
 #if PTO2_PROFILING

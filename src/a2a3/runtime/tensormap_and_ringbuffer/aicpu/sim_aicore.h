@@ -6,6 +6,12 @@
  * to simulated cores whose COND register state is held in a global array. This header
  * declares the global state, the read API used by read_reg(), and the sim run API
  * (aicpu_sim_run_pto2, aicpu_sim_get_run_prof) for tests.
+ *
+ * Register Access Context (PTO2_SIM_AICORE_UT only):
+ * - When register operations occur, the sim core context tracks which core_id and mode (sim or hw)
+ * - pto2_sim_set_current_core() is called at entry to a sim core region
+ * - pto2_sim_clear_current_core() is called at exit
+ * - SimCoreGuard provides RAII wrapper for this context
  */
 
 #ifndef AICPU_SIM_AICORE_H_
@@ -38,9 +44,55 @@ extern "C" void pto2_sim_aicore_set_idle(int32_t core_id);
  */
 extern "C" void pto2_sim_aicore_init_all_idle(void);
 
-// -----------------------------------------------------------------------------
+/**
+ * Set current sim core context for register access.
+ * Called at entry to a block of register operations for a specific core.
+ *
+ * @param core_id  Core ID being accessed (or -1 to clear)
+ * @param is_sim   True if this is a sim core (reg_addr==0), false if hardware
+ */
+extern "C" void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
+
+/**
+ * Clear current sim core context for register access.
+ * Called at exit from a block of register operations.
+ */
+extern "C" void pto2_sim_clear_current_core();
+
+/**
+ * Get current sim core context (internal use by platform_regs.cpp).
+ * Returns core_id, or -1 if no active sim core context.
+ */
+extern "C" int32_t pto2_sim_get_current_core_id();
+
+/**
+ * Check if current context is a sim core (internal use by platform_regs.cpp).
+ * Returns true if pto2_sim_set_current_core was called with is_sim=true.
+ */
+extern "C" bool pto2_sim_is_current_sim();
+
+// =============================================================================
+// RAII Guard for Sim Core Register Context
+// =============================================================================
+
+#ifdef __cplusplus
+/**
+ * RAII guard for setting/clearing sim core context around register operations.
+ * Transparently compiles to no-op when PTO2_SIM_AICORE_UT is not defined.
+ */
+struct SimCoreGuard {
+    SimCoreGuard(int32_t core_id, bool is_sim) {
+        pto2_sim_set_current_core(core_id, is_sim);
+    }
+    ~SimCoreGuard() {
+        pto2_sim_clear_current_core();
+    }
+};
+#endif  // __cplusplus
+
+// =============================================================================
 // Sim run API (for aicpu_ut perf tests)
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 #ifdef __cplusplus
 extern "C" {
@@ -120,6 +172,25 @@ void aicpu_sim_get_saved_sched_prof(int thread_idx, PTO2SchedProfilingData* out)
 }
 #endif
 #endif  // PTO2_SCHED_PROFILING
+
+#endif  // PTO2_SIM_AICORE_UT
+
+// =============================================================================
+// Empty stubs when PTO2_SIM_AICORE_UT is not defined (transparent compilation)
+// =============================================================================
+
+#else  // !defined(PTO2_SIM_AICORE_UT)
+
+#ifdef __cplusplus
+/**
+ * Empty RAII guard when PTO2_SIM_AICORE_UT is not defined.
+ * Compiles to no-op, allowing same code to work with/without sim mode.
+ */
+struct SimCoreGuard {
+    SimCoreGuard(int32_t, bool) {}
+    ~SimCoreGuard() {}
+};
+#endif  // __cplusplus
 
 #endif  // PTO2_SIM_AICORE_UT
 
