@@ -51,6 +51,7 @@ void print_orch_profiling();
 // Scheduler profiling
 #if PTO2_PROFILING
 #include "common/platform_config.h"
+#include "pto_runtime2_types.h"
 struct SchedProfilingData {
     int64_t tasks_dispatched[PTO2_NUM_WORKER_TYPES];
     int64_t fanout_edges_total;

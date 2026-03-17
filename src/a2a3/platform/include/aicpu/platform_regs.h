@@ -50,8 +50,8 @@ extern "C" uint64_t pto2_sim_read_cond_reg(int32_t core_id);
 extern "C" void pto2_sim_aicore_on_task_received(int32_t core_id, int32_t task_id);
 extern "C" void pto2_sim_aicore_set_idle(int32_t core_id);
 // Set/clear current sim core context for register access (implemented in platform_regs.cpp)
-void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
-void pto2_sim_clear_current_core();
+extern "C" void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
+extern "C" void pto2_sim_clear_current_core();
 #endif
 
 /**
