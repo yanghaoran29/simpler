@@ -705,41 +705,6 @@ struct PTO2SchedProfilingData {
  */
 PTO2SchedProfilingData pto2_scheduler_get_profiling(int thread_idx);
 
-/**
- * Print scheduler profiling data for the given thread to DEV_ALWAYS.
- * Calls pto2_scheduler_get_profiling() internally (resets counters).
- */
-void pto2_print_sched_profiling(int thread_idx);
-#endif
-
-#if PTO2_ORCH_PROFILING
-/**
- * Print orchestrator profiling data to DEV_ALWAYS.
- * Calls pto2_orchestrator_get_profiling() internally (resets counters).
- */
-void pto2_print_orch_profiling();
-#endif
-
-#if PTO2_PROFILING
-/**
- * Sim/summary scheduler profiling (used by aicpu_ut run_tests.sh).
- * Same layout as test layer aggregation so test_common can pass g_sched_prof_data.
- */
-struct PTO2SimSchedSummary {
-    int64_t tasks_dispatched[4];
-    int64_t fanout_edges_total;
-    int32_t fanout_max_degree;
-    int64_t tasks_enqueued_by_completion;
-    int64_t fanin_edges_total;
-    int32_t fanin_max_degree;
-    int64_t rounds_total;
-    int64_t rounds_with_progress;
-    uint64_t dispatch_cycle;
-    uint64_t complete_cycle;
-};
-
-/** Print Task Statistics + Scheduler overhead table (format aligned with swimlane_converter). */
-void pto2_print_sim_sched_summary(const PTO2SimSchedSummary* s, int64_t tasks_completed, int64_t tasks_consumed);
 #endif
 
 #endif // PTO_SCHEDULER_H

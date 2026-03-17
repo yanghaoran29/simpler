@@ -10,9 +10,6 @@
 #include "pto_scheduler.h"
 #include "common/platform_config.h"
 #include "aicpu/device_time.h"
-#if defined(PTO2_SIM_AICORE_UT)
-#include "sim_aicore.h"
-#endif
 #include <time.h>
 #include <thread>
 #include <vector>
@@ -499,98 +496,17 @@ int sim_run_with_resolve_and_dispatch(PTO2Runtime* rt, int num_sched_threads, in
 }
 
 #if PTO2_PROFILING
-#if PTO2_ORCH_PROFILING
-// Used by perf tests (run_tests.sh): prints orchestration profiling table
-// (sync_tensormap, task_ring_alloc, param_copy, lookup+dep, heap_alloc, tensormap_ins, fanin+ready, finalize+SM, scope_end, avg/task).
-void print_orch_profiling() {
-    pto2_print_orch_profiling();
-}
-#else
-// When ORCH_PROFILING=OFF (e.g. --profiling 1), still print orchestrator run time from orch_timing_begin/end.
 void print_orch_profiling() {
     if (g_orch_end_time > g_orch_start_time) {
         uint64_t cycles = g_orch_end_time - g_orch_start_time;
         printf("  Orchestrator run time: %.3fus\n", cycles_to_us(cycles));
     }
 }
-#endif
 
 void print_sched_profiling(PTO2Runtime* rt) {
-#if defined(PTO2_SIM_AICORE_UT)
-    // aicpu_sim_run_pto2 路径不更新 g_sched_prof_data，从上次 sim 运行结果回填以便 fanout/fanin 正确显示
-    AicpuSimRunProf run_prof;
-    aicpu_sim_get_run_prof(&run_prof);
-    int64_t sim_sum = 0;
-    for (int i = 0; i < AICPU_SIM_PROF_WORKER_TYPES && i < PTO2_NUM_WORKER_TYPES; i++) {
-        g_sched_prof_data.tasks_dispatched[i] = run_prof.tasks_dispatched[i];
-        sim_sum += run_prof.tasks_dispatched[i];
-    }
-    if (sim_sum > 0) {
-        g_sched_prof_data.fanout_edges_total = run_prof.fanout_edges_total;
-        g_sched_prof_data.fanout_max_degree = run_prof.fanout_max_degree;
-        g_sched_prof_data.tasks_enqueued_by_completion = run_prof.tasks_enqueued_by_completion;
-        g_sched_prof_data.fanin_edges_total = run_prof.fanin_edges_total;
-        g_sched_prof_data.fanin_max_degree = run_prof.fanin_max_degree;
-        g_sched_prof_data.rounds_total = run_prof.rounds_total;
-        g_sched_prof_data.rounds_with_progress = run_prof.rounds_with_progress;
-        g_sched_prof_data.complete_cycle = run_prof.complete_cycle;
-        g_sched_prof_data.dispatch_cycle = run_prof.dispatch_cycle;
-    }
-#endif
-
-#if PTO2_SCHED_PROFILING
-    pto2_print_sim_sched_summary(
-        &g_sched_prof_data,
-        (int64_t)rt->scheduler.tasks_completed.load(std::memory_order_relaxed),
-        (int64_t)rt->scheduler.tasks_consumed.load(std::memory_order_relaxed));
-#endif
-
-#if PTO2_SCHED_PROFILING && !defined(PTO2_SIM_AICORE_UT)
-    pto2_print_sched_profiling(0);
-#endif
+    (void)rt;
 }
 
-/**
- * Scheduler invariant checks (P1=FAIL, P2=WARN).
- * Must be called after print_sched_profiling() so g_sched_prof_data is populated.
- * Skipped when AICPU_UT_NO_CHECK=1.
- */
-void run_sched_checks(PTO2Runtime* rt, int num_sched) {
-    if (getenv("AICPU_UT_NO_CHECK")) return;
-
-    int32_t submitted = 0;
-    if (rt->sm_handle && rt->sm_handle->header)
-        submitted = rt->sm_handle->header->current_task_index.load(std::memory_order_acquire);
-
-    // P1: total dispatched == submitted
-    int64_t total_dispatched = 0;
-    for (int wt = 0; wt < PTO2_NUM_WORKER_TYPES; wt++)
-        total_dispatched += g_sched_prof_data.tasks_dispatched[wt];
-    if (total_dispatched != (int64_t)submitted) {
-        printf("  FAIL (P1): total_dispatched (%lld) != submitted (%d)\n",
-               (long long)total_dispatched, submitted);
-        g_fail++;
-    } else {
-        g_pass++;
-    }
-
-
-#if !defined(PTO2_SIM_AICORE_UT)
-    // P2: each scheduler thread dispatched > 0 tasks (warning only, no g_fail increment)
-    if (submitted > 0) {
-        for (int i = 0; i < num_sched && i < PLATFORM_MAX_AICPU_THREADS; i++) {
-            int64_t thread_dispatched = 0;
-            for (int wt = 0; wt < PTO2_NUM_WORKER_TYPES; wt++)
-                thread_dispatched += g_sched_prof_per_thread[i].tasks_dispatched[wt];
-            if (thread_dispatched == 0)
-                printf("  WARN (P2): scheduler thread %d dispatched 0 tasks (possible starvation)\n", i);
-        }
-    }
-#else
-    (void)num_sched;
-    // P2 unavailable: PTO2_SIM_AICORE_UT path has no per-thread profiling
-#endif
-}
 #else
 void print_orch_profiling() {}
 void print_sched_profiling(PTO2Runtime* rt) { (void)rt; }

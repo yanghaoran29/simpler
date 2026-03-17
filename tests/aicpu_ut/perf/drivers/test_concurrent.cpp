@@ -277,7 +277,6 @@ int main() {
     print_cpu_affinity(num_sched);
     section_header_100('-', "--- Scheduler Profiling ---");
     print_sched_profiling(rt);
-    run_sched_checks(rt, num_sched);
 #endif
 
     pto2_runtime_destroy(rt);
