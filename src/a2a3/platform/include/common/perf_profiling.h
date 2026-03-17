@@ -229,17 +229,19 @@ struct PerfDataHeader {
 /**
  * AICPU phase identifier
  *
- * Scheduler phases (0-3): four phases in each scheduler loop iteration.
- * Orchestrator phases (16-24): sub-steps within each pto2_submit_task() call.
+ * Scheduler phases (0-5): four phases + loop begin/end when PTO2_PROFILING_BEGINEND.
+ * Orchestrator phases (16-26): sub-steps within each pto2_submit_task() call + begin/end when PTO2_PROFILING_BEGINEND.
  */
 enum class AicpuPhaseId : uint32_t {
-    // Scheduler phases (0-3)
+    // Scheduler phases (0-5)
     SCHED_COMPLETE    = 0,  // Process completed tasks (fanout traversal)
     SCHED_DISPATCH    = 1,  // Dispatch ready tasks to idle cores
     SCHED_SCAN        = 2,  // Incremental scan for root tasks
     SCHED_IDLE_WAIT   = 3,  // Idle/spinning (no progress)
-    SCHED_PHASE_COUNT = 4,  // Sentinel: number of scheduler phases
-    // Orchestrator phases (16-24)
+    SCHED_LOOP_BEGIN  = 4,  // Loop iteration start (PTO2_PROFILING_BEGINEND only)
+    SCHED_LOOP_END    = 5,  // Loop iteration end (PTO2_PROFILING_BEGINEND only)
+    SCHED_PHASE_COUNT = 6,  // Sentinel: number of scheduler phase ids
+    // Orchestrator phases (16-26)
     ORCH_SYNC      = 16,  // tensormap sync
     ORCH_ALLOC     = 17,  // task_ring_alloc
     ORCH_PARAMS    = 18,  // param copy
@@ -248,7 +250,9 @@ enum class AicpuPhaseId : uint32_t {
     ORCH_INSERT    = 21,  // tensormap insert
     ORCH_FANIN     = 22,  // fanin + early-ready
     ORCH_FINALIZE  = 23,  // scheduler init + SM
-    ORCH_SCOPE_END = 24   // scope_end
+    ORCH_SCOPE_END = 24,  // scope_end
+    ORCH_BEGIN     = 25,  // submit start (PTO2_PROFILING_BEGINEND only)
+    ORCH_END       = 26   // submit end (PTO2_PROFILING_BEGINEND only)
 };
 
 /**

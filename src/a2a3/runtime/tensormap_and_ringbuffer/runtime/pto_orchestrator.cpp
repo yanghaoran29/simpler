@@ -58,6 +58,7 @@ static uint32_t g_orch_submit_idx = 0;
 uint64_t g_orch_alloc_wait_cycle = 0;
 uint64_t g_orch_heap_wait_cycle = 0;
 uint64_t g_orch_fanin_wait_cycle = 0;
+uint64_t g_orch_finalize_wait_cycle = 0;
 uint64_t g_orch_alloc_atomic_count = 0;
 uint64_t g_orch_params_atomic_count = 0;
 uint64_t g_orch_heap_atomic_count = 0;
@@ -70,7 +71,8 @@ uint64_t g_orch_scope_end_atomic_count = 0;
     do {                                                                              \
         _t1 = get_sys_cnt_aicpu();                                                    \
         acc += (_t1 - _t0);                                                           \
-        perf_aicpu_record_orch_phase((phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
+        if (!PTO2_PROFILING_BEGINEND || (phase_id) == AicpuPhaseId::ORCH_FANIN)       \
+            perf_aicpu_record_orch_phase(PTO2_PROFILING_BEGINEND ? AicpuPhaseId::ORCH_END : (phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
         _t0 = _t1;                                                                    \
     } while (0)
 #elif PTO2_PROFILING
@@ -89,7 +91,8 @@ static uint32_t g_orch_submit_idx = 0;
     do {                                                                              \
         if (_prof_active) {                                                           \
             _t1 = get_sys_cnt_aicpu();                                                \
-            perf_aicpu_record_orch_phase((phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
+            if (!PTO2_PROFILING_BEGINEND || (phase_id) == AicpuPhaseId::ORCH_FANIN)   \
+                perf_aicpu_record_orch_phase(PTO2_PROFILING_BEGINEND ? AicpuPhaseId::ORCH_END : (phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
             _t0 = _t1;                                                                \
         }                                                                             \
     } while (0)
@@ -250,6 +253,14 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 void pto2_submit_mixed_task(
     PTO2OrchestratorState* orch, const MixedKernels& mixed_kernels, const PTOParam& params) {
     CYCLE_COUNT_START();
+#if PTO2_PROFILING_BEGINEND
+#if PTO2_ORCH_PROFILING
+    perf_aicpu_record_orch_phase(AicpuPhaseId::ORCH_BEGIN, _t0, _t0, g_orch_submit_idx, -1);
+#else
+    if (orch->enable_profiling)
+        perf_aicpu_record_orch_phase(AicpuPhaseId::ORCH_BEGIN, _t0, _t0, g_orch_submit_idx, -1);
+#endif
+#endif
 
     // Fast path after fatal error — all subsequent submits are no-ops
     if (orch->fatal) {

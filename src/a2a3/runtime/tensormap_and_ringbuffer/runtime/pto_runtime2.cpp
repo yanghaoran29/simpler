@@ -110,7 +110,7 @@ PTO2Runtime* pto2_runtime_create_custom(PTO2RuntimeMode mode,
     rt->gm_heap_owned = true;
 
     // Initialize first orchestrator
-    if (!pto2_orchestrator_init(&rt->orchestrators[0], rt->sm_handle,
+    if (!pto2_orchestrator_init(&rt->orchestrators[0], rt->sm_handle,     // 是否与main函数创建的Orchestrator冲突？
                                  rt->gm_heap, heap_size, dep_pool_capacity)) {
         free(rt->gm_heap);
         pto2_sm_destroy(rt->sm_handle);
