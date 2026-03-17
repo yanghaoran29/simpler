@@ -295,7 +295,7 @@ int sim_run_all_multi_thread(PTO2Runtime* rt, int num_sched_threads, int max_ite
     if (rt->sm_handle && rt->sm_handle->header)
         expected_tasks = rt->sm_handle->header->current_task_index.load(std::memory_order_acquire);
 
-#if PTO2_PROFILING
+#if PTO2_PROFILING && PTO2_SCHED_PROFILING
     // Check actual completed tasks instead of just scheduler thread executions
     int64_t tasks_completed_count = rt->scheduler.tasks_completed.load(std::memory_order_relaxed);
     printf("  Simulation execution: [%d scheduler thread(s), %d tasks]\n", num_sched_threads, total);
@@ -480,7 +480,7 @@ int sim_run_with_resolve_and_dispatch(PTO2Runtime* rt, int num_sched_threads, in
     if (rt->sm_handle && rt->sm_handle->header)
         expected_tasks = rt->sm_handle->header->current_task_index.load(std::memory_order_acquire);
 
-#if PTO2_PROFILING
+#if PTO2_PROFILING && PTO2_SCHED_PROFILING
     int64_t tasks_completed_count = rt->scheduler.tasks_completed.load(std::memory_order_relaxed);
     printf("  Simulation execution: [%d scheduler thread(s) (resolve_and_dispatch style), %d tasks]\n",
            num_sched_threads, total_executed);
@@ -506,7 +506,13 @@ void print_orch_profiling() {
     pto2_print_orch_profiling();
 }
 #else
-void print_orch_profiling() {}
+// When ORCH_PROFILING=OFF (e.g. --profiling 1), still print orchestrator run time from orch_timing_begin/end.
+void print_orch_profiling() {
+    if (g_orch_end_time > g_orch_start_time) {
+        uint64_t cycles = g_orch_end_time - g_orch_start_time;
+        printf("  Orchestrator run time: %.3fus\n", cycles_to_us(cycles));
+    }
+}
 #endif
 
 void print_sched_profiling(PTO2Runtime* rt) {
@@ -532,10 +538,12 @@ void print_sched_profiling(PTO2Runtime* rt) {
     }
 #endif
 
+#if PTO2_SCHED_PROFILING
     pto2_print_sim_sched_summary(
         &g_sched_prof_data,
         (int64_t)rt->scheduler.tasks_completed.load(std::memory_order_relaxed),
         (int64_t)rt->scheduler.tasks_consumed.load(std::memory_order_relaxed));
+#endif
 
 #if PTO2_SCHED_PROFILING && !defined(PTO2_SIM_AICORE_UT)
     pto2_print_sched_profiling(0);

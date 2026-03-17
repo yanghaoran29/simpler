@@ -41,11 +41,12 @@ set(PLATFORM_AIV_CORES_PER_BLOCKDIM  "2"  CACHE STRING "AIV cores per blockdim")
 set(PLATFORM_MAX_AICPU_THREADS       "4"  CACHE STRING "Max AICPU threads")
 
 # ─── Profiling control ────────────────────────────────────────────────────────
-# PTO2_PROFILING: master switch (typically ON when either SCHED or ORCH is ON).
-# PTO2_SCHED_PROFILING / PTO2_ORCH_PROFILING: can be toggled independently via run_tests.sh.
-option(PTO2_PROFILING "Enable PTO2 profiling instrumentation" ON)
-option(PTO2_SCHED_PROFILING "Enable scheduler profiling" ON)
-option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" ON)
+# run_tests.sh --profiling <0|1|2>: 0=off, 1=PTO2_PROFILING_BEGINEND only, 2=full (SCHED+ORCH).
+# PTO2_PROFILING_BEGINEND requires PTO2_PROFILING=1 (only record begin/end points).
+option(PTO2_PROFILING "Enable PTO2 profiling instrumentation" OFF)
+option(PTO2_SCHED_PROFILING "Enable scheduler profiling" OFF)
+option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" OFF)
+option(PTO2_PROFILING_BEGINEND "Only record begin/end points (requires PTO2_PROFILING)" OFF)
 
 # ─── Sim AICore / 0-core paths (for aicpu_ut perf) ─────────────────────────────
 # When ON: enables cores_total_num_==0, sim_aicore_mode, core_num==0 drain loop in executor.
@@ -100,6 +101,9 @@ if(PTO2_SCHED_PROFILING)
 endif()
 if(PTO2_ORCH_PROFILING)
     list(APPEND COMMON_COMPILE_DEFS PTO2_ORCH_PROFILING=1)
+endif()
+if(PTO2_PROFILING_BEGINEND)
+    list(APPEND COMMON_COMPILE_DEFS PTO2_PROFILING_BEGINEND=1)
 endif()
 if(PTO2_SIM_AICORE_UT)
     list(APPEND COMMON_COMPILE_DEFS PTO2_SIM_AICORE_UT=1)

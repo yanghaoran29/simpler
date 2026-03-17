@@ -92,7 +92,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_linear_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #elif PERF_BACKEND == 1
     const PerfTestCase& tc = PERF_CASES[PERF_CASE_IDX];
     bind_to_cpu(ORCH_CPU);
@@ -108,7 +114,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_paged_attention_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #elif PERF_BACKEND == 2
     const PerfTestCase& tc = PERF_CASES[PERF_CASE_IDX];
     bind_to_cpu(ORCH_CPU);
@@ -124,7 +136,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_batch_paged_attention_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #elif PERF_BACKEND == 4
     const AlternatingTestCase& tc = PERF_CASES[PERF_CASE_IDX];
     bind_to_cpu(ORCH_CPU);
@@ -140,7 +158,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_alternating_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #elif PERF_BACKEND == 5
     const BgemmTestCase& tc = PERF_CASES[PERF_CASE_IDX];
     bind_to_cpu(ORCH_CPU);
@@ -156,7 +180,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_bgemm_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #elif PERF_BACKEND == 6
     const PerfTestCase& tc = PERF_CASES[PERF_CASE_IDX];
     bind_to_cpu(ORCH_CPU);
@@ -172,7 +202,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_paged_attention_unroll_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #elif PERF_BACKEND == 7
     const ThroughputTestCase& tc = PERF_CASES[PERF_CASE_IDX];
     bind_to_cpu(ORCH_CPU);
@@ -188,7 +224,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_throughput_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #elif PERF_BACKEND == 8
     const LatencyTestCase& tc = PERF_CASES[PERF_CASE_IDX];
     bind_to_cpu(ORCH_CPU);
@@ -204,7 +246,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_latency_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #else
     const DegreeTestCase& tc = PERF_CASES[0];
     bind_to_cpu(ORCH_CPU);
@@ -220,7 +268,13 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
     perf_wait_sigstop();
+#if PTO2_PROFILING
+    orch_timing_begin();
+#endif
     build_degree_graph(rt, ctx.args, 10);
+#if PTO2_PROFILING
+    orch_timing_end();
+#endif
 #endif
 
 #if PTO2_PROFILING

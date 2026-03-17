@@ -22,10 +22,10 @@
 #   ./run_tests.sh --no-early-return               # drain before break/return so completed==consumed, fanin==fanout
 #   ./run_tests.sh --build-only                    # build without running
 #   ./run_tests.sh --opt-level 0                   # compile with -O0 (debug, no optimization)
-#   ./run_tests.sh --profiling                     # enable all profiling; stdout is formatted (Config/Orch/Sched/Part2 only)
-#   ./run_tests.sh --profiling --no-sched-profiling  # enable only PTO2_ORCH_PROFILING
-#   ./run_tests.sh --profiling --no-orch-profiling   # enable only PTO2_SCHED_PROFILING
-#   ./run_tests.sh --profiling --swimlane            # also convert swimlane JSON to Perfetto + Mermaid
+#   ./run_tests.sh --profiling 0                    # 不开启 profiling（默认）
+#   ./run_tests.sh --profiling 1                    # 仅开启 PTO2_PROFILING_BEGINEND（首尾点）
+#   ./run_tests.sh --profiling 2                    # 当前完整 profiling（Sched+Orch 明细）；stdout 经 format_profiling_output 整理
+#   ./run_tests.sh --profiling 2 --swimlane        # 完整 profiling + 将 swimlane JSON 转为 Perfetto + Mermaid
 #   ./run_tests.sh --no-check                        # skip P1/P2 invariant checks (AICPU_UT_NO_CHECK=1)
 #   ./run_tests.sh --list                          # list all available tests
 #
@@ -49,7 +49,7 @@
 #   ORCH_CPU=4 SCHED_CPU0=5 ./run_tests.sh
 #   PLATFORM_MAX_BLOCKDIM=32 ./run_tests.sh
 #   BUILD_DIR=/tmp/my_build ./run_tests.sh
-#   PTO2_PROFILING=ON ./run_tests.sh
+#   ./run_tests.sh --profiling 2   # 或通过环境变量覆盖：PTO2_PROFILING=ON 等
 #   AICPU_UT_DEVICE_ID=8 ./run_tests.sh   # device id for sched_overhead_analysis (resolve device log)
 #   ./run_tests.sh --test test_batch_paged_attention --idx 0 --sched-threads 4   # 4 scheduler threads
 #   AICPU_UT_THROUGHPUT_LAYERS=5 AICPU_UT_THROUGHPUT_DEPS=4 AICPU_UT_THROUGHPUT_OVERLAP=2 ./run_tests.sh --test test_throughput  # 分层 DAG 环境变量覆盖
@@ -102,11 +102,12 @@ PLATFORM_AIC_CORES_PER_BLOCKDIM=${PLATFORM_AIC_CORES_PER_BLOCKDIM:-1}
 PLATFORM_AIV_CORES_PER_BLOCKDIM=${PLATFORM_AIV_CORES_PER_BLOCKDIM:-2}
 PLATFORM_MAX_AICPU_THREADS=${PLATFORM_MAX_AICPU_THREADS:-4}
 
-# Profiling: default all OFF. --profiling sets all ON. PTO2_PROFILING is ON only when at least one sub-switch is ON.
-# Use --profiling --no-sched-profiling or --no-orch-profiling to selectively enable one sub-profiling type.
-PTO2_PROFILING=${PTO2_PROFILING:-OFF}
-PTO2_SCHED_PROFILING=${PTO2_SCHED_PROFILING:-OFF}
-PTO2_ORCH_PROFILING=${PTO2_ORCH_PROFILING:-OFF}
+# Profiling: --profiling <0|1|2>
+#   0 = 不开启
+#   1 = 仅开启 PTO2_PROFILING_BEGINEND（首尾点）
+#   2 = 当前完整 profiling（PTO2_SCHED_PROFILING + PTO2_ORCH_PROFILING，非 BEGINEND）
+# 未传 --profiling 时默认 0。传 --profiling 但未写数字时默认 2（兼容旧用法）。
+PROFILING_MODE=${PROFILING_MODE:-0}
 
 # Default: run perf only = batch_paged_attention* (idx 0). Use --all for all indices; use --test test_paged_attention to run single paged_attention.
 RUN_FUNC=false
@@ -145,9 +146,13 @@ while [[ $# -gt 0 ]]; do
                 echo "--opt-level requires a numeric argument (0/1/2/3)." >&2; exit 1
             fi
             OPT_LEVEL="$2"; shift 2 ;;
-        --profiling)          PTO2_PROFILING=ON; PTO2_SCHED_PROFILING=ON; PTO2_ORCH_PROFILING=ON; shift ;;
-        --no-sched-profiling) PTO2_SCHED_PROFILING=OFF; shift ;;
-        --no-orch-profiling)  PTO2_ORCH_PROFILING=OFF; shift ;;
+        --profiling)
+            if [[ -n "${2:-}" && "$2" =~ ^[012]$ ]]; then
+                PROFILING_MODE="$2"; shift 2
+            else
+                # 未写数字时默认 2（兼容旧用法 --profiling）
+                PROFILING_MODE=2; shift
+            fi ;;
         --test)
             if [[ -z "${2:-}" ]]; then
                 echo "--test requires a test name argument." >&2; exit 1
@@ -250,12 +255,16 @@ if [ -n "$FILTER_TEST" ]; then
     fi
 fi
 
-# PTO2_PROFILING is ON only when at least one sub-switch is ON
-if [ "$PTO2_SCHED_PROFILING" = "ON" ] || [ "$PTO2_ORCH_PROFILING" = "ON" ]; then
-    PTO2_PROFILING=ON
+# 根据 PROFILING_MODE 设置 PTO2_*：0=不开启，1=仅 BEGINEND（不采集不输出全量表），2=完整 profiling
+case "$PROFILING_MODE" in
+    0) PTO2_PROFILING=OFF; PTO2_SCHED_PROFILING=OFF; PTO2_ORCH_PROFILING=OFF; PTO2_PROFILING_BEGINEND=OFF ;;
+    1) PTO2_PROFILING=ON;  PTO2_SCHED_PROFILING=OFF; PTO2_ORCH_PROFILING=OFF; PTO2_PROFILING_BEGINEND=ON  ;;
+    2) PTO2_PROFILING=ON;  PTO2_SCHED_PROFILING=ON; PTO2_ORCH_PROFILING=ON;  PTO2_PROFILING_BEGINEND=OFF ;;
+    *) echo "Invalid PROFILING_MODE: $PROFILING_MODE (must be 0, 1, or 2)." >&2; exit 1 ;;
+esac
+if [ "$PTO2_PROFILING" = "ON" ]; then
     AICPU_UT_QUIET=
 else
-    PTO2_PROFILING=OFF
     AICPU_UT_QUIET=1   # profiling off: only output pass/fail summary
 fi
 
@@ -499,7 +508,7 @@ quiet_echo "============================================================"
 quiet_echo "  Build dir : $BUILD_DIR"
 quiet_echo "  Source dir: $SCRIPT_DIR"
 quiet_echo "  Opt level : -O${OPT_LEVEL}"
-quiet_echo "  Profiling : PTO2_PROFILING=$PTO2_PROFILING PTO2_SCHED_PROFILING=$PTO2_SCHED_PROFILING PTO2_ORCH_PROFILING=$PTO2_ORCH_PROFILING"
+quiet_echo "  Profiling : mode=$PROFILING_MODE (0=off 1=BEGINEND 2=full) PTO2_PROFILING=$PTO2_PROFILING PTO2_PROFILING_BEGINEND=$PTO2_PROFILING_BEGINEND"
 
 mkdir -p "$BUILD_DIR"
 
@@ -521,6 +530,7 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
     -DPTO2_PROFILING="$PTO2_PROFILING" \
     -DPTO2_SCHED_PROFILING="$PTO2_SCHED_PROFILING" \
     -DPTO2_ORCH_PROFILING="$PTO2_ORCH_PROFILING" \
+    -DPTO2_PROFILING_BEGINEND="$PTO2_PROFILING_BEGINEND" \
     -DAICPU_UT_LATENCY_NUM_CHAINS="${AICPU_UT_LATENCY_NUM_CHAINS:-}" \
     -DAICPU_UT_LATENCY_CHAIN_LENGTH="${AICPU_UT_LATENCY_CHAIN_LENGTH:-}" \
     $( [ -n "${AICPU_UT_THROUGHPUT_LAYERS:-}" ]       && echo "-DAICPU_UT_THROUGHPUT_LAYERS=$AICPU_UT_THROUGHPUT_LAYERS" ) \

@@ -231,36 +231,39 @@ def _run_part2_only(log_path, print_sources=True, log_label='sim log'):
     avg_tpl = total_completed / total_loops if total_loops > 0 else 0
     print(fmt2.format('SUM', total_loops, total_completed, f'{avg_tpl:.3f}', f'{total_us:.1f}'))
     print()
+    # Skip all-zero Phase/Fanout/Fanin/Pop tables (e.g. --profiling 1 without PTO2_SCHED_PROFILING)
     phases = ['complete', 'scan', 'dispatch', 'idle']
-    phase_labels = {
-        'complete': 'Complete (poll handshake, resolve deps)',
-        'scan': 'Scan (update perf header)',
-        'dispatch': 'Dispatch (pop queue, build payload, flush)',
-        'idle': 'Idle (spinning, no progress)',
-    }
-    fmt3 = indent + "  {:<50} {:>11} {:>10} {:>14}"
-    print(fmt3.format('Phase', 'Total (us)', '% of total', 'Avg/task (us)'))
-    print(indent + "  " + '-' * 89)
-    for p in phases:
-        key = p + '_us'
-        tot = sum(t.get(key, 0) for t in threads.values())
-        pct = tot / total_us * 100 if total_us > 0 else 0
-        avg = tot / total_completed if total_completed > 0 else 0
-        print(fmt3.format(phase_labels[p], f'{tot:.1f}', f'{pct:.1f}%', f'{avg:.2f}'))
+    phase_totals = {p: sum(t.get(p + '_us', 0) for t in threads.values()) for p in phases}
+    sum_phase_us = sum(phase_totals.values())
     fanout_edges = sum(t.get('fanout_edges', 0) for t in threads.values())
-    fanout_max = max((t.get('fanout_max_degree', 0) for t in threads.values()), default=0)
-    fanout_avg = fanout_edges / total_completed if total_completed > 0 else 0
-    print(indent + f'  Fanout (notify consumers): total edges={fanout_edges}, max_degree={fanout_max}, avg_degree={fanout_avg:.1f}')
     fanin_edges = sum(t.get('fanin_edges', 0) for t in threads.values())
-    fanin_max = max((t.get('fanin_max_degree', 0) for t in threads.values()), default=0)
-    fanin_avg = fanin_edges / total_completed if total_completed > 0 else 0
-    print(indent + f'  Fanin  (release producers): total edges={fanin_edges}, max_degree={fanin_max}, avg_degree={fanin_avg:.1f}')
-    print()
     pop_hit = sum(t.get('pop_hit', 0) for t in threads.values())
     pop_miss = sum(t.get('pop_miss', 0) for t in threads.values())
-    pop_total = pop_hit + pop_miss
-    pop_hit_rate = pop_hit / pop_total * 100 if pop_total > 0 else 0
-    print(indent + f'  Pop: hit={pop_hit}, miss={pop_miss}, hit_rate={pop_hit_rate:.1f}%')
+    if sum_phase_us > 0 or fanout_edges > 0 or fanin_edges > 0 or (pop_hit + pop_miss) > 0:
+        phase_labels = {
+            'complete': 'Complete (poll handshake, resolve deps)',
+            'scan': 'Scan (update perf header)',
+            'dispatch': 'Dispatch (pop queue, build payload, flush)',
+            'idle': 'Idle (spinning, no progress)',
+        }
+        fmt3 = indent + "  {:<50} {:>11} {:>10} {:>14}"
+        print(fmt3.format('Phase', 'Total (us)', '% of total', 'Avg/task (us)'))
+        print(indent + "  " + '-' * 89)
+        for p in phases:
+            tot = phase_totals[p]
+            pct = tot / total_us * 100 if total_us > 0 else 0
+            avg = tot / total_completed if total_completed > 0 else 0
+            print(fmt3.format(phase_labels[p], f'{tot:.1f}', f'{pct:.1f}%', f'{avg:.2f}'))
+        fanout_max = max((t.get('fanout_max_degree', 0) for t in threads.values()), default=0)
+        fanout_avg = fanout_edges / total_completed if total_completed > 0 else 0
+        print(indent + f'  Fanout (notify consumers): total edges={fanout_edges}, max_degree={fanout_max}, avg_degree={fanout_avg:.1f}')
+        fanin_max = max((t.get('fanin_max_degree', 0) for t in threads.values()), default=0)
+        fanin_avg = fanin_edges / total_completed if total_completed > 0 else 0
+        print(indent + f'  Fanin  (release producers): total edges={fanin_edges}, max_degree={fanin_max}, avg_degree={fanin_avg:.1f}')
+        print()
+        pop_total = pop_hit + pop_miss
+        pop_hit_rate = pop_hit / pop_total * 100 if pop_total > 0 else 0
+        print(indent + f'  Pop: hit={pop_hit}, miss={pop_miss}, hit_rate={pop_hit_rate:.1f}%')
     return 0
 
 
@@ -359,51 +362,43 @@ def run_analysis(perf_path, log_path, print_sources=True, selection_strategy=Non
     print(fmt2.format('SUM', total_loops, total_completed, f'{avg_tpl:.3f}', f'{total_us:.1f}'))
     print()
 
-    # Phase breakdown
+    # Phase breakdown (skip when all zeros, e.g. --profiling 1 without PTO2_SCHED_PROFILING)
     phases = ['complete', 'scan', 'dispatch', 'idle']
-    phase_labels = {
-        'complete':    'Complete (poll handshake, resolve deps)',
-        'scan':        'Scan (update perf header)',
-        'dispatch':    'Dispatch (pop queue, build payload, flush)',
-        'idle':        'Idle (spinning, no progress)',
-    }
-
-    fmt3 = "  {:<50} {:>11} {:>10} {:>14}"
-    print(fmt3.format('Phase', 'Total (us)', '% of total', 'Avg/task (us)'))
-    print('  ' + '-' * 89)
-    phase_totals = {}
-    for p in phases:
-        key = p + '_us'
-        tot = sum(t.get(key, 0) for t in threads.values())
-        phase_totals[p] = tot
-        pct = tot / total_us * 100 if total_us > 0 else 0
-        avg = tot / total_completed if total_completed > 0 else 0
-        print(fmt3.format(phase_labels[p], f'{tot:.1f}', f'{pct:.1f}%', f'{avg:.2f}'))
+    phase_totals = {p: sum(t.get(p + '_us', 0) for t in threads.values()) for p in phases}
     sum_phase_us = sum(phase_totals.values())
-    if total_us > 0 and sum_phase_us == 0:
-        print('  (Phase/Fanout/Fanin/Pop below are 0: log has no per-phase breakdown.)')
-        print('  To get Phase data: use --sim-log with aicpu_ut output, or run on device with PTO2_SCHED_PROFILING=ON.')
-    print()
-
-    # Fanout stats (from complete phase)
     fanout_edges = sum(t.get('fanout_edges', 0) for t in threads.values())
-    fanout_max = max((t.get('fanout_max_degree', 0) for t in threads.values()), default=0)
-    fanout_avg = fanout_edges / total_completed if total_completed > 0 else 0
-    print(f'  Fanout (notify consumers): total edges={fanout_edges}, max_degree={fanout_max}, avg_degree={fanout_avg:.1f}')
-
-    # Fanin stats (from complete phase)
     fanin_edges = sum(t.get('fanin_edges', 0) for t in threads.values())
-    fanin_max = max((t.get('fanin_max_degree', 0) for t in threads.values()), default=0)
-    fanin_avg = fanin_edges / total_completed if total_completed > 0 else 0
-    print(f'  Fanin  (release producers): total edges={fanin_edges}, max_degree={fanin_max}, avg_degree={fanin_avg:.1f}')
-    print()
-
-    # Pop stats (from dispatch phase)
     pop_hit = sum(t.get('pop_hit', 0) for t in threads.values())
     pop_miss = sum(t.get('pop_miss', 0) for t in threads.values())
-    pop_total = pop_hit + pop_miss
-    pop_hit_rate = pop_hit / pop_total * 100 if pop_total > 0 else 0
-    print(f'  Pop: hit={pop_hit}, miss={pop_miss}, hit_rate={pop_hit_rate:.1f}%')
+    if sum_phase_us > 0 or fanout_edges > 0 or fanin_edges > 0 or (pop_hit + pop_miss) > 0:
+        phase_labels = {
+            'complete':    'Complete (poll handshake, resolve deps)',
+            'scan':        'Scan (update perf header)',
+            'dispatch':    'Dispatch (pop queue, build payload, flush)',
+            'idle':        'Idle (spinning, no progress)',
+        }
+        fmt3 = "  {:<50} {:>11} {:>10} {:>14}"
+        print(fmt3.format('Phase', 'Total (us)', '% of total', 'Avg/task (us)'))
+        print('  ' + '-' * 89)
+        for p in phases:
+            tot = phase_totals[p]
+            pct = tot / total_us * 100 if total_us > 0 else 0
+            avg = tot / total_completed if total_completed > 0 else 0
+            print(fmt3.format(phase_labels[p], f'{tot:.1f}', f'{pct:.1f}%', f'{avg:.2f}'))
+        if total_us > 0 and sum_phase_us == 0:
+            print('  (Phase/Fanout/Fanin/Pop below are 0: log has no per-phase breakdown.)')
+            print('  To get Phase data: use --sim-log with aicpu_ut output, or run on device with PTO2_SCHED_PROFILING=ON.')
+        print()
+        fanout_max = max((t.get('fanout_max_degree', 0) for t in threads.values()), default=0)
+        fanout_avg = fanout_edges / total_completed if total_completed > 0 else 0
+        print(f'  Fanout (notify consumers): total edges={fanout_edges}, max_degree={fanout_max}, avg_degree={fanout_avg:.1f}')
+        fanin_max = max((t.get('fanin_max_degree', 0) for t in threads.values()), default=0)
+        fanin_avg = fanin_edges / total_completed if total_completed > 0 else 0
+        print(f'  Fanin  (release producers): total edges={fanin_edges}, max_degree={fanin_max}, avg_degree={fanin_avg:.1f}')
+        print()
+        pop_total = pop_hit + pop_miss
+        pop_hit_rate = pop_hit / pop_total * 100 if pop_total > 0 else 0
+        print(f'  Pop: hit={pop_hit}, miss={pop_miss}, hit_rate={pop_hit_rate:.1f}%')
 
     print()
     print('=' * 90)

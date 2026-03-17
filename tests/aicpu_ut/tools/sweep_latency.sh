@@ -7,14 +7,19 @@
 #   Group Y : Y ∈ {4,8,16,32,64,128},         X=64
 #
 # 用法：
-#   bash tools/sweep_latency.sh
-# 输出：outputs/sweep_latency/latency_<label>_run<n>.log
+#   bash tools/sweep_latency.sh              # 默认 --profiling 2，输出 sweep_latency/
+#   PROFILING_MODE=1 bash tools/sweep_latency.sh   # --profiling 1，输出 sweep_latency_p1/
+#   PROFILING_MODE=2 bash tools/sweep_latency.sh   # --profiling 2，输出 sweep_latency_p2/
+# 输出：outputs/sweep_latency[_p1|_p2]/latency_<label>_run<n>.log
 # 任意一次测试失败立即退出。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="${SCRIPT_DIR}/../outputs/sweep_latency"
+PROFILING_MODE=${PROFILING_MODE:-2}
+SUFFIX=""
+case "$PROFILING_MODE" in 0) SUFFIX="_p0" ;; 1) SUFFIX="_p1" ;; 2) SUFFIX="_p2" ;; *) SUFFIX="_p${PROFILING_MODE}" ;; esac
+LOG_DIR="${SCRIPT_DIR}/../outputs/sweep_latency${SUFFIX}"
 mkdir -p "$LOG_DIR"
 
 RUNS=5
@@ -32,7 +37,7 @@ run_one() {
         --test test_latency \
         --chain-num    "$X" \
         --chain-length "$Y" \
-        --profiling \
+        --profiling "$PROFILING_MODE" \
         --idx 1 \
         > "$log_file" 2>&1 || true
     if ! grep -q "OVERALL: PASSED" "$log_file"; then

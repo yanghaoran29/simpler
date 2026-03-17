@@ -327,7 +327,7 @@ struct AicpuExecutor {
 
             int32_t task_id = executing_task_ids[core_id];
 #if defined(PTO2_SIM_AICORE_UT)
-            SimCoreGuard guard(core_id, runtime->get_sim_aicore_mode() && reg_addr == 0);
+            SimCoreGuard guard(core_id, sim_accumulate && reg_addr == 0);
 #endif
             uint64_t reg_val = read_reg(reg_addr, RegId::COND);
             int32_t reg_task_id = EXTRACT_TASK_ID(reg_val);
@@ -1095,7 +1095,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                         int32_t fe = rt->scheduler.on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
                         (void)fe;
-#if PTO2_PROFILING
+#if PTO2_PROFILING && PTO2_SCHED_PROFILING
                         fanin_edges_total += fe;
                         if (fe > fanin_max_degree) fanin_max_degree = fe;
 #endif
@@ -1155,7 +1155,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 
         // Phase 1: Check running cores for completion, process and move to idle
         int32_t completed_this_turn = 0;
-#if PTO2_PROFILING
+#if PTO2_PROFILING && PTO2_SCHED_PROFILING
         uint64_t prev_notify_edges = notify_edges_total;
         uint64_t prev_notify_enqueued = notify_tasks_enqueued;
 #endif
@@ -1211,7 +1211,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #endif
             );
         }
-#if defined(PTO2_SIM_AICORE_UT) && PTO2_PROFILING
+#if defined(PTO2_SIM_AICORE_UT) && PTO2_PROFILING && PTO2_SCHED_PROFILING
         if (runtime && runtime->get_sim_aicore_mode()) {
             uint64_t delta_edges = notify_edges_total - prev_notify_edges;
             uint64_t delta_enqueued = notify_tasks_enqueued - prev_notify_enqueued;
@@ -1568,7 +1568,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             int32_t fe = rt->scheduler.on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
             (void)fe;
-#if PTO2_PROFILING
+#if PTO2_PROFILING && PTO2_SCHED_PROFILING
             fanin_edges_total += fe;
             if (fe > fanin_max_degree) fanin_max_degree = fe;
 #endif
@@ -1579,7 +1579,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 
 #if defined(PTO2_SIM_AICORE_UT)
     if (runtime && runtime->get_sim_aicore_mode()) {
-#if PTO2_PROFILING
+#if PTO2_PROFILING && PTO2_SCHED_PROFILING
         pto2_sim_accumulate_cycles(sched_complete_cycle, sched_dispatch_cycle);
 #endif
 #if PTO2_SCHED_PROFILING

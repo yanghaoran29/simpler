@@ -238,18 +238,17 @@ if ! $QUICK; then
     # Group 9 — Profiling (separate build config)
     # ─────────────────────────────────────────────────────────────────────────
     CURRENT_BUILD="$BUILD_PROFILING"
-    print_section "Group 9: Profiling mode (--profiling)"
+    print_section "Group 9: Profiling mode (--profiling 1=BEGINEND, 2=full)"
 
-    run_case "profiling_alt_0"          --profiling --test test_alt_concurrent --idx 0
-    run_case "profiling_alt_1"          --profiling --test test_alt_concurrent --idx 1
-    run_case "profiling_bgemm_0"        --profiling --test test_bgemm_concurrent --idx 0
-    run_case "profiling_pau_0"          --profiling --test test_pau_concurrent --idx 0
-    run_case "profiling_deg_0"          --profiling --test test_deg_concurrent --idx 0
-    run_case "profiling_bpa_0"          --profiling --test test_batch_paged_attention --idx 0
-    run_case "profiling_no_sched_alt0"  --profiling --no-sched-profiling --test test_alt_concurrent --idx 0
-    run_case "profiling_no_orch_alt0"   --profiling --no-orch-profiling  --test test_alt_concurrent --idx 0
-    run_case "profiling_no_sched_pau0"  --profiling --no-sched-profiling --test test_pau_concurrent --idx 0
-    run_case "profiling_no_orch_bgemm0" --profiling --no-orch-profiling  --test test_bgemm_concurrent --idx 0
+    run_case "profiling_alt_0"       --profiling 2 --test test_alt --idx 0
+    run_case "profiling_alt_1"       --profiling 2 --test test_alt --idx 1
+    run_case "profiling_bgemm_0"     --profiling 2 --test test_bgemm --idx 0
+    run_case "profiling_pau_0"       --profiling 2 --test test_pau --idx 0
+    run_case "profiling_deg_0"       --profiling 2 --test test_deg_2 --idx 0
+    run_case "profiling_bpa_0"       --profiling 2 --test test_batch_paged_attention --idx 0
+    run_case "profiling_beginend_alt0"  --profiling 1 --test test_alt --idx 0
+    run_case "profiling_beginend_pau0"  --profiling 1 --test test_pau --idx 0
+    run_case "profiling_beginend_bgemm0" --profiling 1 --test test_bgemm --idx 0
 
     # ─────────────────────────────────────────────────────────────────────────
     # Group 10 — Debug build (O0) + no-early-return
