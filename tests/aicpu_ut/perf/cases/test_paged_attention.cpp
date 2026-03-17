@@ -167,12 +167,11 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 Tensor qi       = query.view(qi_shapes,    qi_offsets);
                 Tensor out_view = out.view(out_v_shapes,   out_v_offsets);
 
-                PTOParam params_inplace[] = {
-                    make_output_param(oi),
-                    make_output_param(li_update),
-                    make_output_param(mi_update),
-                };
-                pto2_submit_task(rt->orchestrators, FUNC_AIV_HUB, PTO2_WORKER_VECTOR, params_inplace, 3);
+                PTOParam params_inplace;
+                params_inplace.add_output(oi);
+                params_inplace.add_output(li_update);
+                params_inplace.add_output(mi_update);
+                pto2_submit_task(rt->orchestrators, FUNC_AIV_HUB, PTO2_WORKER_VECTOR, params_inplace);
                 total_tasks++;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn++) {
@@ -188,12 +187,11 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     Tensor sij     = make_tensor(sij_shapes, 2, DataType::FLOAT32);
                     Tensor pij_f16 = make_tensor(sij_shapes, 2, data_type);
 
-                    PTOParam params_qk[] = {
-                        make_input_param(qi),
-                        make_input_param(kj),
-                        make_output_param(sij),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_QK_MATMUL, PTO2_WORKER_CUBE, params_qk, 3);
+                    PTOParam params_qk;
+                    params_qk.add_input(qi);
+                    params_qk.add_input(kj);
+                    params_qk.add_output(sij);
+                    pto2_submit_task(rt->orchestrators, FUNC_QK_MATMUL, PTO2_WORKER_CUBE, params_qk);
                     total_tasks++;
 
                     uint32_t sij_valid_shapes[2]   = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(valid_len)};
@@ -203,42 +201,39 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     Tensor li = make_tensor(li_shapes, 1, DataType::FLOAT32);
                     Tensor mi = make_tensor(mi_shapes, 1, DataType::FLOAT32);
 
-                    PTOParam params_sf[] = {
-                        make_input_param(sij_valid),
-                        make_scalar_param(float_to_u64(scale_value)),
-                        make_output_param(pij_f16),
-                        make_output_param(mi),
-                        make_output_param(li),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_SOFTMAX_PREPARE, PTO2_WORKER_VECTOR, params_sf, 5);
+                    PTOParam params_sf;
+                    params_sf.add_input(sij_valid);
+                    params_sf.add_output(pij_f16);
+                    params_sf.add_output(mi);
+                    params_sf.add_output(li);
+                    params_sf.add_scalar(float_to_u64(scale_value));
+                    pto2_submit_task(rt->orchestrators, FUNC_SOFTMAX_PREPARE, PTO2_WORKER_VECTOR, params_sf);
                     total_tasks++;
 
                     uint32_t oi_tmp_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                     Tensor oi_tmp = make_tensor(oi_tmp_shapes, 2, DataType::FLOAT32);
 
-                    PTOParam params_pv[] = {
-                        make_input_param(pij_f16),
-                        make_input_param(vj),
-                        make_output_param(oi_tmp),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_PV_MATMUL, PTO2_WORKER_CUBE, params_pv, 3);
+                    PTOParam params_pv;
+                    params_pv.add_input(pij_f16);
+                    params_pv.add_input(vj);
+                    params_pv.add_output(oi_tmp);
+                    pto2_submit_task(rt->orchestrators, FUNC_PV_MATMUL, PTO2_WORKER_CUBE, params_pv);
                     total_tasks++;
 
                     uint64_t is_first = (bn == 0) ? 1 : 0;
                     uint64_t is_last  = (bn == bn_this_batch - 1) ? 1 : 0;
 
-                    PTOParam params_up[] = {
-                        make_input_param(mi),
-                        make_input_param(li),
-                        make_input_param(oi_tmp),
-                        make_inout_param(mi_update),
-                        make_inout_param(li_update),
-                        make_inout_param(oi),
-                        make_output_param(out_view),
-                        make_scalar_param(is_first),
-                        make_scalar_param(is_last),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_ONLINE_UPDATE, PTO2_WORKER_VECTOR, params_up, 9);
+                    PTOParam params_up;
+                    params_up.add_input(mi);
+                    params_up.add_input(li);
+                    params_up.add_input(oi_tmp);
+                    params_up.add_inout(mi_update);
+                    params_up.add_inout(li_update);
+                    params_up.add_inout(oi);
+                    params_up.add_output(out_view);
+                    params_up.add_scalar(is_first);
+                    params_up.add_scalar(is_last);
+                    pto2_submit_task(rt->orchestrators, FUNC_ONLINE_UPDATE, PTO2_WORKER_VECTOR, params_up);
                     total_tasks++;
                 }
             }

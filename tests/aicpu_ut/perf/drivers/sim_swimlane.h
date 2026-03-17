@@ -52,7 +52,9 @@ inline int export_sim_swimlane(PTO2Runtime* rt, const char* output_dir = nullptr
     }
 
     PTO2SharedMemoryHandle* sm = rt->sm_handle;
-    int32_t total_tasks = sm->header->current_task_index.load(std::memory_order_relaxed);
+    int32_t total_tasks = 0;
+    for (int ri = 0; ri < PTO2_MAX_RING_DEPTH; ri++)
+        total_tasks += sm->header->rings[ri].fc.current_task_index.load(std::memory_order_relaxed);
     if (total_tasks <= 0) {
         printf("  [swimlane] No tasks in runtime; skipping export.\n");
         return -1;
@@ -68,13 +70,13 @@ inline int export_sim_swimlane(PTO2Runtime* rt, const char* output_dir = nullptr
     };
 
     std::vector<TaskInfo> infos(static_cast<size_t>(total_tasks));
-    uint64_t window_mask = sm->header->task_window_size - 1;
+    uint64_t window_mask = sm->header->rings[0].task_window_size - 1;
 
     for (int32_t tid = 0; tid < total_tasks; tid++) {
         int32_t slot = tid & static_cast<int32_t>(window_mask);
-        const PTO2TaskDescriptor& desc    = sm->task_descriptors[slot];
-        const PTO2TaskPayload&    payload = sm->task_payloads[slot];
-        PTO2TaskSlotState&        slot_state = rt->scheduler.get_slot_state_by_slot(slot);
+        const PTO2TaskDescriptor& desc    = sm->task_descriptors[0][slot];
+        const PTO2TaskPayload&    payload = sm->task_payloads[0][slot];
+        PTO2TaskSlotState&        slot_state = rt->scheduler.get_slot_state_by_slot(0, slot);
 
         TaskInfo& info     = infos[static_cast<size_t>(tid)];
         info.task_id       = tid;
@@ -89,7 +91,7 @@ inline int export_sim_swimlane(PTO2Runtime* rt, const char* output_dir = nullptr
                     ? payload.fanin_actual_count : PTO2_MAX_INPUTS;
         for (int k = 0; k < n; k++)
             info.fanin_tasks[k] = payload.fanin_slot_states[k] != nullptr
-                ? payload.fanin_slot_states[k]->task->mixed_task_id : -1;
+                ? static_cast<int32_t>(pto2_task_id_local(payload.fanin_slot_states[k]->task->mixed_task_id)) : -1;
     }
 
     // ── Step 2: build fanout adjacency from fanin_tasks ──────────────────────

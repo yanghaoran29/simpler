@@ -183,12 +183,11 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 Tensor A_view = ext_A.view(shapes, offsets);
                 Tensor B_view = ext_B.view(shapes, offsets);
                 Tensor C_view = ext_C.view(shapes, offsets);
-                PTOParam params[] = {
-                    make_input_param(A_view),
-                    make_input_param(B_view),
-                    make_output_param(C_view),
-                };
-                pto2_submit_task(rt->orchestrators, FUNC_MATMUL, PTO2_WORKER_CUBE, params, 3);
+                PTOParam params;
+                params.add_input(A_view);
+                params.add_input(B_view);
+                params.add_output(C_view);
+                pto2_submit_task(rt->orchestrators, FUNC_MATMUL, PTO2_WORKER_CUBE, params);
                 total_tasks++;
             }
             if (group_idx < num_add_groups) {
@@ -199,12 +198,11 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 Tensor X_view = ext_X.view(shapes, offsets);
                 Tensor Y_view = ext_Y.view(shapes, offsets);
                 Tensor Z_view = ext_Z.view(shapes, offsets);
-                PTOParam params[] = {
-                    make_input_param(X_view),
-                    make_input_param(Y_view),
-                    make_output_param(Z_view),
-                };
-                pto2_submit_task(rt->orchestrators, FUNC_ADD, PTO2_WORKER_VECTOR, params, 3);
+                PTOParam params;
+                params.add_input(X_view);
+                params.add_input(Y_view);
+                params.add_output(Z_view);
+                pto2_submit_task(rt->orchestrators, FUNC_ADD, PTO2_WORKER_VECTOR, params);
                 total_tasks++;
             }
         }

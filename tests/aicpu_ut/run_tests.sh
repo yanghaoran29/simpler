@@ -34,7 +34,6 @@
 #   test_platform_config            (functional)
 #   test_paged_attention            (perf, indices: 0)
 #   test_batch_paged_attention      (perf, indices: 0 1 2; --orch: orch-only, --sched: sched profiling only)
-#   test_linear                     (perf, linear chain, indices: 0 1 2; --orch: orch-only, --sched: sched profiling only)
 #   test_alt                        (perf, alternating matmul+add, indices: 0 1; --orch: orch-only, --sched: sched profiling only)
 #   test_bgemm                      (perf, batched GEMM, indices: 0 1 2 3 4; --orch: orch-only, --sched: sched profiling only)
 #   test_pau                        (perf, paged attention unroll, indices: 0 1 2; --orch: orch-only, --sched: sched profiling only)
@@ -68,14 +67,13 @@ TEST_TYPE["test_cpu_affinity"]="func"            ; TEST_INDICES["test_cpu_affini
 TEST_TYPE["test_platform_config"]="func"         ; TEST_INDICES["test_platform_config"]="-"
 TEST_TYPE["test_paged_attention"]="perf"         ; TEST_INDICES["test_paged_attention"]="0"
 TEST_TYPE["test_batch_paged_attention"]="perf"   ; TEST_INDICES["test_batch_paged_attention"]="0 1 2"
-TEST_TYPE["test_linear"]="perf"                  ; TEST_INDICES["test_linear"]="0 1 2"
 TEST_TYPE["test_alt"]="perf"                     ; TEST_INDICES["test_alt"]="0 1"
 TEST_TYPE["test_bgemm"]="perf"                   ; TEST_INDICES["test_bgemm"]="0 1 2 3 4"
 TEST_TYPE["test_pau"]="perf"                     ; TEST_INDICES["test_pau"]="0 1 2"
 TEST_TYPE["test_throughput"]="perf"              ; TEST_INDICES["test_throughput"]="0 1 2"
 TEST_TYPE["test_latency"]="perf"                ; TEST_INDICES["test_latency"]="0 1"
 
-ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention test_linear test_alt test_bgemm test_pau test_throughput test_latency)
+ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention test_alt test_bgemm test_pau test_throughput test_latency)
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 TIMEOUT=${TIMEOUT:-600}
@@ -108,7 +106,7 @@ RUN_FUNC=false
 RUN_PERF=true
 RUN_ALL_INDICES=false
 # Perf tests run by default (excludes test_paged_attention)
-DEFAULT_PERF_TESTS=(test_batch_paged_attention test_linear test_alt test_bgemm test_pau test_throughput test_latency)
+DEFAULT_PERF_TESTS=(test_batch_paged_attention test_alt test_bgemm test_pau test_throughput test_latency)
 BUILD_ONLY=false
 SKIP_FINAL_ANALYSIS=false
 OPT_LEVEL=${OPT_LEVEL:-3}
@@ -374,12 +372,6 @@ get_binary_path() {
                 sched) echo "${BIN_DIR}/test_sched_prof_only_${idx}" ;;
                 *)     echo "${BIN_DIR}/test_concurrent_${idx}" ;;
             esac ;;
-        test_linear)
-            case "$THREAD_MODE" in
-                orch)  echo "${BIN_DIR}/test_linear_orch_only_${idx}" ;;
-                sched) echo "${BIN_DIR}/test_linear_sched_prof_only_${idx}" ;;
-                *)     echo "${BIN_DIR}/test_linear_concurrent_${idx}" ;;
-            esac ;;
         test_alt)
             case "$THREAD_MODE" in
                 orch)  echo "${BIN_DIR}/test_alt_orch_only_${idx}" ;;
@@ -519,7 +511,7 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
 BIN_DIR="${BUILD_DIR}/bin"
 
 # Batch tests that default to idx 0 only unless --all
-BATCH_IDX0_ONLY_TESTS=(test_batch_paged_attention test_linear test_alt test_bgemm test_pau test_latency)
+BATCH_IDX0_ONLY_TESTS=(test_batch_paged_attention test_alt test_bgemm test_pau test_latency)
 
 NPROC=$(nproc 2>/dev/null || echo 4)
 

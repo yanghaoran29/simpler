@@ -186,12 +186,11 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 Tensor li_batch = make_tensor(scalar_acc_shapes, 1, DataType::FLOAT32);
                 Tensor mi_batch = make_tensor(scalar_acc_shapes, 1, DataType::FLOAT32);
 
-                PTOParam params_hub[] = {
-                    make_output_param(oi_batch),
-                    make_output_param(li_batch),
-                    make_output_param(mi_batch),
-                };
-                pto2_submit_task(rt->orchestrators, FUNC_AIV_HUB, PTO2_WORKER_VECTOR, params_hub, 3);
+                PTOParam params_hub;
+                params_hub.add_output(oi_batch);
+                params_hub.add_output(li_batch);
+                params_hub.add_output(mi_batch);
+                pto2_submit_task(rt->orchestrators, FUNC_AIV_HUB, PTO2_WORKER_VECTOR, params_hub);
                 total_tasks++;
 
                 for (uint64_t bn = 0; bn < max_bn; bn++) {
@@ -205,66 +204,62 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     Tensor lij_b    = make_tensor(vec_shapes,    1, DataType::FLOAT32);
                     Tensor oi_new_b = make_tensor(oi_new_shapes, 2, DataType::FLOAT32);
 
-                    PTOParam params_qk[] = {
-                        make_input_param(query),
-                        make_input_param(key_cache),
-                        make_output_param(sij_b),
-                        make_scalar_param(bt_addr),
-                        make_scalar_param(chunk_bc),
-                        make_scalar_param(bn),
-                        make_scalar_param(q_offset),
-                        make_scalar_param(block_num),
-                        make_scalar_param(num_heads),
-                        make_scalar_param(batch_start),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_QK_MATMUL, PTO2_WORKER_CUBE, params_qk, 10);
+                    PTOParam params_qk;
+                    params_qk.add_input(query);
+                    params_qk.add_input(key_cache);
+                    params_qk.add_output(sij_b);
+                    params_qk.add_scalar(bt_addr);
+                    params_qk.add_scalar(chunk_bc);
+                    params_qk.add_scalar(bn);
+                    params_qk.add_scalar(q_offset);
+                    params_qk.add_scalar(block_num);
+                    params_qk.add_scalar(num_heads);
+                    params_qk.add_scalar(batch_start);
+                    pto2_submit_task(rt->orchestrators, FUNC_QK_MATMUL, PTO2_WORKER_CUBE, params_qk);
                     total_tasks++;
 
-                    PTOParam params_sf[] = {
-                        make_input_param(sij_b),
-                        make_output_param(pij_b),
-                        make_output_param(mij_b),
-                        make_output_param(lij_b),
-                        make_scalar_param(float_to_u64(scale_value)),
-                        make_scalar_param(cl_addr),
-                        make_scalar_param(chunk_bc),
-                        make_scalar_param(bn),
-                        make_scalar_param(batch_start),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_SOFTMAX_PREPARE, PTO2_WORKER_VECTOR, params_sf, 9);
+                    PTOParam params_sf;
+                    params_sf.add_input(sij_b);
+                    params_sf.add_output(pij_b);
+                    params_sf.add_output(mij_b);
+                    params_sf.add_output(lij_b);
+                    params_sf.add_scalar(float_to_u64(scale_value));
+                    params_sf.add_scalar(cl_addr);
+                    params_sf.add_scalar(chunk_bc);
+                    params_sf.add_scalar(bn);
+                    params_sf.add_scalar(batch_start);
+                    pto2_submit_task(rt->orchestrators, FUNC_SOFTMAX_PREPARE, PTO2_WORKER_VECTOR, params_sf);
                     total_tasks++;
 
-                    PTOParam params_pv[] = {
-                        make_input_param(pij_b),
-                        make_input_param(value_cache),
-                        make_output_param(oi_new_b),
-                        make_scalar_param(bt_addr),
-                        make_scalar_param(chunk_bc),
-                        make_scalar_param(bn),
-                        make_scalar_param(block_num),
-                        make_scalar_param(batch_start),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_PV_MATMUL, PTO2_WORKER_CUBE, params_pv, 8);
+                    PTOParam params_pv;
+                    params_pv.add_input(pij_b);
+                    params_pv.add_input(value_cache);
+                    params_pv.add_output(oi_new_b);
+                    params_pv.add_scalar(bt_addr);
+                    params_pv.add_scalar(chunk_bc);
+                    params_pv.add_scalar(bn);
+                    params_pv.add_scalar(block_num);
+                    params_pv.add_scalar(batch_start);
+                    pto2_submit_task(rt->orchestrators, FUNC_PV_MATMUL, PTO2_WORKER_CUBE, params_pv);
                     total_tasks++;
 
                     uint64_t is_first = (bn == 0) ? 1 : 0;
                     uint64_t is_last  = (bn == max_bn - 1) ? 1 : 0;
-                    PTOParam params_up[] = {
-                        make_input_param(mij_b),
-                        make_input_param(lij_b),
-                        make_input_param(oi_new_b),
-                        make_inout_param(mi_batch),
-                        make_inout_param(li_batch),
-                        make_output_param(oi_batch),
-                        make_output_param(out),
-                        make_scalar_param(is_first),
-                        make_scalar_param(is_last),
-                        make_scalar_param(chunk_bc),
-                        make_scalar_param(q_offset),
-                        make_scalar_param(num_heads),
-                        make_scalar_param(batch_start),
-                    };
-                    pto2_submit_task(rt->orchestrators, FUNC_ONLINE_UPDATE, PTO2_WORKER_VECTOR, params_up, 13);
+                    PTOParam params_up;
+                    params_up.add_input(mij_b);
+                    params_up.add_input(lij_b);
+                    params_up.add_input(oi_new_b);
+                    params_up.add_inout(mi_batch);
+                    params_up.add_inout(li_batch);
+                    params_up.add_output(oi_batch);
+                    params_up.add_output(out);
+                    params_up.add_scalar(is_first);
+                    params_up.add_scalar(is_last);
+                    params_up.add_scalar(chunk_bc);
+                    params_up.add_scalar(q_offset);
+                    params_up.add_scalar(num_heads);
+                    params_up.add_scalar(batch_start);
+                    pto2_submit_task(rt->orchestrators, FUNC_ONLINE_UPDATE, PTO2_WORKER_VECTOR, params_up);
                     total_tasks++;
                 }
             }

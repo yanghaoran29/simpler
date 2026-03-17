@@ -8,9 +8,7 @@
  * Compile: -DPERF_BACKEND=N -DPERF_CASE_IDX=M
  */
 
-#if PERF_BACKEND == 0
-#include "test_linear.cpp"
-#elif PERF_BACKEND == 1
+#if PERF_BACKEND == 1
 #include "test_paged_attention.cpp"
 #elif PERF_BACKEND == 2
 #include "test_batch_paged_attention.cpp"

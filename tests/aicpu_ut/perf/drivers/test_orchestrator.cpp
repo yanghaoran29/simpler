@@ -8,9 +8,7 @@
  * Compile: -DPERF_BACKEND=N -DPERF_CASE_IDX=M
  */
 
-#if PERF_BACKEND == 0
-#include "test_linear.cpp"
-#elif PERF_BACKEND == 1
+#if PERF_BACKEND == 1
 #include "test_paged_attention.cpp"
 #elif PERF_BACKEND == 2
 #include "test_batch_paged_attention.cpp"
@@ -69,7 +67,8 @@ int main() {
     if (!getenv("AICPU_UT_NO_CHECK")) {
         int32_t submitted = 0;
         if (rt->sm_handle && rt->sm_handle->header)
-            submitted = rt->sm_handle->header->current_task_index.load(std::memory_order_acquire);
+            for (int ri = 0; ri < PTO2_MAX_RING_DEPTH; ri++)
+                submitted += rt->sm_handle->header->rings[ri].fc.current_task_index.load(std::memory_order_acquire);
         if (submitted == 0) {
             printf("  FAIL (P1): orchestration submitted 0 tasks\n");
             g_fail++;

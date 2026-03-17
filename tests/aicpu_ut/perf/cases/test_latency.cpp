@@ -141,11 +141,10 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
                 int worker_type =
                     (case_index == 0) ? PTO2_WORKER_VECTOR : ((i % 2 == 0) ? PTO2_WORKER_CUBE : PTO2_WORKER_VECTOR);
-                PTOParam params[] = {
-                    make_input_param(prev),
-                    make_output_param(next),
-                };
-                pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, worker_type, params, 2);
+                PTOParam params;
+                params.add_input(prev);
+                params.add_output(next);
+                pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, worker_type, params);
                 prev = next;
             }
         }

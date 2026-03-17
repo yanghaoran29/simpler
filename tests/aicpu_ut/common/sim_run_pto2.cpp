@@ -12,6 +12,7 @@
 #include "cpu_affinity.h"
 #include "runtime.h"
 #include "pto_runtime2.h"
+#include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
 #include "common/platform_config.h"
 #include <atomic>
@@ -29,8 +30,18 @@ static int s_actual_sched_cpu[PLATFORM_MAX_AICPU_THREADS];
 
 #if PTO2_SCHED_PROFILING
 #include "pto_scheduler.h"
+#include <atomic>
 static PTO2SchedProfilingData s_sched_prof_snapshot[PLATFORM_MAX_AICPU_THREADS] = {};
+static std::atomic<uint64_t> s_sim_complete_cycles{0};
+static std::atomic<uint64_t> s_sim_dispatch_cycles{0};
 #endif
+
+extern "C" void pto2_sim_reset_run_prof(void) {
+#if PTO2_SCHED_PROFILING
+    s_sim_complete_cycles.store(0, std::memory_order_relaxed);
+    s_sim_dispatch_cycles.store(0, std::memory_order_relaxed);
+#endif
+}
 
 extern "C" {
 
@@ -49,14 +60,16 @@ int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
     runtime.sche_cpu_num = num_sched_threads;
     runtime.orch_thread_num = 0;  // host already did orchestration, all threads are schedulers
     runtime.set_orch_built_on_host(true);
-    runtime.set_sim_aicore_mode(true);
 
     int rc = aicpu_executor_sim_init(&runtime);
     if (rc != 0) return rc;
 
     aicpu_sim_set_rt(pto2_rt);
     PTO2SharedMemoryHeader* header = static_cast<PTO2SharedMemoryHeader*>(sm_base);
-    int32_t total = header->current_task_index.load(std::memory_order_acquire);
+    int32_t total = 0;
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        total += header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
+    }
     aicpu_executor_sim_setup_after_host_orch(total);
 
     for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++)
@@ -98,7 +111,6 @@ int aicpu_sim_run_pto2_concurrent(PTO2Runtime* pto2_rt, int num_sched_threads,
     runtime.sche_cpu_num = num_sched_threads;
     runtime.orch_thread_num = 0;
     runtime.set_orch_built_on_host(true);
-    runtime.set_sim_aicore_mode(true);
     runtime.set_orch_deferred_on_host(true);  // orch runs in separate thread; init must not set orchestrator_done_
 
     int rc = aicpu_executor_sim_init(&runtime);
@@ -126,7 +138,10 @@ int aicpu_sim_run_pto2_concurrent(PTO2Runtime* pto2_rt, int num_sched_threads,
     std::thread orch_thread([pto2_rt, sm_base, &orch_fn]() {
         orch_fn(pto2_rt);
         PTO2SharedMemoryHeader* hdr = static_cast<PTO2SharedMemoryHeader*>(sm_base);
-        int32_t total = hdr->current_task_index.load(std::memory_order_acquire);
+        int32_t total = 0;
+        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+            total += hdr->rings[r].fc.current_task_index.load(std::memory_order_acquire);
+        }
         aicpu_executor_sim_setup_after_host_orch(total);
     });
 
@@ -144,6 +159,8 @@ int aicpu_sim_get_actual_sched_cpu(int thread_idx) {
     return s_actual_sched_cpu[thread_idx];
 }
 
+}  // extern "C"
+
 #if PTO2_SCHED_PROFILING
 void aicpu_sim_get_saved_sched_prof(int thread_idx, PTO2SchedProfilingData* out) {
     if (!out || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS) return;
@@ -154,8 +171,16 @@ void aicpu_sim_set_saved_sched_prof(int thread_idx, const PTO2SchedProfilingData
     if (!data || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS) return;
     s_sched_prof_snapshot[thread_idx] = *data;
 }
-#endif
 
-}  // extern "C"
+void pto2_sim_accumulate_cycles(uint64_t complete_cycle, uint64_t dispatch_cycle) {
+    s_sim_complete_cycles.fetch_add(complete_cycle, std::memory_order_relaxed);
+    s_sim_dispatch_cycles.fetch_add(dispatch_cycle, std::memory_order_relaxed);
+}
+
+void pto2_sim_get_accumulated_cycles(uint64_t* out_complete, uint64_t* out_dispatch) {
+    if (out_complete) *out_complete = s_sim_complete_cycles.load(std::memory_order_relaxed);
+    if (out_dispatch) *out_dispatch = s_sim_dispatch_cycles.load(std::memory_order_relaxed);
+}
+#endif
 
 #endif  // PTO2_SIM_AICORE_UT

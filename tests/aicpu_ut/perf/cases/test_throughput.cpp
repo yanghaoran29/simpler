@@ -243,11 +243,10 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             ++task_global;
             int wtype = task_worker_type(worker_mode, task_global, j, cur_sz0);
             Tensor t = make_tensor(shape, 1, dtype);
-            PTOParam params[] = {
-                make_input_param(shared_in),
-                make_output_param(t),
-            };
-            pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, wtype, params, 2);
+            PTOParam params;
+            params.add_input(shared_in);
+            params.add_output(t);
+            pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, wtype, params);
             layers[0].push_back(t);
         }
 
@@ -264,12 +263,11 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 int wtype = task_worker_type(worker_mode, task_global, j, cur_sz);
                 Tensor out = make_tensor(shape, 1, dtype);
                 const int max_inputs = 16;
-                PTOParam params[max_inputs + 1];
-                int np = 0;
-                for (size_t p = 0; p < preds.size() && np < max_inputs; p++)
-                    params[np++] = make_input_param(layers[static_cast<size_t>(k - 1)][static_cast<size_t>(preds[p])]);
-                params[np++] = make_output_param(out);
-                pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, wtype, params, np);
+                PTOParam params;
+                for (size_t p = 0; p < preds.size() && (int)p < max_inputs; p++)
+                    params.add_input(layers[static_cast<size_t>(k - 1)][static_cast<size_t>(preds[p])]);
+                params.add_output(out);
+                pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, wtype, params);
                 layers[static_cast<size_t>(k)].push_back(out);
             }
         }

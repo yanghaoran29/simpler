@@ -51,9 +51,6 @@ Runtime::Runtime() {
         func_id_to_addr_[i] = 0;
     }
 
-#if defined(PTO2_SIM_AICORE_UT)
-    sim_aicore_mode_ = false;
-#endif
 }
 
 // =============================================================================

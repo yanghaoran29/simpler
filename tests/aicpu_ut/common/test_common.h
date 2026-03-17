@@ -68,22 +68,27 @@ void print_sched_profiling(PTO2Runtime* rt);
 extern SchedProfilingData g_sched_prof_data;
 #endif
 
+#if PTO2_SCHED_PROFILING
+void pto2_print_sim_sched_summary(SchedProfilingData* data, int64_t tasks_completed, int64_t tasks_consumed);
+#endif
+
 #if PTO2_PROFILING
 void orch_timing_begin();
 void orch_timing_end();
+void run_sched_checks(PTO2Runtime* rt, int num_sched);
 #endif
 
 // Compatibility shim: old single-kernel pto2_submit_task → pto2_submit_mixed_task.
 // Only compiled when pto_orchestrator.h (via pto_runtime2.h) has been included first.
 #ifdef PTO_ORCHESTRATOR_H
 static inline void pto2_submit_task(PTO2OrchestratorState* orch,
-    int32_t kernel_id, int worker_type, PTOParam* params, int32_t num_params) {
+    int32_t kernel_id, int worker_type, PTOParam& params) {
     MixedKernels mk;
     if (worker_type == PTO2_WORKER_CUBE)
         mk.aic_kernel_id = kernel_id;
     else
         mk.aiv0_kernel_id = kernel_id;
-    pto2_submit_mixed_task(orch, mk, params, num_params);
+    pto2_submit_mixed_task(orch, mk, params);
 }
 #endif
 

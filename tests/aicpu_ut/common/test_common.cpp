@@ -162,33 +162,90 @@ void print_orch_profiling() {
 }
 
 void print_sched_profiling(PTO2Runtime* rt) {
-    // aicpu_sim_run_pto2 路径不更新 g_sched_prof_data，从上次 sim 运行结果回填以便 fanout/fanin 正确显示
-    AicpuSimRunProf run_prof;
-    aicpu_sim_get_run_prof(&run_prof);
-    int64_t sim_sum = 0;
-    for (int i = 0; i < AICPU_SIM_PROF_WORKER_TYPES && i < PTO2_NUM_WORKER_TYPES; i++) {
-        g_sched_prof_data.tasks_dispatched[i] = run_prof.tasks_dispatched[i];
-        sim_sum += run_prof.tasks_dispatched[i];
-    }
-    if (sim_sum > 0) {
-        g_sched_prof_data.fanout_edges_total = run_prof.fanout_edges_total;
-        g_sched_prof_data.fanout_max_degree = run_prof.fanout_max_degree;
-        g_sched_prof_data.tasks_enqueued_by_completion = run_prof.tasks_enqueued_by_completion;
-        g_sched_prof_data.fanin_edges_total = run_prof.fanin_edges_total;
-        g_sched_prof_data.fanin_max_degree = run_prof.fanin_max_degree;
-        g_sched_prof_data.rounds_total = run_prof.rounds_total;
-        g_sched_prof_data.rounds_with_progress = run_prof.rounds_with_progress;
-        g_sched_prof_data.complete_cycle = run_prof.complete_cycle;
-        g_sched_prof_data.dispatch_cycle = run_prof.dispatch_cycle;
-    }
-
 #if PTO2_SCHED_PROFILING
+#if defined(PTO2_SIM_AICORE_UT)
+    pto2_sim_get_accumulated_cycles(&g_sched_prof_data.complete_cycle, &g_sched_prof_data.dispatch_cycle);
+#endif
     pto2_print_sim_sched_summary(
         &g_sched_prof_data,
         (int64_t)rt->scheduler.tasks_completed.load(std::memory_order_relaxed),
         (int64_t)rt->scheduler.tasks_consumed.load(std::memory_order_relaxed));
+#else
+    (void)rt;
 #endif
 }
+
+#if PTO2_SCHED_PROFILING
+void pto2_print_sim_sched_summary(SchedProfilingData* data, int64_t tasks_completed, int64_t tasks_consumed) {
+    const char* wt_names[] = {"CUBE", "VECTOR", "AI_CPU", "ACCELERATOR"};
+    int64_t total = 0;
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++)
+        total += data->tasks_dispatched[i];
+
+    printf("\n  === Scheduler Profiling (%lld tasks) ===\n", (long long)total);
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
+        int64_t n = data->tasks_dispatched[i];
+        if (n == 0) continue;
+        printf("    %-12s %6lld tasks  (%4.1f%%)\n",
+               wt_names[i], (long long)n, total > 0 ? n * 100.0 / total : 0.0);
+    }
+    printf("    fanout:          %lld edges, max_degree=%d, enqueued=%lld\n",
+           (long long)data->fanout_edges_total, data->fanout_max_degree,
+           (long long)data->tasks_enqueued_by_completion);
+    printf("    fanin:           %lld edges, max_degree=%d\n",
+           (long long)data->fanin_edges_total, data->fanin_max_degree);
+    printf("    sim_rounds:      %lld total, %lld with_progress\n",
+           (long long)data->rounds_total, (long long)data->rounds_with_progress);
+    printf("    tasks_completed: %lld\n", (long long)tasks_completed);
+    printf("    tasks_consumed:  %lld\n", (long long)tasks_consumed);
+
+#if defined(PTO2_SIM_AICORE_UT)
+    PTO2SchedProfilingData sp = {};
+    aicpu_sim_get_saved_sched_prof(0, &sp);
+
+    uint64_t sched_total = data->complete_cycle + data->dispatch_cycle;
+    if (sched_total == 0) sched_total = 1;
+    uint64_t otc_total = sp.lock_cycle + sp.fanout_cycle + sp.fanin_cycle + sp.self_consumed_cycle;
+    uint64_t complete_poll = (data->complete_cycle > otc_total) ? (data->complete_cycle - otc_total) : 0;
+
+    printf("\n  === Scheduler Phase Breakdown: total=%.3fus ===\n", cycles_to_us(sched_total));
+    if (data->complete_cycle > 0) {
+        uint64_t c_parent = data->complete_cycle;
+        printf("    complete       : %.3fus (%.1f%%)\n",
+               cycles_to_us(data->complete_cycle), data->complete_cycle * 100.0 / sched_total);
+        if (complete_poll > 0)
+            printf("      poll         : %.3fus (%.1f%%)\n",
+                   cycles_to_us(complete_poll), complete_poll * 100.0 / c_parent);
+        if (sp.lock_cycle > 0)
+            printf("      otc_lock     : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu\n",
+                   cycles_to_us(sp.lock_cycle), sp.lock_cycle * 100.0 / c_parent,
+                   cycles_to_us(sp.lock_cycle - sp.lock_wait_cycle),
+                   cycles_to_us(sp.lock_wait_cycle),
+                   (unsigned long long)sp.lock_atomic_count);
+        if (sp.fanout_cycle > 0)
+            printf("      otc_fanout   : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu\n",
+                   cycles_to_us(sp.fanout_cycle), sp.fanout_cycle * 100.0 / c_parent,
+                   cycles_to_us(sp.fanout_cycle - sp.push_wait_cycle),
+                   cycles_to_us(sp.push_wait_cycle),
+                   (unsigned long long)sp.fanout_atomic_count);
+        if (sp.fanin_cycle > 0)
+            printf("      otc_fanin    : %.3fus (%.1f%%)  atomics=%llu\n",
+                   cycles_to_us(sp.fanin_cycle), sp.fanin_cycle * 100.0 / c_parent,
+                   (unsigned long long)sp.fanin_atomic_count);
+        if (sp.self_consumed_cycle > 0)
+            printf("      otc_self     : %.3fus (%.1f%%)  atomics=%llu\n",
+                   cycles_to_us(sp.self_consumed_cycle), sp.self_consumed_cycle * 100.0 / c_parent,
+                   (unsigned long long)sp.self_atomic_count);
+    }
+    if (data->dispatch_cycle > 0)
+        printf("    dispatch       : %.3fus (%.1f%%)\n",
+               cycles_to_us(data->dispatch_cycle), data->dispatch_cycle * 100.0 / sched_total);
+    if (sp.complete_count > 0 && data->complete_cycle > 0)
+        printf("    avg/complete   : %.3fus\n",
+               cycles_to_us(data->complete_cycle) / sp.complete_count);
+#endif  // PTO2_SIM_AICORE_UT
+}
+#endif  // PTO2_SCHED_PROFILING
 
 /**
  * Scheduler invariant checks (P1=FAIL, P2=WARN).
@@ -200,7 +257,8 @@ void run_sched_checks(PTO2Runtime* rt, int num_sched) {
 
     int32_t submitted = 0;
     if (rt->sm_handle && rt->sm_handle->header)
-        submitted = rt->sm_handle->header->current_task_index.load(std::memory_order_acquire);
+        for (int ri = 0; ri < PTO2_MAX_RING_DEPTH; ri++)
+            submitted += rt->sm_handle->header->rings[ri].fc.current_task_index.load(std::memory_order_acquire);
 
     // P1: total dispatched == submitted
     int64_t total_dispatched = 0;

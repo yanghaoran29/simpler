@@ -210,13 +210,12 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 Tensor qi       = query.view(qi_shapes, qi_offsets);
                 Tensor out_view = out.view(out_v_shapes, out_v_offsets);
 
-                PTOParam params_hub[] = {
-                    make_output_param(oi),
-                    make_output_param(li_update),
-                    make_output_param(mi_update),
-                };
+                PTOParam params_hub;
+                params_hub.add_output(oi);
+                params_hub.add_output(li_update);
+                params_hub.add_output(mi_update);
                 pto2_submit_task(rt->orchestrators, FUNC_AIV_HUB, PTO2_WORKER_VECTOR,
-                                 params_hub, 3);
+                                 params_hub);
                 total_tasks++;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn += N_UNROLL) {
@@ -235,22 +234,21 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     // Task 1: Batched QK matmul for n_blocks blocks.
                     uint32_t sij_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(n_blocks * block_size)};
                     Tensor sij_buf = make_tensor(sij_shapes, 2, DataType::FLOAT32);
-                    PTOParam params_qk[] = {
-                        make_input_param(qi),
-                        make_input_param(key_cache),
-                        make_output_param(sij_buf),
-                        make_scalar_param(n_blocks),
-                        make_scalar_param(block_indices[0]),
-                        make_scalar_param(block_indices[1]),
-                        make_scalar_param(block_indices[2]),
-                        make_scalar_param(block_indices[3]),
-                        make_scalar_param(block_indices[4]),
-                        make_scalar_param(block_indices[5]),
-                        make_scalar_param(block_indices[6]),
-                        make_scalar_param(block_indices[7]),
-                    };
+                    PTOParam params_qk;
+                    params_qk.add_input(qi);
+                    params_qk.add_input(key_cache);
+                    params_qk.add_output(sij_buf);
+                    params_qk.add_scalar(n_blocks);
+                    params_qk.add_scalar(block_indices[0]);
+                    params_qk.add_scalar(block_indices[1]);
+                    params_qk.add_scalar(block_indices[2]);
+                    params_qk.add_scalar(block_indices[3]);
+                    params_qk.add_scalar(block_indices[4]);
+                    params_qk.add_scalar(block_indices[5]);
+                    params_qk.add_scalar(block_indices[6]);
+                    params_qk.add_scalar(block_indices[7]);
                     pto2_submit_task(rt->orchestrators, FUNC_QK_MATMUL, PTO2_WORKER_CUBE,
-                                     params_qk, 12);
+                                     params_qk);
                     total_tasks++;
 
                     // Task 2: Two-pass softmax over sij_buf.
@@ -258,56 +256,53 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     Tensor pij_buf = make_tensor(pij_shapes, 2, data_type);
                     Tensor mi      = make_tensor(mi_shapes, 1, DataType::FLOAT32);
                     Tensor li      = make_tensor(li_shapes, 1, DataType::FLOAT32);
-                    PTOParam params_sf[] = {
-                        make_input_param(sij_buf),
-                        make_scalar_param(float_to_u64(scale_value)),
-                        make_output_param(pij_buf),
-                        make_output_param(mi),
-                        make_output_param(li),
-                        make_scalar_param(n_blocks),
-                        make_scalar_param(valid_len_last),
-                    };
+                    PTOParam params_sf;
+                    params_sf.add_input(sij_buf);
+                    params_sf.add_output(pij_buf);
+                    params_sf.add_output(mi);
+                    params_sf.add_output(li);
+                    params_sf.add_scalar(float_to_u64(scale_value));
+                    params_sf.add_scalar(n_blocks);
+                    params_sf.add_scalar(valid_len_last);
                     pto2_submit_task(rt->orchestrators, FUNC_SOFTMAX_PREPARE, PTO2_WORKER_VECTOR,
-                                     params_sf, 7);
+                                     params_sf);
                     total_tasks++;
 
                     // Task 3: SplitK PV matmul — pij @ V for n_blocks blocks.
                     uint32_t oi_new_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                     Tensor oi_new = make_tensor(oi_new_shapes, 2, DataType::FLOAT32);
-                    PTOParam params_pv[] = {
-                        make_input_param(pij_buf),
-                        make_input_param(value_cache),
-                        make_output_param(oi_new),
-                        make_scalar_param(n_blocks),
-                        make_scalar_param(block_indices[0]),
-                        make_scalar_param(block_indices[1]),
-                        make_scalar_param(block_indices[2]),
-                        make_scalar_param(block_indices[3]),
-                        make_scalar_param(block_indices[4]),
-                        make_scalar_param(block_indices[5]),
-                        make_scalar_param(block_indices[6]),
-                        make_scalar_param(block_indices[7]),
-                    };
+                    PTOParam params_pv;
+                    params_pv.add_input(pij_buf);
+                    params_pv.add_input(value_cache);
+                    params_pv.add_output(oi_new);
+                    params_pv.add_scalar(n_blocks);
+                    params_pv.add_scalar(block_indices[0]);
+                    params_pv.add_scalar(block_indices[1]);
+                    params_pv.add_scalar(block_indices[2]);
+                    params_pv.add_scalar(block_indices[3]);
+                    params_pv.add_scalar(block_indices[4]);
+                    params_pv.add_scalar(block_indices[5]);
+                    params_pv.add_scalar(block_indices[6]);
+                    params_pv.add_scalar(block_indices[7]);
                     pto2_submit_task(rt->orchestrators, FUNC_PV_MATMUL, PTO2_WORKER_CUBE,
-                                     params_pv, 12);
+                                     params_pv);
                     total_tasks++;
 
                     // Task 4: Online softmax accumulation.
                     uint64_t is_first = (bn == 0) ? 1 : 0;
                     uint64_t is_last  = (bn + n_blocks >= bn_this_batch) ? 1 : 0;
-                    PTOParam params_up[] = {
-                        make_input_param(mi),
-                        make_input_param(li),
-                        make_input_param(oi_new),
-                        make_inout_param(mi_update),
-                        make_inout_param(li_update),
-                        make_inout_param(oi),
-                        make_output_param(out_view),
-                        make_scalar_param(is_first),
-                        make_scalar_param(is_last),
-                    };
+                    PTOParam params_up;
+                    params_up.add_input(mi);
+                    params_up.add_input(li);
+                    params_up.add_input(oi_new);
+                    params_up.add_inout(mi_update);
+                    params_up.add_inout(li_update);
+                    params_up.add_inout(oi);
+                    params_up.add_output(out_view);
+                    params_up.add_scalar(is_first);
+                    params_up.add_scalar(is_last);
                     pto2_submit_task(rt->orchestrators, FUNC_ONLINE_UPDATE, PTO2_WORKER_VECTOR,
-                                     params_up, 9);
+                                     params_up);
                     total_tasks++;
                 }
             }

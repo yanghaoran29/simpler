@@ -381,7 +381,6 @@ struct AicpuExecutor {
                         }
                         deferred_release_slot_states[deferred_release_count++] = &slot_state;
                     }
-                    (void)mixed_task_id;
                 }
                 ct.move_running_to_idle(i);
                 core_idle_[core_id] = true;
@@ -397,7 +396,7 @@ struct AicpuExecutor {
                     uint32_t count = perf_buf->count;
                     if (count > 0) {
                         PerfRecord* record = &perf_buf->records[count - 1];
-                        if (record->task_id == static_cast<uint32_t>(expected_reg_task_id)) {
+                        if (record->task_id == static_cast<uint32_t>(task_id)) {
                             // Fill metadata that AICore doesn't know
                             int32_t perf_slot_idx = static_cast<int32_t>(executing_subslot_by_core_[core_id]);
                             record->func_id = slot_state.task->kernel_id[perf_slot_idx];
@@ -430,7 +429,7 @@ struct AicpuExecutor {
                     thread_idx,
                     CT == CoreType::AIC ? "AIC" : "AIV",
                     core_id,
-                    expected_reg_task_id,
+                    task_id,
                     mixed_complete ? 1 : 0);
                 cur_thread_completed++;
                 if (mixed_complete) {
@@ -556,10 +555,10 @@ struct AicpuExecutor {
 #if defined(PTO2_SIM_AICORE_UT)
         {
             uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-            SimCoreGuard guard(core_id, runtime->get_sim_aicore_mode() && reg_addr == 0);
-            write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(task.mixed_task_id + 1));
+            SimCoreGuard guard(core_id, reg_addr == 0);
+            write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(pto2_task_id_local(task.mixed_task_id) + 1));
         }
-        int32_t reg_task_id = static_cast<int32_t>(task.mixed_task_id + 1);
+        int32_t reg_task_id = static_cast<int32_t>(pto2_task_id_local(task.mixed_task_id) + 1);
 #else
         // Per-core monotonic counter for register protocol uniqueness.
         dispatch_seq_by_core_[core_id]++;
@@ -598,7 +597,7 @@ int32_t AicpuExecutor::handshake_all_cores(Runtime* runtime) {
         aiv_count_ = 0;
         return 0;
     }
-    if (runtime->get_sim_aicore_mode()) {
+    {
         Handshake* sim_handshakes = (Handshake*)runtime->workers;
         aic_count_ = 0;
         aiv_count_ = 0;
@@ -898,7 +897,7 @@ int32_t AicpuExecutor::init(Runtime* runtime) {
     assign_cores_to_threads();
 
 #if defined(PTO2_SIM_AICORE_UT)
-    if (runtime->get_sim_aicore_mode() && cores_total_num_ > 0)
+    if (cores_total_num_ > 0)
         pto2_sim_aicore_init_all_idle();
 #endif
 
@@ -1220,7 +1219,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                 fanin_edges_total, fanin_max_degree, sched_complete_perf_cycle
 #endif
 #if defined(PTO2_SIM_AICORE_UT)
-                , (runtime && runtime->get_sim_aicore_mode())
+                , (runtime != nullptr)
 #endif
             );
         }
@@ -1244,7 +1243,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                 fanin_edges_total, fanin_max_degree, sched_complete_perf_cycle
 #endif
 #if defined(PTO2_SIM_AICORE_UT)
-                , (runtime && runtime->get_sim_aicore_mode())
+                , (runtime != nullptr)
 #endif
             );
         }
@@ -1544,7 +1543,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                     }
                     uint64_t reg_addr = core_id_to_reg_addr_[cid];
 #if defined(PTO2_SIM_AICORE_UT)
-                    SimCoreGuard guard(cid, runtime->get_sim_aicore_mode() && reg_addr == 0);
+                    SimCoreGuard guard(cid, reg_addr == 0);
 #endif
                     uint64_t cond_reg = read_reg(reg_addr, RegId::COND);
                     DEV_ALWAYS("    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d",
@@ -1563,7 +1562,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                     }
                     uint64_t reg_addr = core_id_to_reg_addr_[cid];
 #if defined(PTO2_SIM_AICORE_UT)
-                    SimCoreGuard guard(cid, runtime->get_sim_aicore_mode() && reg_addr == 0);
+                    SimCoreGuard guard(cid, reg_addr == 0);
 #endif
                     uint64_t cond_reg = read_reg(reg_addr, RegId::COND);
                     DEV_ALWAYS("    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d",
@@ -1608,7 +1607,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
     }
 
 #if defined(PTO2_SIM_AICORE_UT)
-    if (runtime && runtime->get_sim_aicore_mode()) {
+    if (runtime) {
         while (deferred_release_count > 0) {
 #if PTO2_SCHED_PROFILING
             int32_t fe =
@@ -1626,7 +1625,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #endif
 
 #if defined(PTO2_SIM_AICORE_UT)
-    if (runtime && runtime->get_sim_aicore_mode()) {
+    if (runtime) {
 #if PTO2_PROFILING && PTO2_SCHED_PROFILING
         pto2_sim_accumulate_cycles(sched_complete_cycle, sched_dispatch_cycle);
 #endif
@@ -1650,7 +1649,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
         // In sim mode use snapshot stored by aicpu_sim_set_saved_sched_prof (in aicpu_ut).
         PTO2SchedProfilingData sp;
 #if defined(PTO2_SIM_AICORE_UT)
-        if (runtime && runtime->get_sim_aicore_mode()) {
+        if (runtime) {
             aicpu_sim_get_saved_sched_prof(thread_idx, &sp);
         } else
 #endif
@@ -1666,9 +1665,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
         DEV_ALWAYS("Thread %d: === Scheduler Phase Breakdown: total=%.3fus, %d tasks ===",
             thread_idx, cycles_to_us(sched_total), cur_thread_completed);
 #if defined(PTO2_SIM_AICORE_UT)
-        if (runtime->get_sim_aicore_mode()) {
-            DEV_ALWAYS("Thread %d:   [sim] otc_lock, otc_fanout, otc_fanin, otc_self, perf, scan expected 0", thread_idx);
-        }
+        DEV_ALWAYS("Thread %d:   [sim] otc_lock, otc_fanout, otc_fanin, otc_self, perf, scan expected 0", thread_idx);
 #endif
 
         // Level 1: complete
@@ -2396,7 +2393,7 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int32_t thread_idx,
 
         uint64_t reg_addr = core_id_to_reg_addr_[core_id];
 #if defined(PTO2_SIM_AICORE_UT)
-        SimCoreGuard guard(core_id, runtime && runtime->get_sim_aicore_mode() && reg_addr == 0);
+        SimCoreGuard guard(core_id, runtime != nullptr && reg_addr == 0);
 #endif
         uint64_t reg_val = read_reg(reg_addr, RegId::COND);
         int32_t reg_task_id = EXTRACT_TASK_ID(reg_val);
@@ -2508,49 +2505,6 @@ void aicpu_sim_set_rt(PTO2Runtime* r) {
     rt = r;
 }
 
-int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
-    if (!pto2_rt || !pto2_rt->sm_handle) return -1;
-    void* sm_base = pto2_rt->sm_handle->sm_base;
-    if (!sm_base) return -1;
-
-    const int SIM_CORE_COUNT = PLATFORM_MAX_CORES;
-    Runtime runtime;
-    runtime.set_pto2_gm_sm_ptr(sm_base);
-    runtime.worker_count = SIM_CORE_COUNT;
-    memset(runtime.workers, 0, sizeof(runtime.workers));
-    runtime.sche_cpu_num = num_sched_threads;
-    runtime.orch_thread_num = 0;  // host already did orchestration, all threads are schedulers
-    runtime.set_orch_built_on_host(true);
-    runtime.set_sim_aicore_mode(true);
-
-    int rc = g_aicpu_executor.init(&runtime);
-    if (rc != 0) return rc;
-
-    rt = pto2_rt;
-    PTO2SharedMemoryHeader* header = static_cast<PTO2SharedMemoryHeader*>(sm_base);
-    int32_t total = header->current_task_index.load(std::memory_order_acquire);
-    g_aicpu_executor.setup_after_host_orch(total);
-
-    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++)
-        s_actual_sched_cpu[i] = -1;
-
-    std::vector<std::thread> threads;
-    for (int i = 0; i < num_sched_threads; i++) {
-        threads.emplace_back([&runtime, i]() {
-            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0])))
-                bind_to_cpu(s_sched_cpus[i]);
-            if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
-                int cur = current_cpu();
-                s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;
-            }
-            g_aicpu_executor.run_resolve_and_dispatch_pto2(&runtime, i);
-        });
-    }
-    for (auto& t : threads) t.join();
-
-    g_aicpu_executor.shutdown_aicore(&runtime, 0, nullptr, 0);
-    return 0;
-}
 
 int aicpu_executor_sim_init(Runtime* r) {
     return g_aicpu_executor.init(r);

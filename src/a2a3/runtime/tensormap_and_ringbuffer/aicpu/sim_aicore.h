@@ -52,6 +52,9 @@ extern "C" int32_t pto2_sim_get_current_core_id();
 /** Check if current context is a sim core (internal use by platform_regs.cpp). */
 extern "C" bool pto2_sim_is_current_sim();
 
+/** Reset run profiling state before aicpu_sim_run_pto2 (no-op if profiling disabled). */
+extern "C" void pto2_sim_reset_run_prof(void);
+
 // =============================================================================
 // RAII Guard for Sim Core Register Context
 // =============================================================================
@@ -129,6 +132,10 @@ int aicpu_sim_run_pto2_concurrent(struct PTO2Runtime* pto2_rt,
 void aicpu_sim_get_saved_sched_prof(int thread_idx, PTO2SchedProfilingData* out);
 /** Called by executor to store per-thread sched profiling at end of resolve_and_dispatch_pto2 (implementation in aicpu_ut). */
 void aicpu_sim_set_saved_sched_prof(int thread_idx, const PTO2SchedProfilingData* data);
+/** Called by executor (one call per scheduler thread) to accumulate complete/dispatch cycles into global sim summary. */
+void pto2_sim_accumulate_cycles(uint64_t complete_cycle, uint64_t dispatch_cycle);
+/** Retrieve accumulated complete/dispatch cycles from all scheduler threads (for printing after sim run). */
+void pto2_sim_get_accumulated_cycles(uint64_t* out_complete, uint64_t* out_dispatch);
 #endif  // PTO2_SCHED_PROFILING
 
 #else  // !defined(PTO2_SIM_AICORE_UT)
