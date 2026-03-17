@@ -60,7 +60,7 @@ int main() {
     }
 
 #if PTO2_PROFILING
-    print_cpu_affinity(num_sched);
+    print_cpu_affinity(num_sched, current_cpu());
     section_header_100('-', "--- Scheduler Profiling ---");
     printf("\n");
     print_sched_profiling(rt);

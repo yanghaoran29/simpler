@@ -53,8 +53,10 @@ int main() {
     PTO2Runtime* rt = setup_run(tc, ctx);
     if (!rt) return 1;
 
-    if (aicpu_sim_run_pto2_concurrent(rt, num_sched, [&ctx](PTO2Runtime* r) {
+    int orch_actual_cpu = -1;
+    if (aicpu_sim_run_pto2_concurrent(rt, num_sched, [&ctx, &orch_actual_cpu](PTO2Runtime* r) {
             bind_to_cpu(ORCH_CPU);
+            orch_actual_cpu = current_cpu();
 #if PTO2_PROFILING
             orch_timing_begin();
 #endif
@@ -71,7 +73,7 @@ int main() {
 #if PTO2_PROFILING
     print_orch_profiling();
     export_sim_swimlane(rt);
-    print_cpu_affinity(num_sched);
+    print_cpu_affinity(num_sched, orch_actual_cpu);
     section_header_100('-', "--- Scheduler Profiling ---");
     print_sched_profiling(rt);
     run_sched_checks(rt, num_sched);

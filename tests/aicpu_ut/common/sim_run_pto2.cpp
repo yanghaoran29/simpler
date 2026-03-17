@@ -132,24 +132,14 @@ int aicpu_sim_run_pto2_concurrent(
     runtime.set_orch_deferred_on_host(true);  // orch runs in separate thread; init must not set orchestrator_done_
 
     int rc = aicpu_executor_sim_init(&runtime);
-    if (rc != 0) return rc;
+    if (rc != 0) 
+        return rc;
 
     aicpu_sim_set_rt(pto2_rt);
     // Do NOT call setup_after_host_orch here: orch thread will call it after build_graph + pto2_orchestrator_done
 
-    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) s_actual_sched_cpu[i] = -1;
-
-    std::vector<std::thread> sched_threads;
-    for (int i = 0; i < num_sched_threads; i++) {
-        sched_threads.emplace_back([&runtime, i]() {
-            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0]))) bind_to_cpu(s_sched_cpus[i]);
-            if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
-                int cur = current_cpu();
-                s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;
-            }
-            aicpu_executor_sim_run_resolve_and_dispatch_pto2(&runtime, i);
-        });
-    }
+    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) 
+        s_actual_sched_cpu[i] = -1;
 
     std::thread orch_thread([pto2_rt, sm_base, &orch_fn]() {
         orch_fn(pto2_rt);
@@ -161,8 +151,22 @@ int aicpu_sim_run_pto2_concurrent(
         aicpu_executor_sim_setup_after_host_orch(total);
     });
 
+    std::vector<std::thread> sched_threads;
+    for (int i = 0; i < num_sched_threads; i++) {
+        sched_threads.emplace_back([&runtime, i]() {
+            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0]))) 
+                bind_to_cpu(s_sched_cpus[i]);
+            if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
+                int cur = current_cpu();
+                s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;
+            }
+            aicpu_executor_sim_run_resolve_and_dispatch_pto2(&runtime, i);
+        });
+    }
+
     orch_thread.join();
-    for (auto& t : sched_threads) t.join();
+    for (auto& t : sched_threads) 
+        t.join();
 
     aicpu_executor_sim_shutdown_aicore(&runtime);
     return 0;

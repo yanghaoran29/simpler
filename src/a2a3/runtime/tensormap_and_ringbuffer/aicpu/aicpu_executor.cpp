@@ -264,7 +264,6 @@ struct AicpuExecutor {
 
     // Build slim PTO2DispatchPayload: only function_bin_addr + args.
     // Metadata (mixed_task_id, subslot, kernel_id, core_type) stays in TaskDescriptor.
-    // Dispatch order: tensor args first, then scalar args.
     void build_pto2_payload(PTO2DispatchPayload& out,
         int32_t kernel_id,
         PTO2TaskPayload& task_pl) {
@@ -1636,7 +1635,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 
 #if PTO2_SCHED_PROFILING
     {
-        // In sim mode use snapshot stored by aicpu_sim_set_saved_sched_prof (in aicpu_ut).
         PTO2SchedProfilingData sp;
 #if defined(PTO2_SIM_AICORE_UT)
         if (runtime) {
@@ -1947,8 +1945,7 @@ int32_t AicpuExecutor::run(Runtime* runtime) {
                 }
 #endif
 
-                // With multi-ring, slot_states are per-ring inside the scheduler.
-                // Fanout fill-in in complete_perf_records is disabled (slot_states_ptr = nullptr).
+                // Wire up slot_states pointer for profiling (complete_perf_records)
                 runtime->set_pto2_slot_states_ptr(nullptr);
 
                 // Store shared state for other orchestrator threads
