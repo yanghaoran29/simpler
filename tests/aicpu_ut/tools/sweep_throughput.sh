@@ -1,28 +1,36 @@
 #!/usr/bin/env bash
-# sweep_throughput.sh — 参数扫描脚本：对 test_throughput idx=0 分两组变参各跑 5 次
+# sweep_throughput.sh — 参数扫描脚本：对 test_throughput idx=0 跑完全部参数组合
 #
-# 固定 X=2(layers)
-# 分组：
-#   Group YZ : (Y,Z) ∈ {(2,0),(2,1),(4,0),(4,2),(6,0),(6,2),(6,4),(8,4)}, X=2  W=1024
-#   Group W  : W ∈ {1024,2048,3072,4096,5120,6144},  X=2  Y=6  Z=2
+# 全部参数组合（均会测到，每组合 RUNS 次）：
+#   Group YZ : (layer-num, dependency, overlap, layer0-task-num) = (2,2,0,1024),(2,2,1,1024),(2,4,0,1024),(2,4,2,1024),(2,6,0,1024),(2,6,2,1024),(2,6,4,1024),(2,8,4,1024) — 8 组
+#   Group W  : (2,6,2,1024),(2,6,2,2048),(2,6,2,3072),(2,6,2,4096),(2,6,2,5120),(2,6,2,6144) — 6 组
+#   合计 14 组参数，每组 RUNS 次（默认 10）。
 #
 # 用法：
 #   bash tools/sweep_throughput.sh
-#   PROFILING_MODE=1 bash tools/sweep_throughput.sh   # --profiling 1 → outputs/sweep_throughput_p1/
-#   PROFILING_MODE=2 bash tools/sweep_throughput.sh   # --profiling 2 → outputs/sweep_throughput_p2/
-# 输出：outputs/sweep_throughput[_p1|_p2]/<label>_run<n>.log
+#   bash tools/sweep_throughput.sh --profiling 1
+#   THREAD_MODE=orch bash tools/sweep_throughput.sh --profiling 1
+#   THREAD_MODE=sched bash tools/sweep_throughput.sh --profiling 1
+# 输出：outputs/sweep_throughput[_p1|_p2][_orch|_sched]/<label>_run<n>.log（每个样例 RUNS 次，原始 log 全部保留）
 # 任意一次测试失败立即退出。
+# RUNS=10（默认，至少 10 次取平均），可由环境变量覆盖。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROFILING_MODE=${PROFILING_MODE:-2}
+if [[ "${1:-}" = "--profiling" && -n "${2:-}" ]]; then
+    PROFILING_MODE="$2"; shift 2
+else
+    PROFILING_MODE=${PROFILING_MODE:-2}
+fi
+THREAD_MODE=${THREAD_MODE:-concurrent}
 SUFFIX=""
 case "$PROFILING_MODE" in 0) SUFFIX="_p0" ;; 1) SUFFIX="_p1" ;; 2) SUFFIX="_p2" ;; *) SUFFIX="_p${PROFILING_MODE}" ;; esac
+case "$THREAD_MODE" in orch) SUFFIX="${SUFFIX}_orch" ;; sched) SUFFIX="${SUFFIX}_sched" ;; esac
 LOG_DIR="${SCRIPT_DIR}/../outputs/sweep_throughput${SUFFIX}"
 mkdir -p "$LOG_DIR"
 
-RUNS=5
+RUNS=${RUNS:-10}
 
 # ─── 默认参数 ─────────────────────────────────────────────────────────────────
 DEF_X=2    # --layer-num (固定)
@@ -43,6 +51,7 @@ run_one() {
         --layer0-task-num "$W" \
         --profiling "$PROFILING_MODE" \
         --idx 0 \
+        $( [ "$THREAD_MODE" = "orch" ] && echo --orch; [ "$THREAD_MODE" = "sched" ] && echo --sched ) \
         > "$log_file" 2>&1 || true
     if ! grep -q "OVERALL: PASSED" "$log_file"; then
         echo "  FAILED — see: $log_file" >&2
@@ -82,4 +91,4 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 total=$(( (8 + 6) * RUNS ))
 echo "  All done — ${total} runs passed."
-echo "  Logs: $LOG_DIR"
+echo "  原始 log 已保留: $LOG_DIR (每样例 ${RUNS} 次)"

@@ -40,17 +40,11 @@
 #if defined(PTO2_SIM_AICORE_UT)
 #include "sim_aicore.h"
 #include "cpu_affinity.h"
-static const int s_sched_cpus[] = {
-    SCHED_CPU0, SCHED_CPU1, SCHED_CPU2, SCHED_CPU3,
-    SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
-};
-static int s_actual_sched_cpu[PLATFORM_MAX_AICPU_THREADS];
 // Set/clear current sim core context for register access
 extern void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
 extern void pto2_sim_clear_current_core();
 #if PTO2_SCHED_PROFILING
 #include "pto_scheduler.h"
-static PTO2SchedProfilingData s_sched_prof_snapshot[PLATFORM_MAX_AICPU_THREADS] = {};
 // Order Phase Breakdown output by thread index (0, 1, 2, ...)
 static std::atomic<int> s_phase_print_turn(0);
 #endif
@@ -900,9 +894,17 @@ int32_t AicpuExecutor::init(Runtime* runtime) {
     }
     completed_tasks_.store(0, std::memory_order_release);
     // Host orchestration: graph already built, no wait needed. Device orch: Thread 3 will set this.
+    // When orch_deferred_on_host (concurrent sim), orch runs in a separate thread later; leave orchestrator_done_ false.
     bool orch_on_host = runtime->get_orch_built_on_host();
+#if defined(PTO2_SIM_AICORE_UT)
+    bool orch_deferred = runtime->get_orch_deferred_on_host();
+    orchestrator_done_ = (orch_on_host && !orch_deferred);
+    DEV_INFO("Init: orch_built_on_host=%d orch_deferred=%d => orchestrator_done_=%d",
+             orch_on_host ? 1 : 0, orch_deferred ? 1 : 0, orchestrator_done_ ? 1 : 0);
+#else
     DEV_INFO("Init: orch_built_on_host=%d", orch_on_host ? 1 : 0);
     orchestrator_done_ = orch_on_host;
+#endif
 
     // Initial ready tasks will be populated via scheduler ready queues
 
@@ -930,9 +932,6 @@ int32_t AicpuExecutor::init(Runtime* runtime) {
  */
 int32_t AicpuExecutor::shutdown_aicore(Runtime* runtime, int32_t thread_idx, const int32_t* cur_thread_cores, int32_t core_num) {
     (void)runtime;
-    (void)thread_idx;
-    (void)cur_thread_cores;
-    (void)core_num;
 
     if (core_num == 0) return 0;
 
@@ -1073,6 +1072,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #endif
 #endif
         int32_t task_count = 0;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
         bool orch_done = orchestrator_done_;
         if (orch_done) {
             task_count = total_tasks_;
@@ -1583,7 +1583,10 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
         pto2_sim_accumulate_cycles(sched_complete_cycle, sched_dispatch_cycle);
 #endif
 #if PTO2_SCHED_PROFILING
-        s_sched_prof_snapshot[thread_idx] = pto2_scheduler_get_profiling(thread_idx);
+        {
+            PTO2SchedProfilingData data = pto2_scheduler_get_profiling(thread_idx);
+            aicpu_sim_set_saved_sched_prof(thread_idx, &data);
+        }
 #endif
     }
 #endif
@@ -1602,12 +1605,16 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
     }
     // Two-level tree display: sub-phase breakdown within complete and dispatch
     {
-        // In sim mode we already saved profiling into s_sched_prof_snapshot (and reset globals); use it for display.
-        PTO2SchedProfilingData sp =
+        // In sim mode use snapshot stored by aicpu_sim_set_saved_sched_prof (in aicpu_ut).
+               PTO2SchedProfilingData sp;
 #if defined(PTO2_SIM_AICORE_UT)
-            (runtime && runtime->get_sim_aicore_mode()) ? s_sched_prof_snapshot[thread_idx] :
+        if (runtime && runtime->get_sim_aicore_mode()) {
+            aicpu_sim_get_saved_sched_prof(thread_idx, &sp);
+        } else
 #endif
-            pto2_scheduler_get_profiling(thread_idx);
+        {
+            sp = pto2_scheduler_get_profiling(thread_idx);
+        }
         uint64_t otc_total = sp.lock_cycle + sp.fanout_cycle + sp.fanin_cycle + sp.self_consumed_cycle;
         uint64_t complete_poll = (sched_complete_cycle > otc_total + sched_complete_perf_cycle)
             ? (sched_complete_cycle - otc_total - sched_complete_perf_cycle) : 0;
@@ -2356,6 +2363,7 @@ extern "C" int32_t aicpu_execute(Runtime* runtime) {
 void AicpuExecutor::setup_after_host_orch(int32_t total_task_count) {
     total_tasks_ = total_task_count;
     orchestrator_done_ = true;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 int AicpuExecutor::run_resolve_and_dispatch_pto2(Runtime* r, int thread_idx) {
@@ -2364,63 +2372,25 @@ int AicpuExecutor::run_resolve_and_dispatch_pto2(Runtime* r, int thread_idx) {
 
 extern "C" {
 
-int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
-    if (!pto2_rt || !pto2_rt->sm_handle) return -1;
-    void* sm_base = pto2_rt->sm_handle->sm_base;
-    if (!sm_base) return -1;
-
-    pto2_sim_reset_run_prof();
-
-    const int SIM_CORE_COUNT = PLATFORM_MAX_CORES;
-    Runtime runtime;
-    runtime.set_pto2_gm_sm_ptr(sm_base);
-    runtime.worker_count = SIM_CORE_COUNT;
-    memset(runtime.workers, 0, sizeof(runtime.workers));
-    runtime.sche_cpu_num = num_sched_threads;
-    runtime.orch_thread_num = 0;  // host already did orchestration, all threads are schedulers
-    runtime.set_orch_built_on_host(true);
-    runtime.set_sim_aicore_mode(true);
-
-    int rc = g_aicpu_executor.init(&runtime);
-    if (rc != 0) return rc;
-
-    rt = pto2_rt;
-    PTO2SharedMemoryHeader* header = static_cast<PTO2SharedMemoryHeader*>(sm_base);
-    int32_t total = header->current_task_index.load(std::memory_order_acquire);
-    g_aicpu_executor.setup_after_host_orch(total);
-
-    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++)
-        s_actual_sched_cpu[i] = -1;
-
-    std::vector<std::thread> threads;
-    for (int i = 0; i < num_sched_threads; i++) {
-        threads.emplace_back([&runtime, i]() {
-            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0])))
-                bind_to_cpu(s_sched_cpus[i]);
-            if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
-                int cur = current_cpu();
-                s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;
-            }
-            g_aicpu_executor.run_resolve_and_dispatch_pto2(&runtime, i);
-        });
-    }
-    for (auto& t : threads) t.join();
-
-    g_aicpu_executor.shutdown_aicore(&runtime, 0, nullptr, 0);
-    return 0;
+void aicpu_sim_set_rt(PTO2Runtime* r) {
+    rt = r;
 }
 
-int aicpu_sim_get_actual_sched_cpu(int thread_idx) {
-    if (thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS) return -1;
-    return s_actual_sched_cpu[thread_idx];
+int aicpu_executor_sim_init(Runtime* r) {
+    return g_aicpu_executor.init(r);
 }
 
-#if PTO2_SCHED_PROFILING
-void aicpu_sim_get_saved_sched_prof(int thread_idx, PTO2SchedProfilingData* out) {
-    if (!out || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS) return;
-    *out = s_sched_prof_snapshot[thread_idx];
+void aicpu_executor_sim_setup_after_host_orch(int32_t total_task_count) {
+    g_aicpu_executor.setup_after_host_orch(total_task_count);
 }
-#endif
+
+int aicpu_executor_sim_run_resolve_and_dispatch_pto2(Runtime* r, int thread_idx) {
+    return g_aicpu_executor.run_resolve_and_dispatch_pto2(r, thread_idx);
+}
+
+int aicpu_executor_sim_shutdown_aicore(Runtime* r) {
+    return g_aicpu_executor.shutdown_aicore(r, 0, nullptr, 0);
+}
 
 }  // extern "C"
 #endif  // PTO2_SIM_AICORE_UT

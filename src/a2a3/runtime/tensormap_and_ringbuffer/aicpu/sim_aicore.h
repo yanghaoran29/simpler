@@ -39,8 +39,11 @@ extern "C" void pto2_sim_aicore_set_idle(int32_t core_id);
 extern "C" void pto2_sim_aicore_init_all_idle(void);
 
 // -----------------------------------------------------------------------------
-// Sim run API (for aicpu_ut perf tests)
+// Sim run API (for aicpu_ut perf tests) — aicpu_sim_run_pto2 and getters live in aicpu_ut.
+// Executor provides setters/wrappers so the test can drive init / run / shutdown.
 // -----------------------------------------------------------------------------
+
+struct Runtime;  // forward decl for executor wrappers
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,8 +51,17 @@ extern "C" {
 
 struct PTO2Runtime;
 
+/** Set PTO2Runtime* used by executor during aicpu_sim_run_pto2 (called from aicpu_ut before starting scheduler threads). */
+void aicpu_sim_set_rt(struct PTO2Runtime* r);
+
+/** Executor sim init/setup/run/shutdown — called from aicpu_sim_run_pto2 in aicpu_ut. */
+int aicpu_executor_sim_init(struct Runtime* r);
+void aicpu_executor_sim_setup_after_host_orch(int32_t total_task_count);
+int aicpu_executor_sim_run_resolve_and_dispatch_pto2(struct Runtime* r, int thread_idx);
+int aicpu_executor_sim_shutdown_aicore(struct Runtime* r);
+
 /**
- * Run scheduler via AicpuExecutor::resolve_and_dispatch_pto2 (PTO2_SIM_AICORE_UT only).
+ * Run scheduler via executor resolve_and_dispatch_pto2 (implementation in aicpu_ut).
  * Graph must already be built and pto2_orchestrator_done called.
  *
  * @param pto2_rt         PTO2Runtime from make_runtime() after build_*_graph + orchestrator_done
@@ -106,6 +118,25 @@ void aicpu_sim_get_run_prof(AicpuSimRunProf* out);
 }
 #endif
 
+#ifdef __cplusplus
+#include <functional>
+
+/**
+ * Concurrent variant of aicpu_sim_run_pto2: runs orchestration and scheduling
+ * concurrently, mirroring real device behavior where all AICPU threads enter
+ * simultaneously.
+ *
+ * @param pto2_rt           PTO2Runtime created by make_runtime() (graph not yet built)
+ * @param num_sched_threads  Number of scheduler threads
+ * @param orch_fn           Orchestration work: should call build_graph() +
+ *                          pto2_orchestrator_done() internally
+ * @return 0 on success, -1 on error
+ */
+int aicpu_sim_run_pto2_concurrent(struct PTO2Runtime* pto2_rt,
+                                  int num_sched_threads,
+                                  std::function<void(PTO2Runtime*)> orch_fn);
+#endif
+
 #if PTO2_SCHED_PROFILING
 #include "pto_scheduler.h"
 #ifdef __cplusplus
@@ -116,6 +147,8 @@ extern "C" {
  * aicpu_sim_run_pto2 call.  Safe to call multiple times (non-destructive).
  */
 void aicpu_sim_get_saved_sched_prof(int thread_idx, PTO2SchedProfilingData* out);
+/** Called by executor to store per-thread sched profiling at end of resolve_and_dispatch_pto2 (implementation in aicpu_ut). */
+void aicpu_sim_set_saved_sched_prof(int thread_idx, const PTO2SchedProfilingData* data);
 #ifdef __cplusplus
 }
 #endif

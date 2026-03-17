@@ -1,32 +1,35 @@
 #!/usr/bin/env bash
-# sweep_latency.sh — 参数扫描脚本：对 test_latency idx=1 (aic/aiv alternate) 分两组变参各跑 5 次
+# sweep_latency.sh — 参数扫描脚本：对 test_latency idx=1 (aic/aiv alternate) 跑完全部参数组合
 #
-# 默认值：X=64(chain-num), Y=64(chain-length)
-# 分组：
-#   Group X : X ∈ {16,32,48,64,96,128,192},  Y=64
-#   Group Y : Y ∈ {4,8,16,32,64,128},         X=64
+# 全部参数组合（均会测到，每组合 RUNS 次）：
+#   Group X : (chain-num, chain-length) = (1, 128)                           — 1 组
+#   Group Y : (1, 128), (1, 256), (1, 512), (1, 1024), (1, 2048), (1, 4096), (1, 8192), (1, 16383) — 8 组
+#   合计 9 组参数，每组 RUNS 次（默认 10）。
 #
 # 用法：
-#   bash tools/sweep_latency.sh              # 默认 --profiling 2，输出 sweep_latency/
-#   PROFILING_MODE=1 bash tools/sweep_latency.sh   # --profiling 1，输出 sweep_latency_p1/
-#   PROFILING_MODE=2 bash tools/sweep_latency.sh   # --profiling 2，输出 sweep_latency_p2/
-# 输出：outputs/sweep_latency[_p1|_p2]/latency_<label>_run<n>.log
-# 任意一次测试失败立即退出。
+#   bash tools/sweep_latency.sh
+# 输出：outputs/sweep_latency[(_p1|_p2)[_orch|_sched]]/latency_<label>_run<n>.log（每样例 RUNS 次，原始 log 全部保留）
+# 任意一次测试失败立即退出。每样例至少 10 次取平均：RUNS=10（默认），可由环境变量 RUNS 覆盖。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROFILING_MODE=${PROFILING_MODE:-2}
-SUFFIX=""
-case "$PROFILING_MODE" in 0) SUFFIX="_p0" ;; 1) SUFFIX="_p1" ;; 2) SUFFIX="_p2" ;; *) SUFFIX="_p${PROFILING_MODE}" ;; esac
+if [[ "${1:-}" = "--profiling" && -n "${2:-}" ]]; then
+    PROFILING_MODE="$2"; shift 2
+else
+    PROFILING_MODE=${PROFILING_MODE:-2}
+fi
+THREAD_MODE=${THREAD_MODE:-concurrent}
+SUFFIX="_p${PROFILING_MODE}"
+case "$THREAD_MODE" in orch) SUFFIX="${SUFFIX}_orch" ;; sched) SUFFIX="${SUFFIX}_sched" ;; esac
 LOG_DIR="${SCRIPT_DIR}/../outputs/sweep_latency${SUFFIX}"
 mkdir -p "$LOG_DIR"
 
-RUNS=5
+RUNS=${RUNS:-10}
 
 # ─── 默认参数 ─────────────────────────────────────────────────────────────────
-DEF_X=64   # --chain-num
-DEF_Y=64   # --chain-length
+DEF_X=1     # --chain-num
+DEF_Y=128   # --chain-length
 
 # ─── 单次运行 ─────────────────────────────────────────────────────────────────
 run_one() {
@@ -38,6 +41,7 @@ run_one() {
         --chain-num    "$X" \
         --chain-length "$Y" \
         --profiling "$PROFILING_MODE" \
+        $( [ "$THREAD_MODE" = "orch" ] && echo --orch; [ "$THREAD_MODE" = "sched" ] && echo --sched ) \
         --idx 1 \
         > "$log_file" 2>&1 || true
     if ! grep -q "OVERALL: PASSED" "$log_file"; then
@@ -58,20 +62,20 @@ run_group() {
 
 # ─── Group X ──────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━  Group X  (vary chain-num, Y=${DEF_Y})  ━━━━━━━━━━━━━━"
-for X in 16 32 48 64 96 128 192; do
+for X in 1; do
     run_group "$X" "$DEF_Y" "X${X}_Y${DEF_Y}"
 done
 
 # ─── Group Y ──────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━  Group Y  (vary chain-length, X=${DEF_X})  ━━━━━━━━━━━━━━"
-for Y in 4 8 16 32 64 128; do
+for Y in 128 256 512 1024 2048 4096 8192 16383; do
     run_group "$DEF_X" "$Y" "X${DEF_X}_Y${Y}"
 done
 
 # ─── 汇总 ─────────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-total=$(( (7 + 6) * RUNS ))
+total=$(( (1 + 8) * RUNS ))
 echo "  All done — ${total} runs passed."
-echo "  Logs: $LOG_DIR"
+echo "  原始 log 已保留: $LOG_DIR (每样例 ${RUNS} 次)"

@@ -3,8 +3,10 @@
 #
 # 用法：
 #   bash tools/compare_profiling.sh
-# 各跑 2 次 test_latency（X=64,Y=64）和 2 次 test_throughput（n=2,D=6,O=2,W=1024），
+#   RUNS=10 bash tools/compare_profiling.sh   # 每样例 10 次（默认），取平均
+# 各跑 RUNS 次 test_latency（X=64,Y=64）和 RUNS 次 test_throughput（n=2,D=6,O=2,W=1024），
 # 解析 Scheduler Total (us) 与 Orchestrator 时间，输出 profiling 1 vs 2 的差距。
+# 原始 log 保留在 outputs/compare_profiling/ 下（*_p1_run<n>.log, *_p2_run<n>.log）。
 #
 # 依赖：run_tests.sh 支持 --profiling 1 / --profiling 2
 
@@ -13,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AICPU_UT_DIR="${SCRIPT_DIR}/.."
 OUT_DIR="${SCRIPT_DIR}/../outputs/compare_profiling"
-RUNS=2
+RUNS=${RUNS:-10}
 
 mkdir -p "$OUT_DIR"
 
@@ -126,5 +128,5 @@ for label in "latency" "throughput"; do
 done
 
 echo ""
-echo "  Logs: $OUT_DIR"
+echo "  原始 log 已保留: $OUT_DIR (每样例 ${RUNS} 次)"
 echo ""

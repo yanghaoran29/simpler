@@ -78,15 +78,15 @@ extern int   g_pau_context_lens[PAU_MAX_BATCH];
 #define FUNC_AIC_HUB         4
 #define FUNC_AIV_HUB         5
 
-struct PAUnrollRunCtx {
+struct GraphCtx {
     int64_t  config[7];
     uint64_t args[10];
 };
 
 int          get_num_sched_threads();
 void         perf_wait_sigstop();
-void         build_paged_attention_unroll_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const PerfTestCase& tc, PAUnrollRunCtx& ctx);
+void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -134,7 +134,7 @@ void perf_wait_sigstop() {
 }
 
 /**
- * build_paged_attention_unroll_graph — builds the unrolled paged attention graph.
+ * build_graph — builds the unrolled paged attention graph.
  *
  * Compared to the basic paged attention, N_UNROLL=8 blocks are batched into a
  * single group of 4 tasks, reducing task-submission overhead by ~8×.
@@ -148,7 +148,7 @@ void perf_wait_sigstop() {
  *     PV_MATMUL  (pij_buf @ V for n_blocks blocks)
  *     ONLINE_UPDATE (accumulate into oi, li_update, mi_update)
  */
-void build_paged_attention_unroll_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void*    host_query        = reinterpret_cast<void*>(args[0]);
@@ -318,7 +318,7 @@ void build_paged_attention_unroll_graph(PTO2Runtime* rt, uint64_t* args, int arg
     printf("  Total tasks submitted: %d\n", total_tasks);
 }
 
-PTO2Runtime* setup_run(const PerfTestCase& tc, PAUnrollRunCtx& ctx) {
+PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx) {
     uint64_t batch      = static_cast<uint64_t>(tc.batch);
     uint64_t num_heads  = static_cast<uint64_t>(tc.num_heads);
     int      kv_head_num = tc.kv_head_num;

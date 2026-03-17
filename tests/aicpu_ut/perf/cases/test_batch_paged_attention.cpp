@@ -59,15 +59,15 @@ extern int   g_context_lens[GLOBAL_MAX_BATCH];
 #define FUNC_AIC_HUB         4
 #define FUNC_AIV_HUB         5
 
-struct BatchPARunCtx {
+struct GraphCtx {
     int64_t  config[7];
     uint64_t args[10];
 };
 
 int          get_num_sched_threads();
 void         perf_wait_sigstop();
-void         build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const PerfTestCase& tc, BatchPARunCtx& ctx);
+void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -112,7 +112,7 @@ void perf_wait_sigstop() {
     }
 }
 
-void build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void*    host_query       = reinterpret_cast<void*>(args[0]);
@@ -278,7 +278,7 @@ void build_batch_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_
            (unsigned long)num_chunks, (unsigned long)max_bn, (unsigned long)IN_CORE_BATCH);
 }
 
-PTO2Runtime* setup_run(const PerfTestCase& tc, BatchPARunCtx& ctx) {
+PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx) {
     uint64_t batch      = static_cast<uint64_t>(tc.batch);
     uint64_t num_heads  = static_cast<uint64_t>(tc.num_heads);
     int      kv_head_num = tc.kv_head_num;

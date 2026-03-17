@@ -184,6 +184,8 @@ private:
 #if defined(PTO2_SIM_AICORE_UT)
     // Sim AICore mode (only when PTO2_SIM_AICORE_UT): in-process sim reg + one CPU thread, immediate FIN.
     bool sim_aicore_mode_{false};
+    // When true: orch runs on host but in a separate thread (concurrent); init must not set orchestrator_done_.
+    bool orch_deferred_on_host_{false};
 #endif
 
 public:
@@ -257,6 +259,9 @@ public:
     /** Sim AICore mode: one CPU thread simulates AICore (receive task -> immediate FIN). */
     bool get_sim_aicore_mode() const { return sim_aicore_mode_; }
     void set_sim_aicore_mode(bool v) { sim_aicore_mode_ = v; }
+    /** Orch on host but deferred (concurrent sim): do not set orchestrator_done_ in init. */
+    bool get_orch_deferred_on_host() const { return orch_deferred_on_host_; }
+    void set_orch_deferred_on_host(bool v) { orch_deferred_on_host_ = v; }
 #else
     bool get_sim_aicore_mode() const { return false; }
     void set_sim_aicore_mode(bool) {}

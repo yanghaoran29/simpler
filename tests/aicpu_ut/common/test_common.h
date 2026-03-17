@@ -42,10 +42,6 @@ uint64_t perf_now_us();          // Monotonic clock, returns microseconds, for p
 PTO2Runtime* make_runtime();
 int sim_drain_one_pass(PTO2Runtime* rt);
 int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000);
-/** Run simulation with multiple scheduler threads (mirrors device: 3 sched + 1 orch). */
-int sim_run_all_multi_thread(PTO2Runtime* rt, int num_sched_threads = 3, int max_iterations_per_thread = 1000000);
-/** Run simulation using resolve_and_dispatch_pto2 style (mirrors device_tests execution). */
-int sim_run_with_resolve_and_dispatch(PTO2Runtime* rt, int num_sched_threads = 3, int max_iterations_per_thread = 1000000);
 void print_orch_profiling();
 
 // Scheduler profiling: use runtime struct and print (no duplicate definition).
@@ -56,15 +52,10 @@ typedef PTO2SimSchedSummary SchedProfilingData;
 
 void print_sched_profiling(PTO2Runtime* rt);
 
-// Exposed for concurrent execution testing
 #if PTO2_PROFILING
 #include "common/platform_config.h"
 extern SchedProfilingData g_sched_prof_data;
-extern SchedProfilingData g_sched_prof_per_thread[PLATFORM_MAX_AICPU_THREADS];
 #endif
-void sim_drain_scheduler_thread(PTO2Runtime* rt, int thread_idx,
-                                 void* my_prof,
-                                 int* out_executed, int max_iterations);
 
 #if PTO2_PROFILING
 void orch_timing_begin();

@@ -67,15 +67,15 @@ extern int64_t g_bgemm_config[BGEMM_CONFIG_NELEMS];
 #define FUNC_GEMM_TILE 0
 #define FUNC_TILE_ADD  1
 
-struct BgemmRunCtx {
+struct GraphCtx {
     int64_t  config[4];   // tile_size, grid_k, num_groups, incore_loop
     uint64_t args[10];
 };
 
 int          get_num_sched_threads();
 void         perf_wait_sigstop();
-void         build_bgemm_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const BgemmTestCase& tc, BgemmRunCtx& ctx);
+void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const BgemmTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -119,7 +119,7 @@ void perf_wait_sigstop() {
 }
 
 /**
- * build_bgemm_graph — builds a batched tiled-GEMM task graph.
+ * build_graph — builds a batched tiled-GEMM task graph.
  *
  * Per group (group_idx = 0 .. num_groups-1):
  *   PTO2_SCOPE:
@@ -130,7 +130,7 @@ void perf_wait_sigstop() {
  * args[0]: ptr_A  args[1]: ptr_B  args[2]: ptr_C
  * args[3]: ptr_config  args[4]: size_A  args[5]: size_B  args[6]: size_C
  */
-void build_bgemm_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void*    dev_A      = reinterpret_cast<void*>(args[0]);
@@ -209,7 +209,7 @@ void build_bgemm_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
            total_gemm + total_add, total_gemm, total_add);
 }
 
-PTO2Runtime* setup_run(const BgemmTestCase& tc, BgemmRunCtx& ctx) {
+PTO2Runtime* setup_run(const BgemmTestCase& tc, GraphCtx& ctx) {
     uint64_t tile_elems       = static_cast<uint64_t>(tc.tile_size) * tc.tile_size;
     uint64_t group_tile_elems = static_cast<uint64_t>(tc.incore_loop) * tile_elems;
 

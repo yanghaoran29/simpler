@@ -52,15 +52,15 @@ extern int   g_context_lens[PA_CONTEXT_LENS_CNT];
 #define FUNC_AIC_HUB         4
 #define FUNC_AIV_HUB         5
 
-struct PARunCtx {
+struct GraphCtx {
     int64_t  config[7];
     uint64_t args[10];
 };
 
 int          get_num_sched_threads();
 void         perf_wait_sigstop();
-void         build_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const PerfTestCase& tc, PARunCtx& ctx);
+void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -101,7 +101,7 @@ void perf_wait_sigstop() {
     }
 }
 
-void build_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void*    host_query        = reinterpret_cast<void*>(args[0]);
@@ -249,7 +249,7 @@ void build_paged_attention_graph(PTO2Runtime* rt, uint64_t* args, int arg_count)
     printf("  Total tasks submitted: %d\n", total_tasks);
 }
 
-PTO2Runtime* setup_run(const PerfTestCase& tc, PARunCtx& ctx) {
+PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx) {
     uint64_t batch      = static_cast<uint64_t>(tc.batch);
     uint64_t num_heads  = static_cast<uint64_t>(tc.num_heads);
     int      kv_head_num = tc.kv_head_num;

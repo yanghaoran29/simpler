@@ -14,7 +14,7 @@
  *   idx=1: 奇数编号任务（全局提交序，1-indexed）为 AIC，偶数编号任务为 AIV
  *   idx=2: 每层前半任务为 AIC，后半任务为 AIV
  *
- * Included by test_sched_prof_only.cpp, test_orch_only.cpp, test_concurrent.cpp.
+ * Included by test_scheduler.cpp, test_orchestrator.cpp, test_orchestrator_scheduler.cpp.
  * Do not compile as separate TU — it is #included by the test driver.
  */
 
@@ -90,15 +90,15 @@ extern float g_throughput_input_buf;
 
 #define FUNC_ELEMENT_WISE 0
 
-struct ThroughputRunCtx {
+struct GraphCtx {
     int64_t config[5];  // num_layers, layer0_size, deps_per_task, overlap, worker_mode
     uint64_t args[10];
 };
 
 int get_num_sched_threads();
 void perf_wait_sigstop();
-void build_throughput_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const ThroughputTestCase& tc, ThroughputRunCtx& ctx);
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const ThroughputTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -195,7 +195,7 @@ static int task_worker_type(int worker_mode, int task_global_1indexed, int j, in
     }
 }
 
-void build_throughput_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void* input_buf = reinterpret_cast<void*>(args[0]);
@@ -281,7 +281,7 @@ void build_throughput_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     printf("  Total tasks submitted: %d\n", total_tasks);
 }
 
-PTO2Runtime* setup_run(const ThroughputTestCase& tc, ThroughputRunCtx& ctx) {
+PTO2Runtime* setup_run(const ThroughputTestCase& tc, GraphCtx& ctx) {
     ctx.config[0] = static_cast<int64_t>(tc.num_layers);
     ctx.config[1] = static_cast<int64_t>(tc.layer0_size);
     ctx.config[2] = static_cast<int64_t>(tc.deps_per_task);

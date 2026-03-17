@@ -69,15 +69,15 @@ extern float g_alt_Z[ALT_MAX_ADD_NELEMS];
 #define FUNC_MATMUL 0
 #define FUNC_ADD    1
 
-struct AlternatingRunCtx {
+struct GraphCtx {
     int64_t  config[5];   // batch, M, N, matmul_batch, add_batch
     uint64_t args[10];
 };
 
 int          get_num_sched_threads();
 void         perf_wait_sigstop();
-void         build_alternating_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const AlternatingTestCase& tc, AlternatingRunCtx& ctx);
+void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const AlternatingTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -120,7 +120,7 @@ void perf_wait_sigstop() {
 }
 
 /**
- * build_alternating_graph — submits interleaved CUBE and VECTOR task groups.
+ * build_graph — submits interleaved CUBE and VECTOR task groups.
  *
  * All tasks are completely independent.  Matmul and add groups alternate in
  * submission order, each group writing to a non-overlapping slice of its
@@ -132,7 +132,7 @@ void perf_wait_sigstop() {
  * args[6]: size_matmul_bytes  args[7]: size_add_bytes
  * args[8]: ptr_config
  */
-void build_alternating_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void*    host_A      = reinterpret_cast<void*>(args[0]);
@@ -214,7 +214,7 @@ void build_alternating_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     printf("  Total tasks submitted: %d\n", total_tasks);
 }
 
-PTO2Runtime* setup_run(const AlternatingTestCase& tc, AlternatingRunCtx& ctx) {
+PTO2Runtime* setup_run(const AlternatingTestCase& tc, GraphCtx& ctx) {
     size_t total_matmul = static_cast<size_t>(tc.batch) * tc.M;
     size_t total_add    = static_cast<size_t>(tc.batch) * tc.N;
 

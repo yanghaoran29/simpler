@@ -2,7 +2,7 @@
  * linear.cpp
  *
  * Linear chain backend (PERF_BACKEND=0): declarations + definitions.
- * Included by test_sched_prof_only.cpp, test_orch_only.cpp, test_concurrent.cpp.
+ * Included by test_scheduler.cpp, test_orchestrator.cpp, test_orchestrator_scheduler.cpp.
  * Do not compile this file as a separate TU — it is #included by the test driver.
  */
 
@@ -45,15 +45,15 @@ extern float g_output_buf[LINEAR_MAX_NELEMS];
 
 #define FUNC_ELEMENT_WISE 0
 
-struct LinearRunCtx {
+struct GraphCtx {
     int64_t  config[4];
     uint64_t args[10];
 };
 
 int          get_num_sched_threads();
 void         perf_wait_sigstop();
-void         build_linear_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const LinearTestCase& tc, LinearRunCtx& ctx);
+void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const LinearTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -92,7 +92,7 @@ void perf_wait_sigstop() {
     }
 }
 
-void build_linear_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void*    input_buf  = reinterpret_cast<void*>(args[0]);
@@ -132,7 +132,7 @@ void build_linear_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     printf("  Total tasks submitted: %d\n", chain_length);
 }
 
-PTO2Runtime* setup_run(const LinearTestCase& tc, LinearRunCtx& ctx) {
+PTO2Runtime* setup_run(const LinearTestCase& tc, GraphCtx& ctx) {
     ctx.config[0] = static_cast<int64_t>(tc.chain_length);
     ctx.config[1] = static_cast<int64_t>(tc.tensor_nelems);
     ctx.config[2] = static_cast<int64_t>(tc.tensor_nelems) * sizeof(float);

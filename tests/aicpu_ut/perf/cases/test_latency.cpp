@@ -9,7 +9,7 @@
  * Case 0: 所有任务均为 aiv (PTO2_WORKER_VECTOR).
  * Case 1: 链上任务 aic / aiv 交替 (PTO2_WORKER_CUBE / PTO2_WORKER_VECTOR).
  *
- * Included by test_sched_prof_only.cpp, test_orch_only.cpp, test_concurrent.cpp.
+ * Included by test_scheduler.cpp, test_orchestrator.cpp, test_orchestrator_scheduler.cpp.
  * Do not compile as separate TU — it is #included by the test driver.
  */
 
@@ -61,15 +61,15 @@ extern float g_latency_output_buf[AICPU_UT_LATENCY_NUM_CHAINS];
 
 #define FUNC_ELEMENT_WISE 0
 
-struct LatencyRunCtx {
+struct GraphCtx {
     int64_t config[3];  // num_chains, chain_length, case_index (0=all aiv, 1=aic/aiv alternate)
     uint64_t args[10];
 };
 
 int get_num_sched_threads();
 void perf_wait_sigstop();
-void build_latency_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const LatencyTestCase& tc, LatencyRunCtx& ctx);
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const LatencyTestCase& tc, GraphCtx& ctx);
 
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
@@ -107,7 +107,7 @@ void perf_wait_sigstop() {
     }
 }
 
-void build_latency_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
     void* input_base = reinterpret_cast<void*>(args[0]);
@@ -155,7 +155,7 @@ void build_latency_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     printf("  Total tasks submitted: %d\n", num_chains * chain_length);
 }
 
-PTO2Runtime* setup_run(const LatencyTestCase& tc, LatencyRunCtx& ctx) {
+PTO2Runtime* setup_run(const LatencyTestCase& tc, GraphCtx& ctx) {
     (void)tc;
     ctx.config[0] = static_cast<int64_t>(AICPU_UT_LATENCY_NUM_CHAINS);
     ctx.config[1] = static_cast<int64_t>(AICPU_UT_LATENCY_CHAIN_LENGTH);
