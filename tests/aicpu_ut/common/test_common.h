@@ -44,28 +44,33 @@ int sim_drain_one_pass(PTO2Runtime* rt);
 int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000);
 void print_orch_profiling();
 
-// Scheduler profiling: use runtime struct and print (no duplicate definition).
+// Scheduler profiling
 #if PTO2_PROFILING
-#include "pto_scheduler.h"
-typedef PTO2SimSchedSummary SchedProfilingData;
+#include "common/platform_config.h"
+#include "pto_runtime2_types.h"
+struct SchedProfilingData {
+    int64_t tasks_dispatched[PTO2_NUM_WORKER_TYPES];
+    int64_t fanout_edges_total;
+    int32_t fanout_max_degree;
+    int64_t tasks_enqueued_by_completion;
+    int64_t fanin_edges_total;
+    int32_t fanin_max_degree;
+    int64_t rounds_total;
+    int64_t rounds_with_progress;
+    uint64_t dispatch_cycle;
+    uint64_t complete_cycle;
+};
 #endif
 
 void print_sched_profiling(PTO2Runtime* rt);
 
 #if PTO2_PROFILING
-#include "common/platform_config.h"
 extern SchedProfilingData g_sched_prof_data;
 #endif
 
 #if PTO2_PROFILING
 void orch_timing_begin();
 void orch_timing_end();
-/**
- * P1 (FAIL) / P2 (WARN) scheduler invariant checks.
- * Disabled when AICPU_UT_NO_CHECK=1.
- * Must be called after print_sched_profiling() so g_sched_prof_data is populated.
- */
-void run_sched_checks(PTO2Runtime* rt, int num_sched);
 #endif
 
 // Compatibility shim: old single-kernel pto2_submit_task → pto2_submit_mixed_task.

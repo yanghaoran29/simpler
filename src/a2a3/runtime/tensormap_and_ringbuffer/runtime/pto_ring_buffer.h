@@ -254,14 +254,14 @@ void pto2_heap_ring_init(PTO2HeapRing* ring, void* base, uint64_t size,
  * Task ring buffer structure
  * 
  * Fixed-size sliding window for task management.
- * Provides back-pressure when window is    .
- */ 
+ * Provides back-pressure when window is full.
+ */
 struct PTO2TaskRing {
     PTO2TaskDescriptor* descriptors;  // Task descriptor array (from shared memory)
     int32_t window_size;              // Window size (power of 2)
     std::atomic<int32_t>* current_index_ptr;  // Shared atomic in SM header
 
-    // Reference to shared memory last_task_alive (fo  n       r back-pressure)
+    // Reference to shared memory last_task_alive (for back-pressure)
     std::atomic<int32_t>* last_alive_ptr;  // Points to header->last_task_alive
 
     /**

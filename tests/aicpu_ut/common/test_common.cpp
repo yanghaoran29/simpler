@@ -154,21 +154,12 @@ int sim_run_all(PTO2Runtime* rt, int max_rounds) {
 }
 
 #if PTO2_PROFILING
-#if PTO2_ORCH_PROFILING
-// Used by perf tests (run_tests.sh): prints orchestration profiling table
-// (sync_tensormap, task_ring_alloc, param_copy, lookup+dep, heap_alloc, tensormap_ins, fanin+ready, finalize+SM, scope_end, avg/task).
-void print_orch_profiling() {
-    pto2_print_orch_profiling();
-}
-#else
-// When ORCH_PROFILING=OFF (e.g. --profiling 1), still print orchestrator run time from orch_timing_begin/end.
 void print_orch_profiling() {
     if (g_orch_end_time > g_orch_start_time) {
         uint64_t cycles = g_orch_end_time - g_orch_start_time;
         printf("  Orchestrator run time: %.3fus\n", cycles_to_us(cycles));
     }
 }
-#endif
 
 void print_sched_profiling(PTO2Runtime* rt) {
     // aicpu_sim_run_pto2 路径不更新 g_sched_prof_data，从上次 sim 运行结果回填以便 fanout/fanin 正确显示

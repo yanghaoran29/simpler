@@ -10,8 +10,6 @@ PTO Runtime2 uses a hierarchical profiling system with compile-time macros to co
 
 ```
 PTO2_PROFILING (base level, default=1)
-├── PTO2_PROFILING_BEGINEND (default=0, requires PTO2_PROFILING=1)
-│   When set: only first/last phase points are recorded (ORCH: submit start + submit end; Scheduler: loop begin + loop end per iteration).
 ├── PTO2_ORCH_PROFILING (orchestrator, default=0, requires PTO2_PROFILING=1)
 |   └──PTO2_TENSORMAP_PROFILING (tensormap, default=0, requires PTO2_ORCH_PROFILING=1)
 ├── PTO2_SCHED_PROFILING (scheduler, default=0, requires PTO2_PROFILING=1)
@@ -24,10 +22,6 @@ PTO2_PROFILING (base level, default=1)
 Each sub-level macro requires `PTO2_PROFILING=1`:
 
 ```cpp
-#if PTO2_PROFILING_BEGINEND && !PTO2_PROFILING
-#error "PTO2_PROFILING_BEGINEND requires PTO2_PROFILING=1"
-#endif
-
 #if PTO2_ORCH_PROFILING && !PTO2_PROFILING
 #error "PTO2_ORCH_PROFILING requires PTO2_PROFILING=1"
 #endif
