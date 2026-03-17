@@ -1012,13 +1012,12 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #endif
 #endif
 
-    // Local-first dispatch buffer (stack-allocated, one per scheduling thread).
+    // Local-first dispatch buffers (stack-allocated, one per CoreType per scheduling thread).
     // Initialized once; must be empty at the start of each iteration.
     constexpr int LOCAL_READY_CAP_PER_TYPE = 256;
-    constexpr int kLocalDispatchTypeNum = 2;  // [0]=AIC, [1]=AIV (aligned with mainline local-first dispatch)
     PTO2TaskSlotState* local_aic_ptrs[LOCAL_READY_CAP_PER_TYPE];
     PTO2TaskSlotState* local_aiv_ptrs[LOCAL_READY_CAP_PER_TYPE];
-    PTO2LocalReadyBuffer local_bufs[kLocalDispatchTypeNum];
+    PTO2LocalReadyBuffer local_bufs[PTO2_LOCAL_DISPATCH_TYPE_NUM];  // [0]=AIC, [1]=AIV
     local_bufs[0].reset(local_aic_ptrs, LOCAL_READY_CAP_PER_TYPE);
     local_bufs[1].reset(local_aiv_ptrs, LOCAL_READY_CAP_PER_TYPE);
     PTO2TaskSlotState* deferred_release_slot_states[256];
@@ -1227,9 +1226,9 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #endif
 
         // Local dispatch: drain both per-CoreType local_bufs, match to idle clusters by shape
-        PTO2TaskSlotState* overflow_ptrs[LOCAL_READY_CAP_PER_TYPE * kLocalDispatchTypeNum];
+        PTO2TaskSlotState* overflow_ptrs[LOCAL_READY_CAP_PER_TYPE * PTO2_LOCAL_DISPATCH_TYPE_NUM];
         int overflow_count = 0;
-        for (int bi = 0; bi < kLocalDispatchTypeNum; bi++) {
+        for (int bi = 0; bi < PTO2_LOCAL_DISPATCH_TYPE_NUM; bi++) {
             while (local_bufs[bi].count > 0) {
                 PTO2TaskSlotState* slot_state = local_bufs[bi].pop();
                 PTO2ResourceShape shape = pto2_active_mask_to_shape(slot_state->active_mask);
@@ -1243,7 +1242,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #if PTO2_SCHED_PROFILING
                     uint64_t t_setup_start = get_sys_cnt_aicpu();
 #endif
-                ResourceCount rc = shape_resource_count(shape);
+                    ResourceCount rc = shape_resource_count(shape);
 
                     if (rc.aic) {
                         dispatch_subtask_to_core(runtime, tracker, executing_task_ids,

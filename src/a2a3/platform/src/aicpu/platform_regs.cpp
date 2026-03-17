@@ -45,6 +45,7 @@ uint64_t read_reg(uint64_t reg_base_addr, RegId reg) {
 
     __sync_synchronize();
 
+    // Read the register value
     uint64_t value = static_cast<uint64_t>(*ptr);
 
     __sync_synchronize();
@@ -69,6 +70,7 @@ void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value) {
 
     __sync_synchronize();
 
+    // Write the register value
     *ptr = static_cast<uint32_t>(value);
 
     __sync_synchronize();
@@ -81,6 +83,8 @@ void platform_init_aicore_regs(uint64_t reg_addr) {
 #endif
     // Both a2a3 and a2a3sim require fast path control to be enabled before use
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_OPEN);
+
+    // Initialize task dispatch register to idle state
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, 0);
 }
 
@@ -89,7 +93,10 @@ void platform_deinit_aicore_regs(uint64_t reg_addr) {
     if (reg_addr == 0)
         return;  // sim core: no hardware deinit
 #endif
+    // Send exit signal to AICore
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+
+    // Close fast path control
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
 }
 

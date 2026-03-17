@@ -48,16 +48,17 @@ struct PTO2ReadyQueueSlot {
 /**
  * Thread-local ready buffer for local-first dispatch optimization.
  *
- * One buffer per scheduling thread (mixed worker types).
+ * Two buffers per scheduling thread, one per CoreType (AIC=0, AIV=1).
  * Initialized once before the scheduling loop; must be empty at
  * the start of each iteration (verified by always_assert).
  *
- * Phase 1 fills this buffer via on_task_complete().
- * Phase 2 drains it: matched tasks dispatch to idle cores,
- * unmatched tasks are stored in an overflow array for Phase 3.
- * Phase 3 pushes overflow to global readyQ and fills remaining
- * idle cores from global readyQ.
+ * Phase 1 fills per-CoreType buffers via on_task_complete().
+ * dispatch_ready_tasks_to_idle_cores drains them: local-first via
+ * get_ready_task, then remaining tasks pushed to global readyQ.
  */
+// Number of CoreType values eligible for local dispatch (AIC=0, AIV=1)
+static constexpr int PTO2_LOCAL_DISPATCH_TYPE_NUM = 2;
+
 struct PTO2LocalReadyBuffer {
     PTO2TaskSlotState** slot_states = nullptr;
     int count = 0;
@@ -299,10 +300,6 @@ struct PTO2SchedulerState {
     // Ready queues (one per resource shape)
     PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
 
-    // Dependency list pool reference
-    PTO2DepListPool* dep_pool;
-
-
     // Statistics
 #if PTO2_SCHED_PROFILING
     std::atomic<int64_t> tasks_completed;
@@ -450,8 +447,7 @@ struct PTO2SchedulerState {
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
 
-        bool ready = (new_refcount == slot_state.fanin_count);
-        if (ready) {
+        if (new_refcount == slot_state.fanin_count) {
             PTO2TaskState expected = PTO2_TASK_PENDING;
             if (slot_state.task_state.compare_exchange_strong(
                     expected, PTO2_TASK_READY, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -555,6 +551,7 @@ struct PTO2SchedulerState {
 #if PTO2_SCHED_PROFILING
         int thread_idx,
 #endif
+
         PTO2LocalReadyBuffer* local_bufs = nullptr) {
 #if PTO2_SCHED_PROFILING
         PTO2CompletionStats stats = {0, 0, 0, true};
@@ -583,7 +580,6 @@ struct PTO2SchedulerState {
         PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
 #endif
 
-        // 完成任务时同时调用 release_fanin：对 fanout 中每个 consumer 调用 release_fanin_and_check_ready
         // Fanout: notify consumers
 #if PTO2_SCHED_PROFILING
         uint64_t fanout_atomics = 0, push_wait = 0;
@@ -704,7 +700,6 @@ struct PTO2SchedProfilingData {
  * Returns accumulated profiling data and resets counters.
  */
 PTO2SchedProfilingData pto2_scheduler_get_profiling(int thread_idx);
-
 #endif
 
 #endif // PTO_SCHEDULER_H

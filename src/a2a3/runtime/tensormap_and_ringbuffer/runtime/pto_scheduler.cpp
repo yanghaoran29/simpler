@@ -198,4 +198,3 @@ void pto2_scheduler_print_queues(PTO2SchedulerState* sched) {
 
     LOG_INFO("====================");
 }
-
