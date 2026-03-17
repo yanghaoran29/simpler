@@ -99,13 +99,8 @@ void platform_init_aicore_regs(uint64_t reg_addr) {
         return;  // sim core: no hardware init
 #endif
     // Both a2a3 and a2a3sim require fast path control to be enabled before use
-#if defined(PTO2_SIM_AICORE_UT)
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_OPEN);
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, 0);
-#else
-    write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_OPEN);
-    write_reg(reg_addr, RegId::DATA_MAIN_BASE, 0);
-#endif
 }
 
 void platform_deinit_aicore_regs(uint64_t reg_addr) {
@@ -113,13 +108,8 @@ void platform_deinit_aicore_regs(uint64_t reg_addr) {
     if (reg_addr == 0)
         return;  // sim core: no hardware deinit
 #endif
-#if defined(PTO2_SIM_AICORE_UT)
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
-#else
-    write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
-    write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
-#endif
 }
 
 uint32_t platform_get_physical_cores_count() {
