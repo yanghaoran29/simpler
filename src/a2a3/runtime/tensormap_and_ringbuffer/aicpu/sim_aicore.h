@@ -138,6 +138,13 @@ void pto2_sim_accumulate_cycles(uint64_t complete_cycle, uint64_t dispatch_cycle
 void pto2_sim_get_accumulated_cycles(uint64_t* out_complete, uint64_t* out_dispatch);
 #endif  // PTO2_SCHED_PROFILING
 
+#if PTO2_PROFILING
+/** Called by executor on each subtask dispatch to record worker-type dispatch count (for P1 check). */
+void pto2_sim_record_dispatch(int wt_idx);
+/** Retrieve per-worker-type dispatch counts accumulated across all scheduler threads. */
+void pto2_sim_get_dispatch_counts(int64_t* out, int n);
+#endif  // PTO2_PROFILING
+
 #else  // !defined(PTO2_SIM_AICORE_UT)
 #ifdef __cplusplus
 /**

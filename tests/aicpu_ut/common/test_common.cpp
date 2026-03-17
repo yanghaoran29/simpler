@@ -261,6 +261,9 @@ void run_sched_checks(PTO2Runtime* rt, int num_sched) {
             submitted += rt->sm_handle->header->rings[ri].fc.current_task_index.load(std::memory_order_acquire);
 
     // P1: total dispatched == submitted
+#if defined(PTO2_SIM_AICORE_UT)
+    pto2_sim_get_dispatch_counts(g_sched_prof_data.tasks_dispatched, PTO2_NUM_WORKER_TYPES);
+#endif
     int64_t total_dispatched = 0;
     for (int wt = 0; wt < PTO2_NUM_WORKER_TYPES; wt++)
         total_dispatched += g_sched_prof_data.tasks_dispatched[wt];

@@ -39,12 +39,6 @@
 
 #if defined(PTO2_SIM_AICORE_UT)
 #include "sim_aicore.h"
-#include "cpu_affinity.h"
-static const int s_sched_cpus[] = {
-    SCHED_CPU0, SCHED_CPU1, SCHED_CPU2, SCHED_CPU3,
-    SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
-};
-static int s_actual_sched_cpu[PLATFORM_MAX_AICPU_THREADS];
 #endif
 
 #if PTO2_PROFILING
@@ -396,7 +390,7 @@ struct AicpuExecutor {
                     uint32_t count = perf_buf->count;
                     if (count > 0) {
                         PerfRecord* record = &perf_buf->records[count - 1];
-                        if (record->task_id == static_cast<uint32_t>(task_id)) {
+                        if (record->task_id == static_cast<uint32_t>(expected_reg_task_id)) {
                             // Fill metadata that AICore doesn't know
                             int32_t perf_slot_idx = static_cast<int32_t>(executing_subslot_by_core_[core_id]);
                             record->func_id = slot_state.task->kernel_id[perf_slot_idx];
@@ -429,7 +423,7 @@ struct AicpuExecutor {
                     thread_idx,
                     CT == CoreType::AIC ? "AIC" : "AIV",
                     core_id,
-                    task_id,
+                    expected_reg_task_id,
                     mixed_complete ? 1 : 0);
                 cur_thread_completed++;
                 if (mixed_complete) {
@@ -558,7 +552,10 @@ struct AicpuExecutor {
             SimCoreGuard guard(core_id, reg_addr == 0);
             write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(pto2_task_id_local(task.mixed_task_id) + 1));
         }
-        int32_t reg_task_id = static_cast<int32_t>(pto2_task_id_local(task.mixed_task_id) + 1);
+        int32_t reg_task_id = static_cast<int32_t>(pto2_task_id_local(task.mixed_task_id));
+#if PTO2_PROFILING
+        pto2_sim_record_dispatch(static_cast<int32_t>(core_type));
+#endif
 #else
         // Per-core monotonic counter for register protocol uniqueness.
         dispatch_seq_by_core_[core_id]++;

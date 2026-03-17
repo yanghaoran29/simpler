@@ -36,10 +36,20 @@ static std::atomic<uint64_t> s_sim_complete_cycles{0};
 static std::atomic<uint64_t> s_sim_dispatch_cycles{0};
 #endif
 
+#if PTO2_PROFILING
+#include <atomic>
+#include "pto_runtime2_types.h"
+static std::atomic<int64_t> s_sim_tasks_dispatched[PTO2_NUM_WORKER_TYPES] = {};
+#endif
+
 extern "C" void pto2_sim_reset_run_prof(void) {
 #if PTO2_SCHED_PROFILING
     s_sim_complete_cycles.store(0, std::memory_order_relaxed);
     s_sim_dispatch_cycles.store(0, std::memory_order_relaxed);
+#endif
+#if PTO2_PROFILING
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++)
+        s_sim_tasks_dispatched[i].store(0, std::memory_order_relaxed);
 #endif
 }
 
@@ -180,6 +190,18 @@ void pto2_sim_accumulate_cycles(uint64_t complete_cycle, uint64_t dispatch_cycle
 void pto2_sim_get_accumulated_cycles(uint64_t* out_complete, uint64_t* out_dispatch) {
     if (out_complete) *out_complete = s_sim_complete_cycles.load(std::memory_order_relaxed);
     if (out_dispatch) *out_dispatch = s_sim_dispatch_cycles.load(std::memory_order_relaxed);
+}
+#endif
+
+#if PTO2_PROFILING
+void pto2_sim_record_dispatch(int wt_idx) {
+    if (wt_idx >= 0 && wt_idx < PTO2_NUM_WORKER_TYPES)
+        s_sim_tasks_dispatched[wt_idx].fetch_add(1, std::memory_order_relaxed);
+}
+
+void pto2_sim_get_dispatch_counts(int64_t* out, int n) {
+    for (int i = 0; i < n && i < PTO2_NUM_WORKER_TYPES; i++)
+        out[i] = s_sim_tasks_dispatched[i].load(std::memory_order_relaxed);
 }
 #endif
 
