@@ -70,7 +70,8 @@ uint64_t g_orch_scope_end_atomic_count = 0;
     do {                                                                              \
         _t1 = get_sys_cnt_aicpu();                                                    \
         acc += (_t1 - _t0);                                                           \
-        perf_aicpu_record_orch_phase((phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
+        if (!PTO2_PROFILING_BEGINEND || (phase_id) == AicpuPhaseId::ORCH_FANIN)       \
+            perf_aicpu_record_orch_phase(PTO2_PROFILING_BEGINEND ? AicpuPhaseId::ORCH_END : (phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
         _t0 = _t1;                                                                    \
     } while (0)
 #elif PTO2_PROFILING
@@ -89,7 +90,8 @@ static uint32_t g_orch_submit_idx = 0;
     do {                                                                              \
         if (_prof_active) {                                                           \
             _t1 = get_sys_cnt_aicpu();                                                \
-            perf_aicpu_record_orch_phase((phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
+            if (!PTO2_PROFILING_BEGINEND || (phase_id) == AicpuPhaseId::ORCH_FANIN)   \
+                perf_aicpu_record_orch_phase(PTO2_PROFILING_BEGINEND ? AicpuPhaseId::ORCH_END : (phase_id), _t0, _t1, g_orch_submit_idx, (tid)); \
             _t0 = _t1;                                                                \
         }                                                                             \
     } while (0)
@@ -304,6 +306,14 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 void pto2_submit_mixed_task(
     PTO2OrchestratorState* orch, const MixedKernels& mixed_kernels, PTOParam* params, int32_t num_params) {
     CYCLE_COUNT_START();
+#if PTO2_PROFILING_BEGINEND
+#if PTO2_ORCH_PROFILING
+    perf_aicpu_record_orch_phase(AicpuPhaseId::ORCH_BEGIN, _t0, _t0, g_orch_submit_idx, -1);
+#else
+    if (orch->enable_profiling)
+        perf_aicpu_record_orch_phase(AicpuPhaseId::ORCH_BEGIN, _t0, _t0, g_orch_submit_idx, -1);
+#endif
+#endif
 
     // === Validate submit inputs ===
     uint8_t active_mask = pto2_mixed_kernels_to_active_mask(mixed_kernels);
