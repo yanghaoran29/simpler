@@ -21,6 +21,9 @@
 
 #if defined(PTO2_SIM_AICORE_UT)
 
+/** When reg_base_addr is in [0, PTO2_SIM_REG_ADDR_MAX), it denotes sim core index (not MMIO address). */
+#define PTO2_SIM_REG_ADDR_MAX  128
+
 /** Global COND register state per simulated core (MAKE_FIN_VALUE(task_id) or AICORE_IDLE_VALUE). */
 extern uint32_t s_sim_core_cond_value[];
 

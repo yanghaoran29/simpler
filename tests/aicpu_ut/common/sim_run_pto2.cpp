@@ -8,29 +8,37 @@
 
 #if defined(PTO2_SIM_AICORE_UT)
 
-#include "sim_aicore.h"
-#include "cpu_affinity.h"
-#include "runtime.h"
-#include "pto_runtime2.h"
-#include "pto_runtime2_types.h"
-#include "pto_shared_memory.h"
-#include "common/platform_config.h"
 #include <atomic>
 #include <cstring>
 #include <functional>
 #include <thread>
 #include <vector>
 
+#include "common/platform_config.h"
+#include "cpu_affinity.h"
+#include "pto_runtime2.h"
+#include "pto_runtime2_types.h"
+#include "pto_shared_memory.h"
+#include "runtime.h"
+#include "sim_aicore.h"
+
 // Scheduler CPU list (same as formerly in aicpu_executor.cpp; SCHED_CPU* from CMake)
 static const int s_sched_cpus[] = {
-    SCHED_CPU0, SCHED_CPU1, SCHED_CPU2, SCHED_CPU3,
-    SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
+    SCHED_CPU0,
+    SCHED_CPU1,
+    SCHED_CPU2,
+    SCHED_CPU3,
+    SCHED_CPU4,
+    SCHED_CPU5,
+    SCHED_CPU6,
+    SCHED_CPU7,
 };
 static int s_actual_sched_cpu[PLATFORM_MAX_AICPU_THREADS];
 
 #if PTO2_SCHED_PROFILING
-#include "pto_scheduler.h"
 #include <atomic>
+
+#include "pto_scheduler.h"
 static PTO2SchedProfilingData s_sched_prof_snapshot[PLATFORM_MAX_AICPU_THREADS] = {};
 static std::atomic<uint64_t> s_sim_complete_cycles{0};
 static std::atomic<uint64_t> s_sim_dispatch_cycles{0};
@@ -38,6 +46,7 @@ static std::atomic<uint64_t> s_sim_dispatch_cycles{0};
 
 #if PTO2_PROFILING
 #include <atomic>
+
 #include "pto_runtime2_types.h"
 static std::atomic<int64_t> s_sim_tasks_dispatched[PTO2_NUM_WORKER_TYPES] = {};
 #endif
@@ -48,8 +57,7 @@ extern "C" void pto2_sim_reset_run_prof(void) {
     s_sim_dispatch_cycles.store(0, std::memory_order_relaxed);
 #endif
 #if PTO2_PROFILING
-    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++)
-        s_sim_tasks_dispatched[i].store(0, std::memory_order_relaxed);
+    for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) s_sim_tasks_dispatched[i].store(0, std::memory_order_relaxed);
 #endif
 }
 
@@ -82,14 +90,12 @@ int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
     }
     aicpu_executor_sim_setup_after_host_orch(total);
 
-    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++)
-        s_actual_sched_cpu[i] = -1;
+    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) s_actual_sched_cpu[i] = -1;
 
     std::vector<std::thread> threads;
     for (int i = 0; i < num_sched_threads; i++) {
         threads.emplace_back([&runtime, i]() {
-            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0])))
-                bind_to_cpu(s_sched_cpus[i]);
+            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0]))) bind_to_cpu(s_sched_cpus[i]);
             if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
                 int cur = current_cpu();
                 s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;
@@ -105,11 +111,13 @@ int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
 
 }  // extern "C"
 
-int aicpu_sim_run_pto2_concurrent(PTO2Runtime* pto2_rt, int num_sched_threads,
-                                  std::function<void(PTO2Runtime*)> orch_fn) {
-    if (!pto2_rt || !pto2_rt->sm_handle) return -1;
+int aicpu_sim_run_pto2_concurrent(
+    PTO2Runtime* pto2_rt, int num_sched_threads, std::function<void(PTO2Runtime*)> orch_fn) {
+    if (!pto2_rt || !pto2_rt->sm_handle) 
+        return -1;
     void* sm_base = pto2_rt->sm_handle->sm_base;
-    if (!sm_base) return -1;
+    if (!sm_base) 
+        return -1;
 
     pto2_sim_reset_run_prof();
 
@@ -129,14 +137,12 @@ int aicpu_sim_run_pto2_concurrent(PTO2Runtime* pto2_rt, int num_sched_threads,
     aicpu_sim_set_rt(pto2_rt);
     // Do NOT call setup_after_host_orch here: orch thread will call it after build_graph + pto2_orchestrator_done
 
-    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++)
-        s_actual_sched_cpu[i] = -1;
+    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) s_actual_sched_cpu[i] = -1;
 
     std::vector<std::thread> sched_threads;
     for (int i = 0; i < num_sched_threads; i++) {
         sched_threads.emplace_back([&runtime, i]() {
-            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0])))
-                bind_to_cpu(s_sched_cpus[i]);
+            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0]))) bind_to_cpu(s_sched_cpus[i]);
             if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
                 int cur = current_cpu();
                 s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;

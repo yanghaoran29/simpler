@@ -549,7 +549,6 @@ struct AicpuExecutor {
 #if defined(PTO2_SIM_AICORE_UT)
         {
             uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-            SimCoreGuard guard(core_id, reg_addr == 0);
             write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(pto2_task_id_local(task.mixed_task_id) + 1));
         }
         int32_t reg_task_id = static_cast<int32_t>(pto2_task_id_local(task.mixed_task_id));
@@ -613,7 +612,7 @@ int32_t AicpuExecutor::handshake_all_cores(Runtime* runtime) {
             }
         }
         for (int32_t i = 0; i < cores_total_num_; i++)
-            core_id_to_reg_addr_[i] = 0;
+            core_id_to_reg_addr_[i] = static_cast<uint64_t>(i);
         return 0;
     }
 #endif
@@ -1539,9 +1538,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                         hw_kernel = executing_slot_state_by_core_[cid]->task->kernel_id[diag_slot];
                     }
                     uint64_t reg_addr = core_id_to_reg_addr_[cid];
-#if defined(PTO2_SIM_AICORE_UT)
-                    SimCoreGuard guard(cid, reg_addr == 0);
-#endif
                     uint64_t cond_reg = read_reg(reg_addr, RegId::COND);
                     DEV_ALWAYS("    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d",
                                cid, (unsigned)cond_reg,
@@ -1558,9 +1554,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                         hw_kernel = executing_slot_state_by_core_[cid]->task->kernel_id[diag_slot];
                     }
                     uint64_t reg_addr = core_id_to_reg_addr_[cid];
-#if defined(PTO2_SIM_AICORE_UT)
-                    SimCoreGuard guard(cid, reg_addr == 0);
-#endif
                     uint64_t cond_reg = read_reg(reg_addr, RegId::COND);
                     DEV_ALWAYS("    core=%d cond=0x%x(state=%d,id=%d) exec_id=%d kernel=%d",
                                cid, (unsigned)cond_reg,
@@ -2389,9 +2382,6 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int32_t thread_idx,
         const char* core_type_str = core_type_to_string(h->core_type);
 
         uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-#if defined(PTO2_SIM_AICORE_UT)
-        SimCoreGuard guard(core_id, runtime != nullptr && reg_addr == 0);
-#endif
         uint64_t reg_val = read_reg(reg_addr, RegId::COND);
         int32_t reg_task_id = EXTRACT_TASK_ID(reg_val);
         int32_t reg_state = EXTRACT_TASK_STATE(reg_val);
