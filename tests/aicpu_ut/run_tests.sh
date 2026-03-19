@@ -11,6 +11,7 @@
 #   ./run_tests.sh --test <name> --idx <n>         # run one specific parameter set
 #   ./run_tests.sh --test <name> --idx <n> --sched-threads 4   # 4 scheduler threads (perf tests)
 #   ./run_tests.sh --test test_throughput --layer-num 10 --dependency 6 --overlap 5 --layer0-task-num 320  # 分层 DAG，默认 n=10 layer0=320 D=6 O=5；运行全部三个样例
+#   ./run_tests.sh --test test_throughput --dependency 4 --overlap 3 --fix-tail  # D-O=1 时每层任务数固定为 layer0_size
 #   ./run_tests.sh --test test_throughput --idx 0       # 样例 0：所有任务均为 AIV
 #   ./run_tests.sh --test test_throughput --idx 1       # 样例 1：奇数编号任务为 AIC，偶数为 AIV
 #   ./run_tests.sh --test test_throughput --idx 2       # 样例 2：每层前半为 AIC，后半为 AIV
@@ -22,9 +23,10 @@
 #   ./run_tests.sh --no-early-return               # drain before break/return so completed==consumed, fanin==fanout
 #   ./run_tests.sh --build-only                    # build without running
 #   ./run_tests.sh --opt-level 0                   # compile with -O0 (debug, no optimization)
+#   AICPU_UT_PROFILE_CALLSTACK=ON ./run_tests.sh   # keep sibling-call opts off for better perf stacks
 #   ./run_tests.sh --profiling 0                    # 不开启 profiling（默认）
-#   ./run_tests.sh --profiling 1                    # 仅开启 PTO2_PROFILING_BEGINEND（首尾点）
-#   ./run_tests.sh --profiling 2                    # 当前完整 profiling（Sched+Orch 明细）；stdout 经 format_profiling_output 整理
+#   ./run_tests.sh --profiling 1                    # 仅开启 PTO2_PROFILING（基础 profiling，不含 Sched/Orch 明细）
+#   ./run_tests.sh --profiling 2                    # 完整 profiling（Sched+Orch 明细）；stdout 经 format_profiling_output 整理
 #   ./run_tests.sh --profiling 2 --swimlane        # 完整 profiling + 将 swimlane JSON 转为 Perfetto + Mermaid
 #   ./run_tests.sh --no-check                        # skip P1/P2 invariant checks (AICPU_UT_NO_CHECK=1)
 #   ./run_tests.sh --list                          # list all available tests
@@ -96,8 +98,8 @@ PLATFORM_MAX_AICPU_THREADS=${PLATFORM_MAX_AICPU_THREADS:-4}
 
 # Profiling: --profiling <0|1|2>
 #   0 = 不开启
-#   1 = 仅开启 PTO2_PROFILING_BEGINEND（首尾点）
-#   2 = 当前完整 profiling（PTO2_SCHED_PROFILING + PTO2_ORCH_PROFILING，非 BEGINEND）
+#   1 = 仅开启 PTO2_PROFILING（基础 profiling，不含 Sched/Orch 明细）
+#   2 = 完整 profiling（PTO2_SCHED_PROFILING + PTO2_ORCH_PROFILING + PTO2_TENSORMAP_PROFILING）
 # 未传 --profiling 时默认 0。传 --profiling 但未写数字时默认 2（兼容旧用法）。
 PROFILING_MODE=${PROFILING_MODE:-0}
 
@@ -110,6 +112,7 @@ DEFAULT_PERF_TESTS=(test_batch_paged_attention test_alt test_bgemm test_pau test
 BUILD_ONLY=false
 SKIP_FINAL_ANALYSIS=false
 OPT_LEVEL=${OPT_LEVEL:-3}
+AICPU_UT_PROFILE_CALLSTACK=${AICPU_UT_PROFILE_CALLSTACK:-ON}
 FILTER_TEST=""
 FILTER_IDX=""
 THREAD_MODE="concurrent"        # set by --orch (orch-only) or --sched (sched profiling only); default: both threads
@@ -118,6 +121,7 @@ AICPU_UT_THROUGHPUT_LAYERS=""       # set by --layer-num n (层数, default in c
 AICPU_UT_THROUGHPUT_LAYER0_SIZE=""  # set by --layer0-task-num W (第一层任务数, default in case: 320)
 AICPU_UT_THROUGHPUT_DEPS=""         # set by --dependency D (依赖数, default: 6)
 AICPU_UT_THROUGHPUT_OVERLAP=""     # set by --overlap O (重叠数, default: 5)
+AICPU_UT_THROUGHPUT_FIX_TAIL=""   # set by --fix-tail: 仅当 D-O=1 时生效，每层任务数固定为 layer0_size
 AICPU_UT_LATENCY_NUM_CHAINS=""       # set by --chain-num N (override num_chains for test_latency, max 128)
 AICPU_UT_LATENCY_CHAIN_LENGTH=""     # set by --chain-length L (override chain_length for test_latency, max 256)
 AICPU_UT_NO_EARLY_RETURN=""     # set by --no-early-return: drain before break/return so completed==consumed
@@ -180,6 +184,8 @@ while [[ $# -gt 0 ]]; do
                 echo "--overlap requires a numeric argument (e.g. 2, overlap count)." >&2; exit 1
             fi
             AICPU_UT_THROUGHPUT_OVERLAP="$2"; shift 2 ;;
+        --fix-tail)
+            AICPU_UT_THROUGHPUT_FIX_TAIL=1; shift ;;
         --throughput-nelems)
             echo "--throughput-nelems is no longer supported; tensor_nelems is fixed to 1." >&2; exit 1 ;;
         --chain-num)
@@ -247,11 +253,11 @@ if [ -n "$FILTER_TEST" ]; then
     fi
 fi
 
-# 根据 PROFILING_MODE 设置 PTO2_*：0=不开启，1=仅 BEGINEND（不采集不输出全量表），2=完整 profiling
+# 根据 PROFILING_MODE 设置 PTO2_*：0=不开启，1=仅 PTO2_PROFILING（基础），2=完整 profiling
 case "$PROFILING_MODE" in
-    0) PTO2_PROFILING=OFF; PTO2_SCHED_PROFILING=OFF; PTO2_ORCH_PROFILING=OFF; PTO2_PROFILING_BEGINEND=OFF ;;
-    1) PTO2_PROFILING=ON;  PTO2_SCHED_PROFILING=OFF; PTO2_ORCH_PROFILING=OFF; PTO2_PROFILING_BEGINEND=ON  ;;
-    2) PTO2_PROFILING=ON;  PTO2_SCHED_PROFILING=ON; PTO2_ORCH_PROFILING=ON;  PTO2_PROFILING_BEGINEND=OFF ;;
+    0) PTO2_PROFILING=OFF; PTO2_SCHED_PROFILING=OFF; PTO2_ORCH_PROFILING=OFF; PTO2_TENSORMAP_PROFILING=OFF ;;
+    1) PTO2_PROFILING=ON;  PTO2_SCHED_PROFILING=OFF; PTO2_ORCH_PROFILING=OFF; PTO2_TENSORMAP_PROFILING=OFF ;;
+    2) PTO2_PROFILING=ON;  PTO2_SCHED_PROFILING=ON;  PTO2_ORCH_PROFILING=ON;  PTO2_TENSORMAP_PROFILING=ON  ;;
     *) echo "Invalid PROFILING_MODE: $PROFILING_MODE (must be 0, 1, or 2)." >&2; exit 1 ;;
 esac
 if [ "$PTO2_PROFILING" = "ON" ]; then
@@ -260,8 +266,9 @@ else
     AICPU_UT_QUIET=1   # profiling off: only output pass/fail summary
 fi
 
-# When profiling is on, re-exec so stdout/stderr go through format_profiling_output.py (unified format)
-if [ "$PTO2_PROFILING" = "ON" ] && [ -z "${AICPU_UT_FORMATTED:-}" ]; then
+# profiling 1: re-exec through format_profiling_output.py for unified formatting.
+# profiling 2: raw output, no reformatting.
+if [ "$PROFILING_MODE" = "1" ] && [ -z "${AICPU_UT_FORMATTED:-}" ]; then
     export AICPU_UT_FORMATTED=1
     exec bash "$0" "${ORIG_ARGS[@]}" 2>&1 | python3 "$SCRIPT_DIR/tools/format_profiling_output.py"
     exit 0
@@ -296,15 +303,19 @@ run_binary() {
     if [ -n "${SIM_LOG:-}" ]; then
         # Capture to temp file then cat to terminal and append to SIM_LOG, so profiling output is always visible
         # (piping directly to tee can leave terminal empty due to buffering in some environments)
-        local tmp_log
+        local tmp_log sanitized timestamp log_file
         tmp_log=$(mktemp)
+        if [ -n "${LOG_DIR:-}" ]; then
+            sanitized=$(echo "$label" | sed 's/\[/ /g; s/\]/ /g; s/(perf)//; s/(func)//; s/  */_/g; s/^_//; s/_$//')
+            timestamp=$(date +%Y%m%d_%H%M%S)
+            if [ -n "${AICPU_UT_PHASE_LOG:-}" ]; then
+                export AICPU_UT_PHASE_LOG="${LOG_DIR}/${sanitized}_phase_${timestamp}.log"
+            fi
+        fi
         if timeout "$TIMEOUT" "$bin" "$@" >"$tmp_log" 2>&1; then
             cat "$tmp_log"
             cat "$tmp_log" >> "$SIM_LOG"
             if [ -n "${LOG_DIR:-}" ]; then
-                local sanitized timestamp log_file
-                sanitized=$(echo "$label" | sed 's/\[/ /g; s/\]/ /g; s/(perf)//; s/(func)//; s/  */_/g; s/^_//; s/_$//')
-                timestamp=$(date +%Y%m%d_%H%M%S)
                 log_file="${LOG_DIR}/${sanitized}_${timestamp}.log"
                 cp "$tmp_log" "$log_file"
                 quiet_echo "  Log: $log_file"
@@ -316,9 +327,6 @@ run_binary() {
             cat "$tmp_log"
             cat "$tmp_log" >> "$SIM_LOG"
             if [ -n "${LOG_DIR:-}" ]; then
-                local sanitized timestamp log_file
-                sanitized=$(echo "$label" | sed 's/\[/ /g; s/\]/ /g; s/(perf)//; s/(func)//; s/  */_/g; s/^_//; s/_$//')
-                timestamp=$(date +%Y%m%d_%H%M%S)
                 log_file="${LOG_DIR}/${sanitized}_${timestamp}.log"
                 cp "$tmp_log" "$log_file"
                 quiet_echo "  Log: $log_file"
@@ -438,8 +446,13 @@ run_idx_analysis() {
     [ -s "$AICPU_UT_PHASE_LOG" ] || return 0
     local sched_script="${PROJECT_ROOT}/tools/sched_overhead_analysis.py"
     [ -f "$sched_script" ] || return 0
+    # profiling 1: timing lines were suppressed by format_profiling_output.py pipe; re-emit them here.
+    # profiling 2: dev_log_always already outputs to stdout directly; no need to re-emit.
+    if [ "$PROFILING_MODE" = "1" ]; then
+        grep -E "aicpu_orchestration_entry returned|Scheduler summary:" "$AICPU_UT_PHASE_LOG" 2>/dev/null || true
+    fi
     (cd "$PROJECT_ROOT" && python3 tools/sched_overhead_analysis.py --sim-log "$AICPU_UT_PHASE_LOG" --no-sources 2>/dev/null) | awk 'NF{while(n--)print ""; n=0; print; next} {n++}' || true
-    : > "$AICPU_UT_PHASE_LOG"
+    # (phase log kept per-test, not cleared)
     SKIP_FINAL_ANALYSIS=true
 }
 
@@ -476,7 +489,8 @@ quiet_echo "============================================================"
 quiet_echo "  Build dir : $BUILD_DIR"
 quiet_echo "  Source dir: $SCRIPT_DIR"
 quiet_echo "  Opt level : -O${OPT_LEVEL}"
-quiet_echo "  Profiling : mode=$PROFILING_MODE (0=off 1=BEGINEND 2=full) PTO2_PROFILING=$PTO2_PROFILING PTO2_PROFILING_BEGINEND=$PTO2_PROFILING_BEGINEND"
+quiet_echo "  Callstack : AICPU_UT_PROFILE_CALLSTACK=$AICPU_UT_PROFILE_CALLSTACK"
+quiet_echo "  Profiling : mode=$PROFILING_MODE (0=off 1=base 2=full) PTO2_PROFILING=$PTO2_PROFILING"
 
 mkdir -p "$BUILD_DIR"
 
@@ -495,16 +509,18 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
     -DPLATFORM_AIV_CORES_PER_BLOCKDIM="$PLATFORM_AIV_CORES_PER_BLOCKDIM" \
     -DPLATFORM_MAX_AICPU_THREADS="$PLATFORM_MAX_AICPU_THREADS" \
     -DOPT_LEVEL="$OPT_LEVEL" \
+    -DAICPU_UT_PROFILE_CALLSTACK="$AICPU_UT_PROFILE_CALLSTACK" \
     -DPTO2_PROFILING="$PTO2_PROFILING" \
     -DPTO2_SCHED_PROFILING="$PTO2_SCHED_PROFILING" \
     -DPTO2_ORCH_PROFILING="$PTO2_ORCH_PROFILING" \
-    -DPTO2_PROFILING_BEGINEND="$PTO2_PROFILING_BEGINEND" \
+    -DPTO2_TENSORMAP_PROFILING="$PTO2_TENSORMAP_PROFILING" \
     -DAICPU_UT_LATENCY_NUM_CHAINS="${AICPU_UT_LATENCY_NUM_CHAINS:-}" \
     -DAICPU_UT_LATENCY_CHAIN_LENGTH="${AICPU_UT_LATENCY_CHAIN_LENGTH:-}" \
     $( [ -n "${AICPU_UT_THROUGHPUT_LAYERS:-}" ]       && echo "-DAICPU_UT_THROUGHPUT_LAYERS=$AICPU_UT_THROUGHPUT_LAYERS" ) \
     $( [ -n "${AICPU_UT_THROUGHPUT_LAYER0_SIZE:-}" ]  && echo "-DAICPU_UT_THROUGHPUT_LAYER0_SIZE=$AICPU_UT_THROUGHPUT_LAYER0_SIZE" ) \
     $( [ -n "${AICPU_UT_THROUGHPUT_DEPS:-}" ]         && echo "-DAICPU_UT_THROUGHPUT_DEPS=$AICPU_UT_THROUGHPUT_DEPS" ) \
     $( [ -n "${AICPU_UT_THROUGHPUT_OVERLAP:-}" ]      && echo "-DAICPU_UT_THROUGHPUT_OVERLAP=$AICPU_UT_THROUGHPUT_OVERLAP" ) \
+    $( [ -n "${AICPU_UT_THROUGHPUT_FIX_TAIL:-}" ]     && echo "-DAICPU_UT_THROUGHPUT_FIX_TAIL=$AICPU_UT_THROUGHPUT_FIX_TAIL" ) \
     $( [ -n "${AICPU_UT_NUM_SCHED_THREADS:-}" ]       && echo "-DAICPU_UT_NUM_SCHED_THREADS=$AICPU_UT_NUM_SCHED_THREADS" )
 
 # ─── Step 2: Build ────────────────────────────────────────────────────────────
@@ -570,6 +586,9 @@ fi
 if [ -n "${AICPU_UT_THROUGHPUT_OVERLAP:-}" ]; then
     export AICPU_UT_THROUGHPUT_OVERLAP
 fi
+if [ -n "${AICPU_UT_THROUGHPUT_FIX_TAIL:-}" ]; then
+    export AICPU_UT_THROUGHPUT_FIX_TAIL
+fi
 if [ -n "${AICPU_UT_LATENCY_NUM_CHAINS:-}" ]; then
     export AICPU_UT_LATENCY_NUM_CHAINS
 fi
@@ -631,8 +650,14 @@ if $RUN_PERF && [ -z "${AICPU_UT_QUIET:-}" ] && ! $SKIP_FINAL_ANALYSIS; then
         SIM_LOG_ARGS=()
         if [ -n "${AICPU_UT_PHASE_LOG:-}" ] && [ -s "$AICPU_UT_PHASE_LOG" ]; then
             SIM_LOG_ARGS=("--sim-log" "$AICPU_UT_PHASE_LOG" "--no-sources")
+            if [ "$PROFILING_MODE" = "1" ]; then
+                grep -E "aicpu_orchestration_entry returned|Scheduler summary:" "$AICPU_UT_PHASE_LOG" 2>/dev/null || true
+            fi
         elif [ -n "${SIM_LOG:-}" ] && [ -s "$SIM_LOG" ]; then
             SIM_LOG_ARGS=("--sim-log" "$SIM_LOG" "--no-sources")
+            if [ "$PROFILING_MODE" = "1" ]; then
+                grep -E "aicpu_orchestration_entry returned|Scheduler summary:" "$SIM_LOG" 2>/dev/null || true
+            fi
         fi
         if (cd "$PROJECT_ROOT" && python3 tools/sched_overhead_analysis.py "${SIM_LOG_ARGS[@]}" ${AICPU_UT_DEVICE_ID:+-d "$AICPU_UT_DEVICE_ID"} 2>/dev/null); then
             :

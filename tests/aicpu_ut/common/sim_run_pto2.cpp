@@ -47,8 +47,14 @@ static std::atomic<uint64_t> s_sim_dispatch_cycles{0};
 #if PTO2_PROFILING
 #include <atomic>
 
+#include "aicpu/device_log.h"
+#include "aicpu/device_time.h"
 #include "pto_runtime2_types.h"
 static std::atomic<int64_t> s_sim_tasks_dispatched[PTO2_NUM_WORKER_TYPES] = {};
+#endif
+
+#if PTO2_ORCH_PROFILING
+#include "pto_orchestrator.h"
 #endif
 
 extern "C" void pto2_sim_reset_run_prof(void) {
@@ -141,8 +147,49 @@ int aicpu_sim_run_pto2_concurrent(
     for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) 
         s_actual_sched_cpu[i] = -1;
 
-    std::thread orch_thread([pto2_rt, sm_base, &orch_fn]() {
+    std::thread orch_thread([pto2_rt, sm_base, &orch_fn, num_sched_threads]() {
+#if PTO2_PROFILING
+        uint64_t orch_t0 = get_sys_cnt_aicpu();
+#endif
         orch_fn(pto2_rt);
+#if PTO2_PROFILING
+        DEV_ALWAYS("Thread %d: aicpu_orchestration_entry returned, cost %.3fus (orch_idx=0)",
+                   num_sched_threads, cycles_to_us(get_sys_cnt_aicpu() - orch_t0));
+#endif
+#if PTO2_ORCH_PROFILING
+        {
+            PTO2OrchProfilingData p = pto2_orchestrator_get_profiling();
+            uint64_t total = p.sync_cycle + p.alloc_cycle + p.params_cycle +
+                             p.lookup_cycle + p.heap_cycle + p.insert_cycle +
+                             p.fanin_cycle;
+            if (total == 0) total = 1;
+            DEV_ALWAYS("Thread %d: === Orchestrator Profiling: %lld tasks, total=%.3fus ===", num_sched_threads,
+                     (long long)p.submit_count, cycles_to_us(total));
+            DEV_ALWAYS("Thread %d:   sync_tensormap : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.sync_cycle), p.sync_cycle * 100.0 / total);
+            DEV_ALWAYS("Thread %d:   task_ring_alloc: %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu", num_sched_threads,
+                cycles_to_us(p.alloc_cycle), p.alloc_cycle * 100.0 / total,
+                cycles_to_us(p.alloc_cycle - p.alloc_wait_cycle), cycles_to_us(p.alloc_wait_cycle),
+                (unsigned long long)p.alloc_atomic_count);
+            DEV_ALWAYS("Thread %d:   param_copy     : %.3fus (%.1f%%)  atomics=%llu", num_sched_threads,
+                cycles_to_us(p.params_cycle), p.params_cycle * 100.0 / total,
+                (unsigned long long)p.params_atomic_count);
+            DEV_ALWAYS("Thread %d:   lookup+dep     : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.lookup_cycle), p.lookup_cycle * 100.0 / total);
+            DEV_ALWAYS("Thread %d:   heap_alloc     : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu", num_sched_threads,
+                cycles_to_us(p.heap_cycle), p.heap_cycle * 100.0 / total,
+                cycles_to_us(p.heap_cycle - p.heap_wait_cycle), cycles_to_us(p.heap_wait_cycle),
+                (unsigned long long)p.heap_atomic_count);
+            DEV_ALWAYS("Thread %d:   tensormap_ins  : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.insert_cycle), p.insert_cycle * 100.0 / total);
+            DEV_ALWAYS("Thread %d:   fanin+ready    : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu", num_sched_threads,
+                cycles_to_us(p.fanin_cycle), p.fanin_cycle * 100.0 / total,
+                cycles_to_us(p.fanin_cycle - p.fanin_wait_cycle), cycles_to_us(p.fanin_wait_cycle),
+                (unsigned long long)p.fanin_atomic_count);
+            DEV_ALWAYS("Thread %d:   scope_end      : %.3fus  atomics=%llu", num_sched_threads,
+                cycles_to_us(p.scope_end_cycle),
+                (unsigned long long)p.scope_end_atomic_count);
+            DEV_ALWAYS("Thread %d:   avg/task       : %.3fus", num_sched_threads,
+                p.submit_count > 0 ? cycles_to_us(total) / p.submit_count : 0.0);
+        }
+#endif
         PTO2SharedMemoryHeader* hdr = static_cast<PTO2SharedMemoryHeader*>(sm_base);
         int32_t total = 0;
         for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {

@@ -1048,11 +1048,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
     uint64_t sched_dispatch_pop_cycle = 0;
         uint64_t sched_dispatch_setup_cycle = 0;
 #endif
-#if PTO2_PROFILING_BEGINEND
-    uint64_t loop_start_prev = 0;
-    uint64_t _t_loop_end = 0;
-    bool loop_has_prev = false;
-#endif
 #endif
 
     // Local-first dispatch buffers (stack-allocated, one per CoreType per scheduling thread).
@@ -1076,23 +1071,9 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
     while (true) {
         bool made_progress = false;
 #if PTO2_PROFILING
-#if PTO2_PROFILING_BEGINEND
-        if (profiling_enabled && loop_has_prev) {
-            perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_LOOP_END,
-                loop_start_prev, _t_loop_end, sched_loop_count - 1, 0);
-        }
-#endif
         CYCLE_COUNT_START();
         sched_loop_count++;
         uint64_t _t0_phase = _t0;
-#if PTO2_PROFILING_BEGINEND
-        loop_start_prev = _t0_phase;
-        loop_has_prev = true;
-        if (profiling_enabled) {
-            perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_LOOP_BEGIN,
-                _t0_phase, _t0_phase, sched_loop_count, 0);
-        }
-#endif
 #endif
         int32_t task_count = 0;
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -1101,10 +1082,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             task_count = total_tasks_;
             // Empty graph: orchestrator done but submitted zero tasks
             if (task_count == 0) {
-#if PTO2_PROFILING && PTO2_PROFILING_BEGINEND
-                if (profiling_enabled)
-                    perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_LOOP_END, loop_start_prev, get_sys_cnt_aicpu(), sched_loop_count, 0);
-#endif
                 break;
             }
             if (tracker.aic().running_count == 0 && tracker.aiv().running_count == 0) {
@@ -1137,10 +1114,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 #endif
                     completed_.store(true, std::memory_order_release);
                     DEV_INFO("Thread %d: PTO2 completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed), task_count);
-#if PTO2_PROFILING && PTO2_PROFILING_BEGINEND
-                    if (profiling_enabled)
-                        perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_LOOP_END, loop_start_prev, get_sys_cnt_aicpu(), sched_loop_count, 0);
-#endif
                     break;
                 }
             }
@@ -1152,19 +1125,11 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                 wait_reassign_.fetch_add(1, std::memory_order_release);
                 while (!reassigned_.load(std::memory_order_acquire)) {
                     if (completed_.load(std::memory_order_acquire)) {
-#if PTO2_PROFILING && PTO2_PROFILING_BEGINEND
-                        if (profiling_enabled)
-                            perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_LOOP_END, loop_start_prev, get_sys_cnt_aicpu(), sched_loop_count, 0);
-#endif
                         break;
                     }
                     SPIN_WAIT_HINT();
                 }
                 if (completed_.load(std::memory_order_acquire)) {
-#if PTO2_PROFILING && PTO2_PROFILING_BEGINEND
-                    if (profiling_enabled)
-                        perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_LOOP_END, loop_start_prev, get_sys_cnt_aicpu(), sched_loop_count, 0);
-#endif
                     break;
                 }
             }
@@ -1264,18 +1229,12 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             CYCLE_COUNT_LAP(sched_idle_cycle);
         } else {
             CYCLE_COUNT_LAP(sched_complete_cycle);
-#if PTO2_PROFILING_BEGINEND
-            _t_loop_end = _t1;
-            _t0_phase = _t1;
-            if (phase_complete_count > 0) phase_complete_count = 0;
-#else
             if (profiling_enabled && phase_complete_count > 0) {
                 perf_aicpu_record_phase(
                     thread_idx, AicpuPhaseId::SCHED_COMPLETE, _t0_phase, _t1, sched_loop_count, phase_complete_count);
                 _t0_phase = _t1;
                 phase_complete_count = 0;
             }
-#endif
         }
 #endif
 
@@ -1429,11 +1388,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             CYCLE_COUNT_LAP(sched_idle_cycle);
         } else {
             CYCLE_COUNT_LAP(sched_dispatch_cycle);
-#if PTO2_PROFILING_BEGINEND
-            _t_loop_end = _t1;
-            _t0_phase = _t1;
-            if (phase_dispatch_count > 0) phase_dispatch_count = 0;
-#else
             if (profiling_enabled && phase_dispatch_count > 0) {
                 perf_aicpu_record_phase(
                     thread_idx, AicpuPhaseId::SCHED_DISPATCH, _t0_phase, _t1, sched_loop_count, phase_dispatch_count);
@@ -1581,16 +1535,11 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
 #if PTO2_PROFILING
             CYCLE_COUNT_LAP(sched_idle_cycle);
-#if PTO2_PROFILING_BEGINEND
-            _t_loop_end = _t1;
-            _t0_phase = _t1;
-#else
             if (profiling_enabled) {
                 perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_IDLE_WAIT,
                                         _t0_phase, _t1, sched_loop_count, 0);
                 _t0_phase = _t1;
             }
-#endif
 #endif
         }
     }

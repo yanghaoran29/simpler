@@ -47,26 +47,16 @@ uint64_t perf_now_us() {
  *   - num_chunks = ceil(64/16) = 4
  *   - Tasks per chunk = 1 (AIV_HUB) + block_num * 4 (QK/SF/PV/UPDATE)
  *   - Case2 worst case: 4 * (1 + 512 * 4) = 8196 tasks
- * Use 65536 to cover all test cases with margin.
+ * Use 262144 to cover all test cases with margin.
  */
 PTO2Runtime* make_runtime() {
     return pto2_runtime_create_custom(PTO2_MODE_SIMULATE,
-        /*task_window_size=*/65536,
+        /*task_window_size=*/262144,
         /*heap_size=*/4ull * 1024 * 1024 * 1024);
 }
 
 #if PTO2_PROFILING
 SchedProfilingData g_sched_prof_data;
-static uint64_t g_orch_start_time = 0;
-static uint64_t g_orch_end_time = 0;
-
-void orch_timing_begin() {
-    g_orch_start_time = get_sys_cnt_aicpu();
-}
-
-void orch_timing_end() {
-    g_orch_end_time = get_sys_cnt_aicpu();
-}
 #endif
 
 /**
@@ -154,13 +144,6 @@ int sim_run_all(PTO2Runtime* rt, int max_rounds) {
 }
 
 #if PTO2_PROFILING
-void print_orch_profiling() {
-    if (g_orch_end_time > g_orch_start_time) {
-        uint64_t cycles = g_orch_end_time - g_orch_start_time;
-        printf("  Orchestrator run time: %.3fus\n", cycles_to_us(cycles));
-    }
-}
-
 void print_sched_profiling(PTO2Runtime* rt) {
 #if PTO2_SCHED_PROFILING
 #if defined(PTO2_SIM_AICORE_UT)
@@ -280,6 +263,5 @@ void run_sched_checks(PTO2Runtime* rt, int num_sched) {
     // P2 unavailable: PTO2_SIM_AICORE_UT path has no per-thread profiling
 }
 #else
-void print_orch_profiling() {}
 void print_sched_profiling(PTO2Runtime* rt) { (void)rt; }
 #endif

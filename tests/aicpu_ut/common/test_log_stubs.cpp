@@ -43,23 +43,20 @@ void dev_log_always(const char* /* func */, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     std::lock_guard<std::mutex> lock(g_dev_log_always_mutex);
+    char buf[2048];
+    int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    printf("%s\n", buf);
+    fflush(stdout);
     const char* phase_log = std::getenv("AICPU_UT_PHASE_LOG");
     if (phase_log && *phase_log) {
-        char buf[2048];
-        int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
-        if (n > 0) {
-            FILE* f = std::fopen(phase_log, "a");
-            if (f) {
-                std::fprintf(f, "%s\n", buf);
-                std::fclose(f);
-            }
+        FILE* f = std::fopen(phase_log, "a");
+        if (f) {
+            std::fprintf(f, "%s\n", buf);
+            std::fclose(f);
         }
-        /* when logging to file, skip terminal output */
-    } else {
-        vprintf(fmt, ap);
-        putchar('\n');
     }
-    va_end(ap);
 }
 #endif
 

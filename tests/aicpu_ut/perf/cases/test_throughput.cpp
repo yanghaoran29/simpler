@@ -58,6 +58,13 @@
 #define AICPU_UT_THROUGHPUT_OVERLAP 5
 #endif
 
+#ifndef AICPU_UT_THROUGHPUT_FIX_TAIL
+#define AICPU_UT_THROUGHPUT_FIX_TAIL 0
+#endif
+
+// fix_tail: 仅当 deps_per_task - overlap == 1 时生效；开启时每层任务数均为 layer0_size，
+// 不添加原公式多出的“溢出”任务（每层末尾依赖数可不足）。
+
 // ─── Stringify helper for embedding macro values in string literals ───────────
 #define THROUGHPUT_STRINGIFY_IMPL(x) #x
 #define THROUGHPUT_STRINGIFY(x) THROUGHPUT_STRINGIFY_IMPL(x)
@@ -79,6 +86,7 @@ struct ThroughputTestCase {
     int deps_per_task;  // 依赖数 D：上一层每个任务在本层有 D 个依赖者
     int overlap;        // 重叠数 O：相邻组共享 O 个依赖者
     int worker_mode;    // worker 分配策略（见 THROUGHPUT_WORKER_* 宏）
+    int fix_tail;       // 仅当 D-O==1 时生效：每层任务数固定为 layer0_size，不添加溢出任务
 };
 
 static constexpr int THROUGHPUT_CASE_COUNT = 3;
@@ -91,7 +99,7 @@ extern float g_throughput_input_buf;
 #define FUNC_ELEMENT_WISE 0
 
 struct GraphCtx {
-    int64_t config[5];  // num_layers, layer0_size, deps_per_task, overlap, worker_mode
+    int64_t config[6];  // num_layers, layer0_size, deps_per_task, overlap, worker_mode, fix_tail
     uint64_t args[10];
 };
 
@@ -118,24 +126,29 @@ void print_cpu_affinity(int num_sched, int orch_cpu);
     ", D=" THROUGHPUT_STRINGIFY(AICPU_UT_THROUGHPUT_DEPS)          \
     ", O=" THROUGHPUT_STRINGIFY(AICPU_UT_THROUGHPUT_OVERLAP) ")"
 
+#define THROUGHPUT_FIX_TAIL AICPU_UT_THROUGHPUT_FIX_TAIL
+
 const ThroughputTestCase PERF_CASES[THROUGHPUT_CASE_COUNT] = {
     // idx=0: 所有任务均为 AIV
     {
         "ThroughputLayers all-AIV " THROUGHPUT_PARAM_STR,
         THROUGHPUT_COMMON_PARAMS,
         THROUGHPUT_WORKER_ALL_AIV,
+        THROUGHPUT_FIX_TAIL,
     },
     // idx=1: 奇数编号任务（全局提交序，1-indexed）为 AIC，偶数编号任务为 AIV
     {
         "ThroughputLayers odd-AIC/even-AIV " THROUGHPUT_PARAM_STR,
         THROUGHPUT_COMMON_PARAMS,
         THROUGHPUT_WORKER_ODD_AIC,
+        THROUGHPUT_FIX_TAIL,
     },
     // idx=2: 每层前半任务为 AIC，后半任务为 AIV
     {
         "ThroughputLayers half-AIC/half-AIV per layer " THROUGHPUT_PARAM_STR,
         THROUGHPUT_COMMON_PARAMS,
         THROUGHPUT_WORKER_HALF_PER_LAYER,
+        THROUGHPUT_FIX_TAIL,
     },
 };
 
@@ -206,13 +219,21 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     int deps_per_task = static_cast<int>(config[2]);
     int overlap       = static_cast<int>(config[3]);
     int worker_mode   = static_cast<int>(config[4]);
+    int fix_tail      = static_cast<int>(config[5]);
 
-    printf("  num_layers = %d, layer0_size = %d, deps_per_task = %d, overlap = %d\n",
-        num_layers, layer0_size, deps_per_task, overlap);
+    printf("  num_layers = %d, layer0_size = %d, deps_per_task = %d, overlap = %d%s\n",
+        num_layers, layer0_size, deps_per_task, overlap,
+        fix_tail ? ", fix_tail=1" : "");
 
     if (deps_per_task <= overlap) {
         printf("  ERROR: deps_per_task (%d) must be > overlap (%d)\n", deps_per_task, overlap);
         return;
+    }
+
+    int step = deps_per_task - overlap;
+    int use_fix_tail = fix_tail && (step == 1);
+    if (fix_tail && step != 1) {
+        printf("  fix_tail ignored (only when deps_per_task - overlap == 1, current step=%d)\n", step);
     }
 
     DataType dtype    = DataType::FLOAT32;
@@ -222,7 +243,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     layer_sizes.resize(static_cast<size_t>(num_layers));
     int total_tasks = 0;
     for (int k = 0; k < num_layers; k++) {
-        int sz = layer_size(k, layer0_size, deps_per_task, overlap);
+        int sz = use_fix_tail ? layer0_size : layer_size(k, layer0_size, deps_per_task, overlap);
         layer_sizes[static_cast<size_t>(k)] = sz;
         total_tasks += sz;
     }
@@ -285,6 +306,7 @@ PTO2Runtime* setup_run(const ThroughputTestCase& tc, GraphCtx& ctx) {
     ctx.config[2] = static_cast<int64_t>(tc.deps_per_task);
     ctx.config[3] = static_cast<int64_t>(tc.overlap);
     ctx.config[4] = static_cast<int64_t>(tc.worker_mode);
+    ctx.config[5] = static_cast<int64_t>(tc.fix_tail);
 
     ctx.args[0] = reinterpret_cast<uint64_t>(static_cast<void*>(&g_throughput_input_buf));
     ctx.args[1] = reinterpret_cast<uint64_t>(ctx.config);
@@ -320,6 +342,8 @@ void print_config(const ThroughputTestCase& tc) {
         tc.deps_per_task,
         tc.overlap);
     printf("  worker_mode = %s\n", mode_str);
+    if (tc.fix_tail)
+        printf("  fix_tail = 1 (each layer size = layer0_size when deps_per_task - overlap == 1)\n");
 }
 
 void print_cpu_affinity(int num_sched, int orch_cpu) {

@@ -42,8 +42,6 @@ uint64_t perf_now_us();          // Monotonic clock, returns microseconds, for p
 PTO2Runtime* make_runtime();
 int sim_drain_one_pass(PTO2Runtime* rt);
 int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000);
-void print_orch_profiling();
-
 // Scheduler profiling
 #if PTO2_PROFILING
 #include "common/platform_config.h"
@@ -73,8 +71,6 @@ void pto2_print_sim_sched_summary(SchedProfilingData* data, int64_t tasks_comple
 #endif
 
 #if PTO2_PROFILING
-void orch_timing_begin();
-void orch_timing_end();
 void run_sched_checks(PTO2Runtime* rt, int num_sched);
 #endif
 

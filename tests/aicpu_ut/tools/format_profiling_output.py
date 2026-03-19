@@ -6,6 +6,8 @@
 - 去掉源码位置前缀 [file:line]
 - 统一分隔线长度与样式
 - 按参考格式组织各段（Config / Orchestrator / CPU affinity / Scheduler / 汇总）
+- --profiling 1：从 DEV_ALWAYS 日志中提取 orchestrator/scheduler 时间，格式化为 Timing 汇总块
+- 从 Part2 loop breakdown 表格提取每线程 loops/completed/total_us，追加到 Timing 汇总块
 
 用法（不修改 run_tests.sh，仅整理其输出）:
   # 直接管道：运行 profiling 测试并整理输出
@@ -21,6 +23,8 @@
   - 去掉 [file:line] 前缀，保留两空格缩进
   - 主分隔线统一为 100 个等号
   - Config / Orchestrator / CPU affinity / Scheduler 小节分隔线统一
+  - Timing 汇总块（来自 DEV_ALWAYS）：每测试结束前输出 orchestrator 和 scheduler 总时间
+  - Loop breakdown 行（来自 Part2 表格）：追加到 Timing 汇总块
 """
 
 import re
@@ -41,6 +45,22 @@ CONTENT_INDENT = "  "
 
 AICPU_HEADER = "  -------------------------- AICPU scheduler loop breakdown (from log) -------------------------"
 
+# ── Timing extraction patterns ────────────────────────────────────────────────
+# Match: "Thread N: aicpu_orchestration_entry returned, cost X.XXXus (orch_idx=M)"
+ORCH_TIME_RE = re.compile(
+    r'Thread\s*(\d+)[:\s].*aicpu_orchestration_entry returned,\s*cost\s*([\d.]+)us.*orch_idx=(\d+)'
+)
+# Match: "Thread N: Scheduler summary: total_time=X.XXXus, loops=N, tasks_scheduled=M"
+SCHED_TIME_RE = re.compile(
+    r'Thread\s*(\d+)[:\s].*Scheduler summary:\s*total_time=([\d.]+)us,\s*loops=(\d+),\s*tasks_scheduled=(\d+)'
+)
+# Suppress: "Thread=N orch_start=NNN" (raw cycle count, noise)
+ORCH_START_RE = re.compile(r'Thread[=\s]\d+\s+orch_start=\d+')
+# Match: loop breakdown table row from Part2, e.g. "  T0  5121  1869  0.365  3463.4"
+LOOP_ROW_RE = re.compile(
+    r'^\s*(T\d+|SUM)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s*$'
+)
+
 
 def strip_log_prefix(line: str) -> str:
     """去掉行首的 [file:line] 前缀，保留两空格缩进。"""
@@ -51,6 +71,33 @@ def strip_log_prefix(line: str) -> str:
 
 def is_running_line(line: str) -> bool:
     return "  Running:" in line and ("test_" in line or "Test Run Summary" in line)
+
+
+def flush_timing(out_list: list, orch: list, sched: list, loop: list) -> None:
+    """输出当前测试的 orchestrator / scheduler / loop breakdown 时间汇总，然后清空列表。"""
+    if not orch and not sched and not loop:
+        return
+    out_list.append("")
+    out_list.append("  " + "-" * 56)
+    # 按线程归并 orchestrator 各次调用耗时，输出总和
+    orch_total: dict[int, float] = {}
+    for (tid, cost, _oidx) in orch:
+        orch_total[tid] = orch_total.get(tid, 0.0) + float(cost)
+    for tid in sorted(orch_total):
+        out_list.append(f"  Orchestrator  thread {tid}: {orch_total[tid]:>9.3f} us  (total)")
+    for (tid, total, loops, tasks) in sorted(sched, key=lambda x: x[0]):
+        out_list.append(
+            f"  Scheduler     thread {tid}: {float(total):>9.3f} us"
+            f"  (loops={loops}, tasks_scheduled={tasks})"
+        )
+    for (name, loops, completed, total_us) in loop:
+        out_list.append(
+            f"  Loop      {name:<6s}: {float(total_us):>9.1f} us"
+            f"  (loops={loops}, completed={completed})"
+        )
+    orch.clear()
+    sched.clear()
+    loop.clear()
 
 
 def main() -> None:
@@ -70,6 +117,11 @@ def main() -> None:
     skip_part3 = False         # 跳过 Part3 整块
     part2_just_header = False  # 下一行若是 65 等号则改为空行（参考格式中 Part2 标题与 Thread 表之间是空行）
 
+    # 当前测试的 timing 收集列表（flush 在下一个 Running: 行或输出末尾）
+    orch_timings: list = []   # [(thread_id, cost_us_str, orch_idx), ...]
+    sched_timings: list = []  # [(thread_id, total_us_str, loops_str, tasks_str), ...]
+    loop_rows: list = []      # [(name, loops_str, completed_str, total_us_str), ...]
+
     for raw in lines:
         line = strip_log_prefix(raw) if raw.strip() else raw.rstrip()
         stripped = line.strip()
@@ -80,6 +132,29 @@ def main() -> None:
                 out.append("")
             elif not skip_until_part2 and not skip_part3:
                 out.append("")
+            continue
+
+        # ── Timing：抑制噪声行 orch_start= ──────────────────────────────────
+        if ORCH_START_RE.search(raw) or ORCH_START_RE.search(stripped):
+            continue
+
+        # ── Timing：收集 orchestrator 时间行，并保留原始行到 log ──────────────────
+        m = ORCH_TIME_RE.search(raw) or ORCH_TIME_RE.search(stripped)
+        if m:
+            rec = (int(m.group(1)), m.group(2), int(m.group(3)))
+            # run_tests.sh 在 profiling=1 下可能会 re-emit 同一行，避免重复累计导致 total 翻倍
+            if rec not in orch_timings:
+                orch_timings.append(rec)
+                out.append(line if line else raw.rstrip())  # 把原始行也打印到 log
+            continue
+
+        # ── Timing：收集 scheduler 时间行并抑制原始输出 ─────────────────────
+        m = SCHED_TIME_RE.search(raw) or SCHED_TIME_RE.search(stripped)
+        if m:
+            rec = (int(m.group(1)), m.group(2), m.group(3), m.group(4))
+            # profiling=1 可能重复出现同一条 summary；去重避免汇总重复展示
+            if rec not in sched_timings:
+                sched_timings.append(rec)
             continue
 
         # 主分隔线（100 等号）统一
@@ -116,7 +191,7 @@ def main() -> None:
                 out.pop()
             continue
 
-        # 跳过 Perf data / Log (phase_breakdown) / Selection，并进入“跳过直到 Part2”
+        # 跳过 Perf data / Log (phase_breakdown) / Selection，并进入"跳过直到 Part2"
         if (
             stripped.startswith("Perf data:")
             or (stripped.startswith("Log:") and "phase_breakdown" in raw)
@@ -162,8 +237,13 @@ def main() -> None:
             part2_just_header = True
             continue
 
-        # Running / Summary
+        # Test Run Summary：flush timing before printing summary header
+        if "Test Run Summary" in stripped:
+            flush_timing(out, orch_timings, sched_timings, loop_rows)
+
+        # Running / Summary：在输出新 Running 行之前 flush 上一个测试的 timing
         if is_running_line(raw):
+            flush_timing(out, orch_timings, sched_timings, loop_rows)
             in_part2 = False
             part2_just_header = False
             out.append(line)
@@ -183,7 +263,16 @@ def main() -> None:
             out.append("--------------------------------------- Scheduler Profiling ----------------------------------------")
             continue
 
+        # ── Loop breakdown：在 Part2 内提取 T0/T1/T2/SUM 行数据，同时保留原始显示 ──
+        if in_part2 and stripped:
+            m = LOOP_ROW_RE.match(stripped)
+            if m:
+                loop_rows.append((m.group(1), m.group(2), m.group(3), m.group(5)))
+
         out.append(line if line else raw.rstrip())
+
+    # 末尾 flush（最后一个测试的 timing）
+    flush_timing(out, orch_timings, sched_timings, loop_rows)
 
     # 输出
     for x in out:

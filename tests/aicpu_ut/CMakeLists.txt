@@ -11,6 +11,7 @@
 #   cmake .. -DORCH_CPU=4 -DSCHED_CPU0=5 ...
 #   cmake .. -DPLATFORM_MAX_BLOCKDIM=32 -DPLATFORM_AIV_CORES_PER_BLOCKDIM=3
 #   cmake .. -DOPT_LEVEL=0           # debug (no optimization)
+#   cmake .. -DAICPU_UT_PROFILE_CALLSTACK=OFF
 #   cmake .. -DPTO2_PROFILING=OFF
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -41,12 +42,11 @@ set(PLATFORM_AIV_CORES_PER_BLOCKDIM  "2"  CACHE STRING "AIV cores per blockdim")
 set(PLATFORM_MAX_AICPU_THREADS       "4"  CACHE STRING "Max AICPU threads")
 
 # ─── Profiling control ────────────────────────────────────────────────────────
-# run_tests.sh --profiling <0|1|2>: 0=off, 1=PTO2_PROFILING_BEGINEND only, 2=full (SCHED+ORCH).
-# PTO2_PROFILING_BEGINEND requires PTO2_PROFILING=1 (only record begin/end points).
+# run_tests.sh --profiling <0|1|2>: 0=off, 1=PTO2_PROFILING only, 2=full (SCHED+ORCH+TENSORMAP).
 option(PTO2_PROFILING "Enable PTO2 profiling instrumentation" OFF)
 option(PTO2_SCHED_PROFILING "Enable scheduler profiling" OFF)
 option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" OFF)
-option(PTO2_PROFILING_BEGINEND "Only record begin/end points (requires PTO2_PROFILING)" OFF)
+option(PTO2_TENSORMAP_PROFILING "Enable tensormap lookup profiling" OFF)
 
 # ─── Sim AICore / 0-core paths (for aicpu_ut perf) ─────────────────────────────
 # When ON: enables cores_total_num_==0, sim_aicore_mode, core_num==0 drain loop in executor.
@@ -102,8 +102,8 @@ endif()
 if(PTO2_ORCH_PROFILING)
     list(APPEND COMMON_COMPILE_DEFS PTO2_ORCH_PROFILING=1)
 endif()
-if(PTO2_PROFILING_BEGINEND)
-    list(APPEND COMMON_COMPILE_DEFS PTO2_PROFILING_BEGINEND=1)
+if(PTO2_TENSORMAP_PROFILING)
+    list(APPEND COMMON_COMPILE_DEFS PTO2_TENSORMAP_PROFILING=1)
 endif()
 if(PTO2_SIM_AICORE_UT)
     list(APPEND COMMON_COMPILE_DEFS PTO2_SIM_AICORE_UT=1)
@@ -111,6 +111,11 @@ endif()
 
 # ─── Optimization level ───────────────────────────────────────────────────────
 set(OPT_LEVEL "3" CACHE STRING "Compiler optimization level (0/1/2/3)")
+
+# ─── Profiling-friendly call stack ────────────────────────────────────────────
+# Keep sibling-call optimizations disabled so perf's call graph retains more
+# intermediate frames without having to resort to -fno-inline.
+option(AICPU_UT_PROFILE_CALLSTACK "Keep call stacks friendly for perf flamegraphs" ON)
 
 # ─── Latency case compile-time overrides (run_tests.sh --chain-num/--chain-length/--latency-nelems) ───
 # When set, these are compiled into the latency test binaries; PERF_CASES + getenv are ignored for that param.
@@ -129,6 +134,7 @@ set(AICPU_UT_THROUGHPUT_LAYERS        "" CACHE STRING "Throughput: num_layers at
 set(AICPU_UT_THROUGHPUT_LAYER0_SIZE   "" CACHE STRING "Throughput: layer0_size at compile time")
 set(AICPU_UT_THROUGHPUT_DEPS          "" CACHE STRING "Throughput: deps_per_task at compile time")
 set(AICPU_UT_THROUGHPUT_OVERLAP       "" CACHE STRING "Throughput: overlap at compile time")
+set(AICPU_UT_THROUGHPUT_FIX_TAIL     "" CACHE STRING "Throughput: fix_tail (1 when D-O==1, each layer size = layer0_size)")
 set(AICPU_UT_NUM_SCHED_THREADS        "" CACHE STRING "Number of scheduler threads at compile time")
 set(THROUGHPUT_EXTRA_DEFS "")
 if(NOT AICPU_UT_THROUGHPUT_LAYERS STREQUAL "")
@@ -142,6 +148,9 @@ if(NOT AICPU_UT_THROUGHPUT_DEPS STREQUAL "")
 endif()
 if(NOT AICPU_UT_THROUGHPUT_OVERLAP STREQUAL "")
     list(APPEND THROUGHPUT_EXTRA_DEFS "AICPU_UT_THROUGHPUT_OVERLAP=${AICPU_UT_THROUGHPUT_OVERLAP}")
+endif()
+if(NOT AICPU_UT_THROUGHPUT_FIX_TAIL STREQUAL "")
+    list(APPEND THROUGHPUT_EXTRA_DEFS "AICPU_UT_THROUGHPUT_FIX_TAIL=${AICPU_UT_THROUGHPUT_FIX_TAIL}")
 endif()
 if(NOT AICPU_UT_NUM_SCHED_THREADS STREQUAL "")
     list(APPEND THROUGHPUT_EXTRA_DEFS "AICPU_UT_NUM_SCHED_THREADS=${AICPU_UT_NUM_SCHED_THREADS}")
@@ -157,6 +166,9 @@ set(COMMON_COMPILE_OPTIONS
     -Wno-unused-parameter
     -Wno-class-memaccess
 )
+if(AICPU_UT_PROFILE_CALLSTACK)
+    list(APPEND COMMON_COMPILE_OPTIONS -fno-optimize-sibling-calls)
+endif()
 
 # ─── Runtime source files ─────────────────────────────────────────────────────
 set(RUNTIME_SRCS

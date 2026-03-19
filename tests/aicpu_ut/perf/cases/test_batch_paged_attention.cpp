@@ -72,7 +72,7 @@ PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx);
 #if PTO2_PROFILING
 void section_header_100(char pad_char, const char* title);
 void print_config(const PerfTestCase& tc);
-void print_cpu_affinity(int num_sched);
+void print_cpu_affinity(int num_sched, int orch_cpu);
 #endif
 
 // ─── Definitions ─────────────────────────────────────────────────────────────
@@ -339,14 +339,13 @@ void print_config(const PerfTestCase& tc) {
     printf("]\n");
 }
 
-void print_cpu_affinity(int num_sched) {
+void print_cpu_affinity(int num_sched, int orch_cpu) {
     static const int sched_cpus[] = {
         SCHED_CPU0, SCHED_CPU1, SCHED_CPU2, SCHED_CPU3,
         SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
     };
     section_header_100('-', "--- CPU affinity ---");
-    int orch_core = current_cpu();
-    printf("  orchestrator → core %d\n", orch_core >= 0 ? orch_core : ORCH_CPU);
+    printf("  orchestrator → core %d\n", orch_cpu >= 0 ? orch_cpu : ORCH_CPU);
     int max_sched = static_cast<int>(sizeof(sched_cpus) / sizeof(sched_cpus[0]));
     for (int i = 0; i < num_sched && i < max_sched; i++)
         printf("  scheduler[%d]  → core %d (configured)\n", i, sched_cpus[i]);
