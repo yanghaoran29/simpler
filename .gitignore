@@ -20,10 +20,14 @@ venv/
 
 # Git cloned dependencies (not tracked in repo)
 examples/scripts/_deps/
+tools/_deps/
 
 # Profiling files
 outputs
 tmp
+log*
+perf.data*
+test_log*
 
 # Mid-work documentation
 .docs

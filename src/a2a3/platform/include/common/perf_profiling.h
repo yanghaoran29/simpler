@@ -289,7 +289,7 @@ struct AicpuOrchSummary {
 } __attribute__((aligned(64)));
 
 constexpr uint32_t AICPU_PHASE_MAGIC = 0x41435048;  // "ACPH"
-constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 16384;  // ~512KB per thread
+constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 131072;  // ~512KB per thread
 
 /**
  * Fixed-size phase record buffer (analogous to PerfBuffer)
