@@ -527,6 +527,7 @@ struct PTO2SchedulerState {
 #endif
     }
 
+
     /**
      * Two-stage completion: first stage.
      * Called when a single subtask (AIC, AIV0, or AIV1) finishes.
@@ -553,7 +554,7 @@ struct PTO2SchedulerState {
 #else
     void
 #endif
-    on_mixed_task_complete(PTO2TaskSlotState& slot_state, 
+    on_mixed_task_complete(PTO2TaskSlotState& slot_state,
 #if PTO2_SCHED_PROFILING
         int thread_idx,
 #endif
@@ -590,6 +591,7 @@ struct PTO2SchedulerState {
 #if PTO2_SCHED_PROFILING
         uint64_t fanout_atomics = 0, push_wait = 0;
 #endif
+
         while (current != nullptr) {
             PTO2TaskSlotState& consumer_slot = *current->slot_state;
 #if PTO2_SCHED_PROFILING
