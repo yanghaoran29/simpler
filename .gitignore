@@ -21,6 +21,7 @@ outputs
 
 # Git cloned dependencies (not tracked in repo)
 examples/scripts/_deps/
+tools/_deps/
 
 # Profiling files
 outputs
