@@ -189,6 +189,11 @@ private:
     uint8_t device_orch_so_storage_[RUNTIME_MAX_ORCH_SO_SIZE];
     size_t device_orch_so_size_;
 
+#if defined(PTO2_SIM_AICORE_UT)
+    // When true: orch runs on host but in a separate thread (concurrent); init must not set orchestrator_done_.
+    bool orch_deferred_on_host_{false};
+#endif
+
 public:
     /**
      * Constructor - zero-initialize all arrays
@@ -255,6 +260,12 @@ public:
 
     uint64_t get_function_bin_addr(int func_id) const;
     void set_function_bin_addr(int func_id, uint64_t addr);
+
+#if defined(PTO2_SIM_AICORE_UT)
+    /** Orch on host but deferred (concurrent sim): do not set orchestrator_done_ in init. */
+    bool get_orch_deferred_on_host() const { return orch_deferred_on_host_; }
+    void set_orch_deferred_on_host(bool v) { orch_deferred_on_host_ = v; }
+#endif
 
     int get_registered_kernel_count() const;
     int get_registered_kernel_func_id(int index) const;
