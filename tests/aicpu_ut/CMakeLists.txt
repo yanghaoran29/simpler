@@ -186,6 +186,8 @@ if(PTO2_SIM_AICORE_UT)
         ${RUNTIME_DIR}/runtime.cpp
         ${AICPU_DIR}/aicpu_executor.cpp
         ${AICPU_DIR}/sim_aicore.cpp
+        ${AICPU_DIR}/msgq_cpu_sim.cpp
+        ${AICPU_DIR}/hscb_cpu_sim.cpp
         ${PLATFORM_AICPU_DIR}/platform_regs.cpp
         ${PLATFORM_AICPU_DIR}/performance_collector_aicpu.cpp
         ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/cache_ops.cpp

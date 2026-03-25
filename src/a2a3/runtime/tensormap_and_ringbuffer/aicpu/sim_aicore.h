@@ -12,6 +12,13 @@
  * - pto2_sim_set_current_core() is called at entry to a sim core region
  * - pto2_sim_clear_current_core() is called at exit
  * - SimCoreGuard provides RAII wrapper for this context
+ *
+ * MsgQ + HSCB simulation (PTO2_SIM_AICORE_UT):
+ * - On task completion, pto2_sim_aicore_on_task_received updates COND and routes the same completion
+ *   through HscbCpuSimulator::aicore_post_task_done_over_hscb → MsgqCpuSimulator (models AICore→HSCB→MsgQ).
+ * - MsgQ hw_push_pair notifies waiters (condition_variable) as a stand-in for Event/interrupt wakeup.
+ * - AICPU-side helpers: pto2_sim_msgq_wait_for_event, pto2_sim_msgq_pop_task_done (optional; scheduler
+ *   still uses read_reg(COND) for completion unless you migrate that path).
  */
 
 #ifndef AICPU_SIM_AICORE_H_
@@ -23,6 +30,13 @@
 
 /** When reg_base_addr is in [0, PTO2_SIM_REG_ADDR_MAX), it denotes sim core index (not MMIO address). */
 #define PTO2_SIM_REG_ADDR_MAX  128
+
+/**
+ * Simulated MSGQ payload when AICore completes a task (pto2_sim_aicore_on_task_received):
+ * - Low 32b of the 64b DATA word: task_id (same id as passed to MAKE_FIN_VALUE).
+ * - High 32b: (PTO2_SIM_MSGQ_TASK_DONE_TAG << 16) | (core_id & 0xFFFF).
+ */
+#define PTO2_SIM_MSGQ_TASK_DONE_TAG 0x5444u /* "TD" — task done */
 
 /** Global COND register state per simulated core (MAKE_FIN_VALUE(task_id) or AICORE_IDLE_VALUE). */
 extern uint32_t s_sim_core_cond_value[];
@@ -71,6 +85,47 @@ struct SimCoreGuard {
         pto2_sim_clear_current_core();
     }
 };
+
+namespace cpu_sim {
+class MsgqCpuSimulator;
+class HscbCpuSimulator;
+}
+
+/**
+ * Global simulated MSGQ (MSQ_* model): each sim AICore task completion is posted via HSCB
+ * (aicore_post_task_done_over_hscb) into this object.
+ */
+cpu_sim::MsgqCpuSimulator* pto2_sim_msgq_for_cpu();
+
+/** Global HSCB simulator (AICore→MsgQ completion path increments RECEIVER_SIO). */
+cpu_sim::HscbCpuSimulator* pto2_sim_hscb_for_cpu();
+
+/** Decode lo/hi 32-bit halves from one 64b MSQ_DATA read. Returns false if tag is not task_done. */
+inline bool pto2_sim_msgq_decode_task_done(
+    uint32_t msg_lo, uint32_t msg_hi, int32_t* out_core_id, int32_t* out_task_id) {
+    if (out_core_id == nullptr || out_task_id == nullptr) {
+        return false;
+    }
+    uint32_t tag = (msg_hi >> 16) & 0xFFFFu;
+    if (tag != static_cast<uint32_t>(PTO2_SIM_MSGQ_TASK_DONE_TAG)) {
+        return false;
+    }
+    *out_core_id = static_cast<int32_t>(msg_hi & 0xFFFFu);
+    *out_task_id = static_cast<int32_t>(msg_lo);
+    return true;
+}
+
+extern "C" {
+/**
+ * Wait until MSQ_VLDCLR_EL0 has any pending bit (simulates Event / WFE after MsgQ write).
+ * timeout_ms == UINT32_MAX waits indefinitely; 0 returns immediately.
+ * Returns 0 if pending, -1 if timed out.
+ */
+int pto2_sim_msgq_wait_for_event(uint32_t timeout_ms);
+
+/** Pop one task_done message from MsgQ (W1C clear). Returns 0 if popped, -1 if none. */
+int pto2_sim_msgq_pop_task_done(int32_t* core_id, int32_t* task_id);
+}
 #endif  // __cplusplus
 
 // =============================================================================
