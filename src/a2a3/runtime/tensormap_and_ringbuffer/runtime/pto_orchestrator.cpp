@@ -179,6 +179,10 @@ bool pto2_orchestrator_init(
 }
 
 void pto2_orchestrator_destroy(PTO2OrchestratorState* orch) {
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        orch->rings[r].task_ring.pto2_task_ring_flush_current_index_public();
+    }
+
     orch->tensor_map.destroy();
 
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -303,7 +307,7 @@ void pto2_submit_mixed_task(
     {
         int32_t scope_task_count = orch->scope_tasks_size - orch->scope_begins[orch->scope_stack_top];
         if (scope_task_count >= task_ring.window_size - 1) {
-            int32_t total_submitted = task_ring.current_index_ptr->load(std::memory_order_acquire);
+            int32_t total_submitted = task_ring.orch_local_next_task_index;
             int32_t last_alive = task_ring.last_alive_ptr->load(std::memory_order_acquire);
             int32_t active_count = total_submitted - last_alive;
 
@@ -604,6 +608,9 @@ void pto2_submit_mixed_task(
 // =============================================================================
 
 void pto2_orchestrator_done(PTO2OrchestratorState* orch) {
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        orch->rings[r].task_ring.pto2_task_ring_flush_current_index_public();
+    }
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         int32_t total_tasks = orch->rings[r].task_ring.current_index_ptr->load(std::memory_order_acquire);
         if (total_tasks > 0) {

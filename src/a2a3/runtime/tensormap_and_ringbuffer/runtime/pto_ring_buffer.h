@@ -32,6 +32,12 @@
 #include "pto_shared_memory.h"
 #include "common/unified_log.h"
 
+// Orchestrator thread: local next task id; shared current_task_index is published every
+// N allocations and on orch shutdown (pto2_task_ring_flush_current_index_public).
+#ifndef PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL
+#define PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL 32
+#endif
+
 struct PTO2SchedulerState;  // Forward declaration for dep_pool reclaim
 
 // Set to 1 to enable periodic BLOCKED/Unblocked messages during spin-wait.
@@ -274,6 +280,29 @@ struct PTO2TaskRing {
     // Error code pointer for fatal error reporting (→ sm_header->orch_error_code)
     std::atomic<int32_t>* error_code_ptr = nullptr;
 
+    // Cached last_alive snapshot to reduce atomic loads in fast path.
+    int32_t cached_last_alive = 0;
+
+    // Next task id to hand out (Orchestrator thread only; mirrors SM current_task_index when flushed).
+    int32_t orch_local_next_task_index = 0;
+
+    // Publish local next index to shared memory (also called on orch done/destroy). 
+    void pto2_task_ring_flush_current_index_public() {
+        current_index_ptr->store(orch_local_next_task_index, std::memory_order_release);
+    }
+
+    void orch_publish_current_index_if_boundary() {
+        // If interval is power-of-two, use bit test instead of modulo.
+#if (PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL > 0) && \
+    ((PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL & (PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL - 1)) == 0)
+        if ((orch_local_next_task_index & (PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL - 1)) == 0) {
+#else
+        if ((orch_local_next_task_index % PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL) == 0) {
+#endif
+            current_index_ptr->store(orch_local_next_task_index, std::memory_order_release);
+        }
+    }
+
     /**
      * Allocate a task slot from task ring
      *
@@ -335,7 +364,7 @@ struct PTO2TaskRing {
 #if PTO2_SPIN_VERBOSE_LOGGING
             // Periodic block notification
             if (spin_count % PTO2_BLOCK_NOTIFY_INTERVAL == 0 && spin_count > 0 && spin_count < PTO2_FLOW_CONTROL_SPIN_LIMIT) {
-                int32_t current = current_index_ptr->load(std::memory_order_acquire);
+                int32_t current = orch_local_next_task_index;
                 int32_t active_count = current - cur_last_alive;
                 LOG_WARN("[TaskRing] BLOCKED (Flow Control): current=%d, last_alive=%d, "
                      "active=%d/%d (%.1f%%), spins=%d",
@@ -347,7 +376,7 @@ struct PTO2TaskRing {
 
             // Deadlock: no progress after SPIN_LIMIT spins
             if (spin_count >= PTO2_FLOW_CONTROL_SPIN_LIMIT) {
-                int32_t current = current_index_ptr->load(std::memory_order_acquire);
+                int32_t current = orch_local_next_task_index;
                 int32_t active_count = current - cur_last_alive;
 
                 LOG_ERROR("========================================");
@@ -382,23 +411,31 @@ struct PTO2TaskRing {
     }
 
     /**
-     * Try to allocate task slot without stalling (thread-safe via fetch_add)
+     * Try to allocate task slot without stalling (Orchestrator thread; local next id + batched SM publish).
      *
      * @return Task ID, or -1 if window is full
      */
     int32_t pto2_task_ring_try_alloc() {
-        // Optimistically allocate a task ID
-        int32_t task_id = current_index_ptr->fetch_add(1, std::memory_order_acq_rel);
+        int32_t task_id = orch_local_next_task_index++;
+        int32_t active_count_maybe_larger = task_id - cached_last_alive;
+
+        // Fast path: trust cached_last_alive first to avoid an extra atomic load.
+        if (active_count_maybe_larger < window_size - 1) {
+            orch_publish_current_index_if_boundary();
+            return task_id;
+        }
+
+        // Slow path: refresh last_alive and validate with the true active count.
         int32_t last_alive = last_alive_ptr->load(std::memory_order_acquire);
         int32_t active_count = task_id - last_alive;
-
-        // Check if there's room (leave at least 1 slot empty)
+        cached_last_alive = last_alive;
         if (active_count < window_size - 1) {
+            orch_publish_current_index_if_boundary();
             return task_id;
         }
 
         // Window is full — roll back the optimistic increment
-        current_index_ptr->fetch_sub(1, std::memory_order_release);
+        orch_local_next_task_index--;
         return -1;
     }
 
@@ -432,7 +469,7 @@ void pto2_task_ring_init(PTO2TaskRing* ring, PTO2TaskDescriptor* descriptors,
  */
 static inline int32_t pto2_task_ring_active_count(PTO2TaskRing* ring) {
     int32_t last_alive = ring->last_alive_ptr->load(std::memory_order_acquire);
-    return ring->current_index_ptr->load(std::memory_order_acquire) - last_alive;
+    return ring->orch_local_next_task_index - last_alive;
 }
 
 /**

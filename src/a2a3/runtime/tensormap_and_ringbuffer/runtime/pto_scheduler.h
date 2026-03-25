@@ -439,9 +439,12 @@ struct PTO2SchedulerState {
         }
 
         void advance_ring_pointers(PTO2SharedMemoryRingHeader& ring) {
-            int32_t current_task_index = ring.fc.current_task_index.load(std::memory_order_acquire);
+            int32_t published = ring.fc.current_task_index.load(std::memory_order_acquire);
+            // Orchestrator may keep up to (PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL-1) allocations
+            // local-only before publishing; extend the CONSUMED scan ceiling accordingly.
+            int32_t scan_limit = published + PTO2_ORCH_TASK_INDEX_PUBLIC_INTERVAL;
 
-            while (last_task_alive < current_task_index) {
+            while (last_task_alive < scan_limit) {
                 PTO2TaskSlotState& slot_state = get_slot_state_by_task_id(last_task_alive);
                 if (slot_state.task_state.load(std::memory_order_acquire) != PTO2_TASK_CONSUMED) {
                     break;

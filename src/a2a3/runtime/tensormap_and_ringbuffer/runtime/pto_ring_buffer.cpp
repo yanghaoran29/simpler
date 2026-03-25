@@ -38,6 +38,8 @@ void pto2_task_ring_init(PTO2TaskRing* ring, PTO2TaskDescriptor* descriptors,
     ring->window_size = window_size;
     ring->current_index_ptr = current_index_ptr;
     ring->last_alive_ptr = last_alive_ptr;
+    ring->cached_last_alive = last_alive_ptr->load(std::memory_order_acquire);
+    ring->orch_local_next_task_index = current_index_ptr->load(std::memory_order_acquire);
 }
 
 // =============================================================================
