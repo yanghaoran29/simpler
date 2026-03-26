@@ -208,6 +208,14 @@ static int task_worker_type(int worker_mode, int task_global_1indexed, int j, in
     }
 }
 
+static inline void submit_by_worker_type(PTO2Runtime* rt, int wtype, int kernel_id, PTOParam& params) {
+    if (wtype == PTO2_WORKER_CUBE) {
+        pto2_submit_task(rt->orchestrators, kernel_id, PTO2_WORKER_CUBE, params);
+    } else {
+        pto2_submit_task(rt->orchestrators, kernel_id, PTO2_WORKER_VECTOR, params);
+    }
+}
+
 void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
 
@@ -267,7 +275,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             PTOParam params;
             params.add_input(shared_in);
             params.add_output(t);
-            pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, wtype, params);
+            submit_by_worker_type(rt, wtype, FUNC_ELEMENT_WISE, params);
             layers[0].push_back(t);
         }
 
@@ -288,7 +296,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 for (size_t p = 0; p < preds.size() && (int)p < max_inputs; p++)
                     params.add_input(layers[static_cast<size_t>(k - 1)][static_cast<size_t>(preds[p])]);
                 params.add_output(out);
-                pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, wtype, params);
+                submit_by_worker_type(rt, wtype, FUNC_ELEMENT_WISE, params);
                 layers[static_cast<size_t>(k)].push_back(out);
             }
         }

@@ -187,16 +187,14 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 params_gemm.add_input(B_view);
                 params_gemm.add_output(P);
                 params_gemm.add_input(ext_config);
-                pto2_submit_task(rt->orchestrators, FUNC_GEMM_TILE, PTO2_WORKER_CUBE,
-                                 params_gemm);
+                pto2_rt_submit_aic_task(rt, FUNC_GEMM_TILE, params_gemm);
                 total_gemm++;
 
                 PTOParam params_add;
                 params_add.add_inout(C_view);
                 params_add.add_input(P);
                 params_add.add_input(ext_config);
-                pto2_submit_task(rt->orchestrators, FUNC_TILE_ADD, PTO2_WORKER_VECTOR,
-                                 params_add);
+                pto2_rt_submit_aiv_task(rt, FUNC_TILE_ADD, params_add);
                 total_add++;
             }
         }

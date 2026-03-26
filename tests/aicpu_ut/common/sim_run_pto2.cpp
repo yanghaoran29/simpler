@@ -160,8 +160,7 @@ int aicpu_sim_run_pto2_concurrent(
         {
             PTO2OrchProfilingData p = pto2_orchestrator_get_profiling();
             uint64_t total = p.sync_cycle + p.alloc_cycle + p.params_cycle +
-                             p.lookup_cycle + p.heap_cycle + p.insert_cycle +
-                             p.fanin_cycle;
+                             p.lookup_cycle + p.insert_cycle + p.fanin_cycle;
             if (total == 0) total = 1;
             DEV_ALWAYS("Thread %d: === Orchestrator Profiling: %lld tasks, total=%.3fus ===", num_sched_threads,
                      (long long)p.submit_count, cycles_to_us(total));
@@ -174,10 +173,6 @@ int aicpu_sim_run_pto2_concurrent(
                 cycles_to_us(p.params_cycle), p.params_cycle * 100.0 / total,
                 (unsigned long long)p.params_atomic_count);
             DEV_ALWAYS("Thread %d:   lookup+dep     : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.lookup_cycle), p.lookup_cycle * 100.0 / total);
-            DEV_ALWAYS("Thread %d:   heap_alloc     : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu", num_sched_threads,
-                cycles_to_us(p.heap_cycle), p.heap_cycle * 100.0 / total,
-                cycles_to_us(p.heap_cycle - p.heap_wait_cycle), cycles_to_us(p.heap_wait_cycle),
-                (unsigned long long)p.heap_atomic_count);
             DEV_ALWAYS("Thread %d:   tensormap_ins  : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.insert_cycle), p.insert_cycle * 100.0 / total);
             DEV_ALWAYS("Thread %d:   fanin+ready    : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu", num_sched_threads,
                 cycles_to_us(p.fanin_cycle), p.fanin_cycle * 100.0 / total,

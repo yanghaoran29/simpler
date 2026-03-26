@@ -140,9 +140,32 @@ fi
 mkdir -p "${LOG_DIR}"
 TS="$(date +%Y%m%d_%H%M%S)"
 OUTFILE="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_between_markers_${TS}.txt"
+RUNLOG="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_submit_args_${TS}.log"
 
-echo "[marker-count] run: ${BIN}"
+echo "[marker-count] run pass#1 (insn_count only): ${BIN}"
 "${QEMU_BIN}" -plugin "file=${PLUGIN_SO},outfile=${OUTFILE},markers=1,marker_start=${MARKER_START},marker_end=${MARKER_END}" "${BIN}" >/dev/null 2>&1 || true
 
+# Pass#2: rebuild with submit-args trace macro and run once without plugin
+# to collect pto2_submit_mixed_task argument lines.
+echo "[marker-count] run pass#2 (submit args trace): rebuild with PTO2_TRACE_SUBMIT_ARGS_ENABLE=1"
+trace_build_args=(--test "${TEST_NAME}" --idx "${TEST_IDX}" --build-only)
+if [[ "${THREAD_MODE}" == "orch" ]]; then
+    trace_build_args+=(--orch)
+elif [[ "${THREAD_MODE}" == "sched" ]]; then
+    trace_build_args+=(--sched)
+fi
+PTO2_TRACE_SUBMIT_ARGS_ENABLE=1 "${RUN_TESTS_SH}" "${trace_build_args[@]}"
+
+echo "[marker-count] run pass#2 binary: ${BIN}"
+"${BIN}" >"${RUNLOG}" 2>&1 || true
+
+if rg -q "^\\[submit-args\\]" "${RUNLOG}"; then
+    {
+        echo ""
+        echo "# pto2_submit_mixed_task args"
+        rg "^\\[submit-args\\]" "${RUNLOG}"
+    } >> "${OUTFILE}"
+fi
+
 echo "[marker-count] result file: ${OUTFILE}"
-sed -n '1,5p' "${OUTFILE}"
+sed -n '1,12p' "${OUTFILE}"

@@ -144,7 +144,11 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 PTOParam params;
                 params.add_input(prev);
                 params.add_output(next);
-                pto2_submit_task(rt->orchestrators, FUNC_ELEMENT_WISE, worker_type, params);
+                if (worker_type == PTO2_WORKER_CUBE) {
+                    pto2_rt_submit_aic_task(rt, FUNC_ELEMENT_WISE, params);
+                } else {
+                    pto2_rt_submit_aiv_task(rt, FUNC_ELEMENT_WISE, params);
+                }
                 prev = next;
             }
         }

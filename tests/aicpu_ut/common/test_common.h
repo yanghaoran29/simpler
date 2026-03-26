@@ -123,6 +123,14 @@ static inline void pto2_submit_task(PTO2OrchestratorState* orch,
         mk.aiv0_kernel_id = kernel_id;
     pto2_submit_mixed_task(orch, mk, params);
 }
+
+static inline void pto2_rt_submit_aic_task(PTO2Runtime* rt, int32_t kernel_id, PTOParam& params) {
+    pto2_submit_task(rt->orchestrators, kernel_id, PTO2_WORKER_CUBE, params);
+}
+
+static inline void pto2_rt_submit_aiv_task(PTO2Runtime* rt, int32_t kernel_id, PTOParam& params) {
+    pto2_submit_task(rt->orchestrators, kernel_id, PTO2_WORKER_VECTOR, params);
+}
 #endif
 
 #endif  // TEST_COMMON_H

@@ -47,6 +47,7 @@ option(PTO2_PROFILING "Enable PTO2 profiling instrumentation" OFF)
 option(PTO2_SCHED_PROFILING "Enable scheduler profiling" OFF)
 option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" OFF)
 option(PTO2_TENSORMAP_PROFILING "Enable tensormap lookup profiling" OFF)
+option(PTO2_TRACE_SUBMIT_ARGS_ENABLE "Enable pto2_submit_mixed_task argument tracing" OFF)
 
 # ─── Sim AICore / 0-core paths (for aicpu_ut perf) ─────────────────────────────
 # When ON: enables cores_total_num_==0, sim_aicore_mode, core_num==0 drain loop in executor.
@@ -105,6 +106,9 @@ if(PTO2_ORCH_PROFILING)
 endif()
 if(PTO2_TENSORMAP_PROFILING)
     list(APPEND COMMON_COMPILE_DEFS PTO2_TENSORMAP_PROFILING=1)
+endif()
+if(PTO2_TRACE_SUBMIT_ARGS_ENABLE)
+    list(APPEND COMMON_COMPILE_DEFS PTO2_TRACE_SUBMIT_ARGS_ENABLE=1)
 endif()
 if(PTO2_SIM_AICORE_UT)
     list(APPEND COMMON_COMPILE_DEFS PTO2_SIM_AICORE_UT=1)

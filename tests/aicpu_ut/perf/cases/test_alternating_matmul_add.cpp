@@ -187,7 +187,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 params.add_input(A_view);
                 params.add_input(B_view);
                 params.add_output(C_view);
-                pto2_submit_task(rt->orchestrators, FUNC_MATMUL, PTO2_WORKER_CUBE, params);
+                pto2_rt_submit_aic_task(rt, FUNC_MATMUL, params);
                 total_tasks++;
             }
             if (group_idx < num_add_groups) {
@@ -202,7 +202,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 params.add_input(X_view);
                 params.add_input(Y_view);
                 params.add_output(Z_view);
-                pto2_submit_task(rt->orchestrators, FUNC_ADD, PTO2_WORKER_VECTOR, params);
+                pto2_rt_submit_aiv_task(rt, FUNC_ADD, params);
                 total_tasks++;
             }
         }

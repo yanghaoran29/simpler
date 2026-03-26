@@ -171,7 +171,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 params_inplace.add_output(oi);
                 params_inplace.add_output(li_update);
                 params_inplace.add_output(mi_update);
-                pto2_submit_task(rt->orchestrators, FUNC_AIV_HUB, PTO2_WORKER_VECTOR, params_inplace);
+                pto2_rt_submit_aiv_task(rt, FUNC_AIV_HUB, params_inplace);
                 total_tasks++;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn++) {
@@ -191,7 +191,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     params_qk.add_input(qi);
                     params_qk.add_input(kj);
                     params_qk.add_output(sij);
-                    pto2_submit_task(rt->orchestrators, FUNC_QK_MATMUL, PTO2_WORKER_CUBE, params_qk);
+                    pto2_rt_submit_aic_task(rt, FUNC_QK_MATMUL, params_qk);
                     total_tasks++;
 
                     uint32_t sij_valid_shapes[2]   = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(valid_len)};
@@ -207,7 +207,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     params_sf.add_output(mi);
                     params_sf.add_output(li);
                     params_sf.add_scalar(float_to_u64(scale_value));
-                    pto2_submit_task(rt->orchestrators, FUNC_SOFTMAX_PREPARE, PTO2_WORKER_VECTOR, params_sf);
+                    pto2_rt_submit_aiv_task(rt, FUNC_SOFTMAX_PREPARE, params_sf);
                     total_tasks++;
 
                     uint32_t oi_tmp_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
@@ -217,7 +217,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     params_pv.add_input(pij_f16);
                     params_pv.add_input(vj);
                     params_pv.add_output(oi_tmp);
-                    pto2_submit_task(rt->orchestrators, FUNC_PV_MATMUL, PTO2_WORKER_CUBE, params_pv);
+                    pto2_rt_submit_aic_task(rt, FUNC_PV_MATMUL, params_pv);
                     total_tasks++;
 
                     uint64_t is_first = (bn == 0) ? 1 : 0;
@@ -233,7 +233,7 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     params_up.add_output(out_view);
                     params_up.add_scalar(is_first);
                     params_up.add_scalar(is_last);
-                    pto2_submit_task(rt->orchestrators, FUNC_ONLINE_UPDATE, PTO2_WORKER_VECTOR, params_up);
+                    pto2_rt_submit_aiv_task(rt, FUNC_ONLINE_UPDATE, params_up);
                     total_tasks++;
                 }
             }

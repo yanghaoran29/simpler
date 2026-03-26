@@ -274,6 +274,15 @@ void pto2_submit_mixed_task(
         return;
     }
 
+#if defined(PTO2_TRACE_SUBMIT_ARGS_ENABLE) && PTO2_TRACE_SUBMIT_ARGS_ENABLE
+    printf("[submit-args] mixed=(aic=%d,aiv0=%d,aiv1=%d) tensors=%d scalars=%d\n",
+           mixed_kernels.aic_kernel_id,
+           mixed_kernels.aiv0_kernel_id,
+           mixed_kernels.aiv1_kernel_id,
+           params.tensor_count,
+           params.scalar_count);
+#endif
+
 
     // Determine which ring this task belongs to
     uint8_t ring_id = orch->current_ring_id();
