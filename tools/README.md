@@ -8,6 +8,8 @@
 - **[sched_overhead_analysis.py](#sched_overhead_analysispy)** - Scheduler 开销分析（Tail OH 分解）
 - **[perf_to_mermaid.py](#perf_to_mermaidpy)** - 转换为 Mermaid 依赖图
 - **[benchmark_rounds.sh](#benchmark_roundssh)** - 批量运行 examples 并报告每轮耗时
+- **[gen_sweep_flamegraphs.sh](#gen_sweep_flamegraphssh)** - 自动下载 FlameGraph 并生成 Depend sweep 火焰图
+- **[organize_and_label_flamegraphs.py](#organize_and_label_flamegraphspy)** - 按 Depend 分组归档火焰图目录
 - **[device_log_resolver.py](#device_log_resolverpy)** - Device log 路径解析库
 
 ---
@@ -316,6 +318,61 @@ flowchart TD
 - 优先使用 `$ASCEND_WORK_PATH/log/debug/device-<id>/`
 - Fallback 到 `~/ascend/log/debug/device-<id>/`
 - 在运行前快照已有 log 文件，运行后等待新 log 文件出现（最多 15 秒）
+
+---
+
+## gen_sweep_flamegraphs.sh
+
+对 `test_latency` / `test_throughput` 进行 Depend sweep，调用 `perf` + FlameGraph 生成逐线程火焰图，并额外输出 Profiling1 打点开销报告。
+
+### 第三方依赖（FlameGraph）
+
+脚本会在运行时自动检查并下载 FlameGraph：
+
+- 下载目录：`tools/_deps/FlameGraph`
+- 默认仓库：`https://github.com/brendangregg/FlameGraph.git`
+- 该目录已加入 `.gitignore`，不会被提交到仓库
+
+可通过环境变量覆盖：
+
+```bash
+FLAMEGRAPH_REPO_URL=https://github.com/brendangregg/FlameGraph.git \
+FLAMEGRAPH_REF=master \
+bash tools/gen_sweep_flamegraphs.sh
+```
+
+### 基本用法
+
+```bash
+# 默认运行 O2 + O0，并生成 flamegraph 与 Profiling1 报告
+bash tools/gen_sweep_flamegraphs.sh
+
+# 自定义 perf 采样参数
+PERF_SAMPLE_FREQ=4999 PERF_CALLGRAPH_MODE=fp bash tools/gen_sweep_flamegraphs.sh
+
+# 仅跑 Profiling1（跳过 flamegraph）
+SKIP_FLAMEGRAPH=1 bash tools/gen_sweep_flamegraphs.sh
+```
+
+### 输出目录
+
+- `sweep_flamegraph/outputs/O2/Depend*/...`
+- `sweep_flamegraph/outputs/O0/Depend*/...`
+- `sweep_flamegraph/outputs/Profiling1/profiling_overhead_report.md`
+
+---
+
+## organize_and_label_flamegraphs.py
+
+轻量归档脚本：按 throughput 的 dependency（Depend2~Depend8）对火焰图目录进行分组拷贝，便于横向对比。
+
+### 基本用法
+
+```bash
+python3 tools/organize_and_label_flamegraphs.py \
+  --outputs sweep_flamegraph/outputs/O0 \
+  --out sweep_flamegraph/outputs/O0
+```
 
 ---
 
