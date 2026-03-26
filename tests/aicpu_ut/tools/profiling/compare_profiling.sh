@@ -13,8 +13,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AICPU_UT_DIR="${SCRIPT_DIR}/.."
-OUT_DIR="${SCRIPT_DIR}/../outputs/compare_profiling"
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/run_tests.sh" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+AICPU_UT_DIR="$SEARCH_DIR"
+OUT_DIR="${AICPU_UT_DIR}/outputs/compare_profiling"
 RUNS=${RUNS:-10}
 
 mkdir -p "$OUT_DIR"

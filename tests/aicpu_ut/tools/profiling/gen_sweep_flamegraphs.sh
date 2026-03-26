@@ -6,10 +6,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/run_tests.sh" ]]; do
+  SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+AICPU_UT_DIR="$SEARCH_DIR"
+ROOT_DIR="$(cd "${AICPU_UT_DIR}/../.." && pwd)"
 DEPS_DIR="${SCRIPT_DIR}/_deps"
 FLAMEGRAPH_DIR="${DEPS_DIR}/FlameGraph"
-AICPU_UT_DIR="${ROOT_DIR}/tests/aicpu_ut"
 RUN_TESTS="${AICPU_UT_DIR}/run_tests.sh"
 BIN_DIR="${AICPU_UT_DIR}/build/bin"
 OUT_ROOT="${ROOT_DIR}/sweep_flamegraph/outputs"

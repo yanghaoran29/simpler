@@ -23,6 +23,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/run_tests.sh" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+AICPU_UT_DIR="$SEARCH_DIR"
 
 # ─── 参数默认值 ───────────────────────────────────────────────────────────────
 BIN_NAME=""            # 必填，通过 --bin 指定
@@ -63,7 +68,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-BUILD_DIR="${SCRIPT_DIR}/../build"
+BUILD_DIR="${AICPU_UT_DIR}/build"
 
 if [[ -z "$BIN_NAME" ]]; then
     echo "Error: --bin <binary_name> is required." >&2
@@ -86,7 +91,7 @@ if $DO_BUILD; then
     echo "============================================================"
     echo "  Building all binaries"
     echo "============================================================"
-    bash "${SCRIPT_DIR}/../run_tests.sh" \
+    bash "${AICPU_UT_DIR}/run_tests.sh" \
         --build-only \
         --sched-threads "$SCHED_THREADS" \
         $($PROFILING || echo "--no-profiling") \

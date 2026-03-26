@@ -11,10 +11,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AICPU_UT_DIR="${SCRIPT_DIR}/.."
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/run_tests.sh" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+AICPU_UT_DIR="$SEARCH_DIR"
+PROJECT_ROOT="$(cd "${AICPU_UT_DIR}/../.." && pwd)"
 BIN="${AICPU_UT_DIR}/build/bin/test_latency_orch_only_1"
 OUT_DIR="${AICPU_UT_DIR}/outputs/flamegraph"
-FLAMEGRAPH_DIR="${SCRIPT_DIR}/../../../.."
+FLAMEGRAPH_DIR="${PROJECT_ROOT}"
 REPEAT=${REPEAT:-1}
 
 mkdir -p "$OUT_DIR"

@@ -1,5 +1,10 @@
 # Swimlane 性能分析工具
 
+> 路径已迁移：原 `tools/` 目录已并入 `tests/aicpu_ut/tools/`，本目录当前位于  
+> `tests/aicpu_ut/tools/profiling/`。  
+> 文档内若出现旧命令 `tools/<script>`，请替换为  
+> `tests/aicpu_ut/tools/profiling/<script>`（从仓库根目录执行）。
+
 本目录包含 PTO Runtime 的性能分析工具。
 
 ## 工具列表

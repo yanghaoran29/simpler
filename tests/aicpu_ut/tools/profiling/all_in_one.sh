@@ -14,7 +14,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AICPU_UT_DIR="${SCRIPT_DIR}/.."
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/run_tests.sh" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+AICPU_UT_DIR="$SEARCH_DIR"
 OUT_DIR="${AICPU_UT_DIR}/outputs/profiling_report"
 SWEEP_LAT_DIR="${AICPU_UT_DIR}/outputs/sweep_latency_p1"
 SWEEP_THR_DIR="${AICPU_UT_DIR}/outputs/sweep_throughput_p1"
@@ -179,7 +183,7 @@ else
 
     echo ""
     echo "=== 1. Profiling 1 vs 2 对比 (各 ${RUNS} 次) ==="
-    RUNS="$RUNS" bash "${SCRIPT_DIR}/compare_profiling.sh" 2>&1 | tee "${OUT_DIR}/compare_p1_p2.txt"
+RUNS="$RUNS" bash "${SCRIPT_DIR}/compare_profiling.sh" 2>&1 | tee "${OUT_DIR}/compare_p1_p2.txt"
 
     echo ""
     # 确保 P2 采集使用的 binary 是以 PTO2_ORCH_PROFILING=1 编译的，否则 log 中不会有 Orchestrator 子项

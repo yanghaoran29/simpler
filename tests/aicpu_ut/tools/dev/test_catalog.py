@@ -16,7 +16,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+def _project_root() -> Path:
+    cur = Path(__file__).resolve()
+    for p in cur.parents:
+        if (p / "examples").is_dir() and (p / "tests").is_dir() and (p / "src").is_dir():
+            return p
+    return cur.parent
+
+
+PROJECT_ROOT = _project_root()
 
 # ---------------------------------------------------------------------------
 # Platform / runtime discovery

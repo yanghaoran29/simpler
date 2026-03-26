@@ -18,6 +18,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/run_tests.sh" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+if [[ ! -f "$SEARCH_DIR/run_tests.sh" ]]; then
+    echo "Error: cannot locate run_tests.sh from $SCRIPT_DIR" >&2
+    exit 1
+fi
+AICPU_UT_DIR="$SEARCH_DIR"
 if [[ "${1:-}" = "--profiling" && -n "${2:-}" ]]; then
     PROFILING_MODE="$2"; shift 2
 else
@@ -27,7 +36,7 @@ THREAD_MODE=${THREAD_MODE:-concurrent}
 SUFFIX=""
 case "$PROFILING_MODE" in 0) SUFFIX="_p0" ;; 1) SUFFIX="_p1" ;; 2) SUFFIX="_p2" ;; *) SUFFIX="_p${PROFILING_MODE}" ;; esac
 case "$THREAD_MODE" in orch) SUFFIX="${SUFFIX}_orch" ;; sched) SUFFIX="${SUFFIX}_sched" ;; esac
-LOG_DIR="${SCRIPT_DIR}/../outputs/sweep_throughput${SUFFIX}"
+LOG_DIR="${AICPU_UT_DIR}/outputs/sweep_throughput${SUFFIX}"
 mkdir -p "$LOG_DIR"
 
 RUNS=${RUNS:-10}
@@ -43,7 +52,7 @@ run_one() {
     local X=$1 Y=$2 Z=$3 W=$4 label=$5 run_idx=$6
     local log_file="${LOG_DIR}/${label}_run${run_idx}.log"
     printf "  [%d/%d] → %s\n" "$run_idx" "$RUNS" "$(basename "$log_file")"
-    bash "${SCRIPT_DIR}/../run_tests.sh" \
+    bash "${AICPU_UT_DIR}/run_tests.sh" \
         --test test_throughput \
         --layer-num    "$X" \
         --dependency   "$Y" \

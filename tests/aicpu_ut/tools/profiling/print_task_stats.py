@@ -25,6 +25,14 @@ import argparse
 import sys
 from pathlib import Path
 
+def _project_root() -> Path:
+    cur = Path(__file__).resolve()
+    for p in cur.parents:
+        if (p / "examples").is_dir() and (p / "tests").is_dir():
+            return p
+    return cur.parent
+
+
 # 支持从项目根或 tools 目录运行
 if __name__ == "__main__":
     _tools_dir = Path(__file__).resolve().parent
@@ -43,7 +51,7 @@ from swimlane_converter import (
 
 def _latest_perf_json():
     """返回 outputs/ 下最新的 perf_swimlane_*.json 路径。"""
-    root = Path(__file__).resolve().parent.parent
+    root = _project_root()
     out_dir = root / "outputs"
     if not out_dir.exists():
         return None

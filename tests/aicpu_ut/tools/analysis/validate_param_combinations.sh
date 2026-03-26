@@ -27,7 +27,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_SH="${SCRIPT_DIR}/../run_tests.sh"
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/run_tests.sh" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+RUN_SH="${SEARCH_DIR}/run_tests.sh"
 
 if [ ! -f "$RUN_SH" ]; then
     echo "ERROR: run_tests.sh not found at $RUN_SH" >&2
@@ -36,7 +40,7 @@ fi
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 TS=$(date +%Y%m%d_%H%M%S)
-OUT_DIR="${SCRIPT_DIR}/../outputs/validate_results_$TS"
+OUT_DIR="${SEARCH_DIR}/outputs/validate_results_$TS"
 QUICK=false
 TIMEOUT_SEC=300
 NO_BUILD=false
