@@ -39,6 +39,15 @@ static constexpr int GRID_N = 4;
 static constexpr int BATCH = 2;
 
 static constexpr uint32_t TILE_ELEMS = TILE * TILE;           // 4096 elements
+static constexpr uint64_t TILE_BYTES = TILE_ELEMS * sizeof(float);  // 131072 bytes
+
+// Args layout: [ptr_A, ptr_B, ptr_C, size_A, size_B, size_C, elem_count]
+#define ARG_PTR_A   0
+#define ARG_PTR_B   1
+#define ARG_PTR_C   2
+#define ARG_SIZE_A  3
+#define ARG_SIZE_B  4
+#define ARG_SIZE_C  5
 
 extern "C" {
 

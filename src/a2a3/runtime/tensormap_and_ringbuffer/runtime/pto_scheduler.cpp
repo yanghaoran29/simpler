@@ -19,6 +19,9 @@
 
 #if PTO2_SCHED_PROFILING
 #include "common/platform_config.h"
+#endif
+
+#if PTO2_SCHED_PROFILING
 
 uint64_t g_sched_lock_cycle[PLATFORM_MAX_AICPU_THREADS] = {};
 uint64_t g_sched_fanout_cycle[PLATFORM_MAX_AICPU_THREADS] = {};

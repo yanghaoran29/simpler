@@ -58,6 +58,7 @@ static uint32_t g_orch_submit_idx = 0;
 uint64_t g_orch_alloc_wait_cycle = 0;
 uint64_t g_orch_heap_wait_cycle = 0;
 uint64_t g_orch_fanin_wait_cycle = 0;
+uint64_t g_orch_finalize_wait_cycle = 0;
 uint64_t g_orch_alloc_atomic_count = 0;
 uint64_t g_orch_params_atomic_count = 0;
 uint64_t g_orch_heap_atomic_count = 0;
@@ -249,6 +250,15 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 // =============================================================================
 void pto2_submit_mixed_task(
     PTO2OrchestratorState* orch, const MixedKernels& mixed_kernels, const PTOParam& params) {
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x3, x3, x3");
+    struct Pto2SubmitMarkerScope {
+        ~Pto2SubmitMarkerScope()
+        {
+            __asm__ __volatile__("orr x4, x4, x4");
+        }
+    } marker_scope;
+#endif
     CYCLE_COUNT_START();
 
     // Fast path after fatal error — all subsequent submits are no-ops
