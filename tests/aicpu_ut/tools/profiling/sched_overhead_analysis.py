@@ -23,9 +23,17 @@ except ImportError:
     from tools.device_log_resolver import infer_device_id_from_log_path, resolve_device_log_path
 
 
+def _project_root() -> Path:
+    cur = Path(__file__).resolve()
+    for p in cur.parents:
+        if (p / "examples").is_dir() and (p / "tests").is_dir():
+            return p
+    return cur.parent
+
+
 def auto_select_perf_json():
     """Find the latest perf_swimlane_*.json in outputs/ directory."""
-    outputs_dir = Path(__file__).parent.parent / 'outputs'
+    outputs_dir = _project_root() / 'outputs'
     files = sorted(outputs_dir.glob('perf_swimlane_*.json'), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         raise FileNotFoundError(f"No perf_swimlane_*.json files found in {outputs_dir}")

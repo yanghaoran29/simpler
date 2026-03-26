@@ -1,5 +1,10 @@
 # Swimlane 性能分析工具
 
+> 路径已迁移：原 `tools/` 目录已并入 `tests/aicpu_ut/tools/`，本目录当前位于  
+> `tests/aicpu_ut/tools/profiling/`。  
+> 文档内若出现旧命令 `tools/<script>`，请替换为  
+> `tests/aicpu_ut/tools/profiling/<script>`（从仓库根目录执行）。
+
 本目录包含 PTO Runtime 的性能分析工具。
 
 ## 工具列表
@@ -272,7 +277,7 @@ flowchart TD
 
 ### 功能概述
 
-`benchmark_rounds.sh` 遍历 `EXAMPLES` 数组中配置的测试用例（位于 `tests/device_tests/tensormap_and_ringbuffer/` 下），依次调用 `run_example.py` 运行每个 example，然后从生成的 device log 中提取 `orch_start` / `orch_end` / `sched_end` 时间戳计算每轮 elapsed 时间。
+`benchmark_rounds.sh` 遍历 `EXAMPLES` 数组中配置的测试用例（位于 `tests/st/tensormap_and_ringbuffer/` 下），依次调用 `run_example.py` 运行每个 example，然后从生成的 device log 中提取 `orch_start` / `orch_end` / `sched_end` 时间戳计算每轮 elapsed 时间。
 
 当前预配置的 examples：
 - `alternating_matmul_add`

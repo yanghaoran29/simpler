@@ -10,12 +10,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/examples/scripts/run_example.py" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+PROJECT_ROOT="$SEARCH_DIR"
 RUN_EXAMPLE="$PROJECT_ROOT/examples/scripts/run_example.py"
 
 # ---------------------------------------------------------------------------
 # Examples to benchmark and their case lists, per runtime.
-# Key   = directory name under tests/device_tests/<platform>/<runtime>/
+# Key   = directory name under tests/st/<platform>/<runtime>/
 # Value = comma-separated case names to run (empty string = run DEFAULT_CASE)
 # ---------------------------------------------------------------------------
 
@@ -124,7 +128,7 @@ vlog() {
 # ---------------------------------------------------------------------------
 # Derive arch from platform and set examples directory
 # ---------------------------------------------------------------------------
-EXAMPLES_DIR="$PROJECT_ROOT/tests/device_tests/${PLATFORM}/${RUNTIME}"
+EXAMPLES_DIR="$PROJECT_ROOT/tests/st/${PLATFORM}/${RUNTIME}"
 
 # Clock frequency (MHz) for converting cycle counts to microseconds
 case "$PLATFORM" in
