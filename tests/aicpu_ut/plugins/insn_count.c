@@ -41,7 +41,15 @@ static uint32_t g_marker_start_enc = 0xaa030063u; /* orr x3, x3, x3 */
 static uint32_t g_marker_end_enc = 0xaa040084u;   /* orr x4, x4, x4 */
 static uint64_t g_between_markers_insns;
 static uint64_t g_between_markers_sessions;
-static int g_marker_active[MAX_VCPU];
+typedef struct {
+    uint64_t session_id;
+    uint32_t cpu_id;
+    uint64_t insn_count;
+} MarkerSession;
+static MarkerSession* g_marker_sessions;
+static size_t g_marker_sessions_count;
+static size_t g_marker_sessions_cap;
+static int64_t g_active_marker_session_idx[MAX_VCPU];
 
 typedef struct {
     uint64_t lo;
@@ -62,6 +70,25 @@ typedef struct TNode {
 } TNode;
 
 static TNode* g_root_accum;
+
+static int marker_append_session(uint32_t cpu_id)
+{
+    if (g_marker_sessions_count == g_marker_sessions_cap) {
+        size_t new_cap = (g_marker_sessions_cap == 0) ? 1024 : (g_marker_sessions_cap * 2);
+        MarkerSession* ns = realloc(g_marker_sessions, new_cap * sizeof(MarkerSession));
+        if (!ns) {
+            return -1;
+        }
+        g_marker_sessions = ns;
+        g_marker_sessions_cap = new_cap;
+    }
+    size_t idx = g_marker_sessions_count++;
+    g_marker_sessions[idx].session_id = g_between_markers_sessions + 1;
+    g_marker_sessions[idx].cpu_id = cpu_id;
+    g_marker_sessions[idx].insn_count = 0;
+    g_between_markers_sessions++;
+    return (int)idx;
+}
 
 /* Guest link-time offset: guest_pc - bias == nm symbol file address (learned at runtime). */
 static int g_have_pc_bias;
@@ -496,15 +523,19 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
         cpu_index = 0;
     }
     if (enc == g_marker_start_enc) {
-        g_marker_active[cpu_index] = 1;
-        g_between_markers_sessions++;
+        int idx = marker_append_session((uint32_t)cpu_index);
+        if (idx >= 0) {
+            g_active_marker_session_idx[cpu_index] = idx;
+        }
         return;
     }
     if (enc == g_marker_end_enc) {
-        g_marker_active[cpu_index] = 0;
+        g_active_marker_session_idx[cpu_index] = -1;
         return;
     }
-    if (g_marker_active[cpu_index]) {
+    int64_t active_idx = g_active_marker_session_idx[cpu_index];
+    if (active_idx >= 0 && (size_t)active_idx < g_marker_sessions_count) {
+        g_marker_sessions[active_idx].insn_count++;
         g_between_markers_insns++;
     }
 }
@@ -747,14 +778,46 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
     }
 
     if (g_marker_mode) {
+        uint64_t max_session_insns = 0;
+        uint64_t min_session_insns = 0;
+        uint64_t avg_session_insns = 0;
+        if (g_marker_sessions_count > 0) {
+            min_session_insns = UINT64_MAX;
+            for (size_t i = 0; i < g_marker_sessions_count; i++) {
+                uint64_t v = g_marker_sessions[i].insn_count;
+                if (v > max_session_insns) {
+                    max_session_insns = v;
+                }
+                if (v < min_session_insns) {
+                    min_session_insns = v;
+                }
+            }
+            avg_session_insns = g_between_markers_insns / g_marker_sessions_count;
+        }
         snprintf(line, sizeof line,
-            "QEMU_TCG between_markers_insns: %" PRIu64 " (sessions=%" PRIu64 ", start=0x%08x, end=0x%08x)\n",
-            g_between_markers_insns, g_between_markers_sessions, g_marker_start_enc, g_marker_end_enc);
+            "QEMU_TCG between_markers_insns: %" PRIu64
+            " (sessions=%" PRIu64 ", avg_per_session=%" PRIu64
+            ", max_session_insns=%" PRIu64 ", min_session_insns=%" PRIu64
+            ", start=0x%08x, end=0x%08x)\n",
+            g_between_markers_insns,
+            g_between_markers_sessions,
+            avg_session_insns,
+            max_session_insns,
+            min_session_insns,
+            g_marker_start_enc,
+            g_marker_end_enc);
         qemu_plugin_outs(line);
         if (g_outfile && g_outfile[0]) {
             FILE* f = fopen(g_outfile, "w");
             if (f) {
                 fputs(line, f);
+                fputs("session_id,cpu_id,insn_count\n", f);
+                for (size_t i = 0; i < g_marker_sessions_count; i++) {
+                    fprintf(f, "%" PRIu64 ",%u,%" PRIu64 "\n",
+                        g_marker_sessions[i].session_id,
+                        g_marker_sessions[i].cpu_id,
+                        g_marker_sessions[i].insn_count);
+                }
                 fclose(f);
             }
         }
@@ -783,6 +846,10 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
     }
 
 cleanup:
+    free(g_marker_sessions);
+    g_marker_sessions = NULL;
+    g_marker_sessions_count = 0;
+    g_marker_sessions_cap = 0;
     if (g_syms) {
         for (size_t i = 0; i < g_n_syms; i++) {
             free(g_syms[i].name);
@@ -883,7 +950,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             return -1;
         }
         for (int c = 0; c < MAX_VCPU; c++) {
-            g_marker_active[c] = 0;
+            g_active_marker_session_idx[c] = -1;
         }
     }
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
