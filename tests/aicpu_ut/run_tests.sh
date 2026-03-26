@@ -29,6 +29,8 @@
 #   ./run_tests.sh --profiling 2                    # 完整 profiling（Sched+Orch 明细）；stdout 经 format_profiling_output 整理
 #   ./run_tests.sh --profiling 2 --swimlane        # 完整 profiling + 将 swimlane JSON 转为 Perfetto + Mermaid
 #   ./run_tests.sh --no-check                        # skip P1/P2 invariant checks (AICPU_UT_NO_CHECK=1)
+#   ./run_tests.sh --count-submit-task-instructions --test test_batch_paged_attention --idx 0
+#     # 统计 pto2_submit_mixed_task 标记区间动态指令数（调用 tools/count_between_markers.sh）
 #   ./run_tests.sh --list                          # list all available tests
 #
 # Available tests:
@@ -127,6 +129,7 @@ AICPU_UT_LATENCY_CHAIN_LENGTH=""     # set by --chain-length L (override chain_l
 AICPU_UT_NO_EARLY_RETURN=""     # set by --no-early-return: drain before break/return so completed==consumed
 AICPU_UT_NO_CHECK=""            # set by --no-check: skip P1/P2 invariant checks in test binaries
 GEN_SWIMLANE=false              # set by --swimlane: convert perf_swimlane_*.json after run
+COUNT_SUBMIT_TASK_INSNS=0       # set by --count-submit-task-instructions
 
 # ─── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -206,6 +209,8 @@ while [[ $# -gt 0 ]]; do
             AICPU_UT_NO_CHECK=1; shift ;;
         --swimlane)
             GEN_SWIMLANE=true; shift ;;
+        --count-submit-task-instructions)
+            COUNT_SUBMIT_TASK_INSNS=1; shift ;;
         --list)
             echo "Available tests (use --orch or --sched to select thread mode for perf tests):"
             for name in "${ALL_TESTS[@]}"; do
@@ -227,6 +232,25 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ]; then
+    tool_script="${SCRIPT_DIR}/tools/count_between_markers.sh"
+    if [ ! -x "$tool_script" ]; then
+        echo "[run_tests] missing executable tool: $tool_script" >&2
+        echo "[run_tests] run: chmod +x ${SCRIPT_DIR}/tools/count_between_markers.sh" >&2
+        exit 1
+    fi
+    mode_arg="concurrent"
+    case "${THREAD_MODE}" in
+        orch) mode_arg="orch" ;;
+        sched) mode_arg="sched" ;;
+        *) mode_arg="concurrent" ;;
+    esac
+    test_arg="${FILTER_TEST:-test_batch_paged_attention}"
+    idx_arg="${FILTER_IDX:-0}"
+    "$tool_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg"
+    exit $?
+fi
 
 # When --sched-threads N is used, ensure PLATFORM_MAX_AICPU_THREADS >= N so the build supports N threads
 if [ -n "${AICPU_UT_NUM_SCHED_THREADS:-}" ] && [ "$AICPU_UT_NUM_SCHED_THREADS" -gt "${PLATFORM_MAX_AICPU_THREADS:-0}" ] 2>/dev/null; then

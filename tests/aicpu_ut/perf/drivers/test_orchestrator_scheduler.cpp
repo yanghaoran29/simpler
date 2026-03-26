@@ -26,6 +26,7 @@
 #include "sim_swimlane.h"
 #include "sim_aicore.h"
 #include <cstring>
+#include <cstdlib>
 #include <functional>
 
 int g_pass = 0;
@@ -73,5 +74,8 @@ int main() {
 #endif
 
     pto2_runtime_destroy(rt);
-    return (g_fail == 0) ? 0 : 1;
+    // Avoid unsafe global-simulator teardown order at process exit.
+    fflush(stdout);
+    fflush(stderr);
+    _Exit((g_fail == 0) ? 0 : 1);
 }

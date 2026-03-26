@@ -91,7 +91,7 @@ inline int export_sim_swimlane(PTO2Runtime* rt, const char* output_dir = nullptr
                     ? payload.fanin_actual_count : PTO2_MAX_INPUTS;
         for (int k = 0; k < n; k++)
             info.fanin_tasks[k] = payload.fanin_slot_states[k] != nullptr
-                ? static_cast<int32_t>(pto2_task_id_local(payload.fanin_slot_states[k]->task->mixed_task_id)) : -1;
+                ? static_cast<int32_t>(payload.fanin_slot_states[k]->task->mixed_task_id.local()) : -1;
     }
 
     // ── Step 2: build fanout adjacency from fanin_tasks ──────────────────────

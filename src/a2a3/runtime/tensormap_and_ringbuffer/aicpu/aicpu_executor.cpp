@@ -351,14 +351,9 @@ struct AicpuExecutor {
         int32_t kernel_id,
         PTO2TaskPayload& task_pl) {
         out.function_bin_addr = get_function_bin_addr(kernel_id);
-        int32_t n = 0;
-        for (int32_t i = 0; i < task_pl.tensor_count; i++) {
-            task_pl.tensors[i].update_start_offset();
-            out.args[n++] = reinterpret_cast<uint64_t>(&task_pl.tensors[i]);
-        }
-        for (int32_t i = 0; i < task_pl.scalar_count; i++) {
-            out.args[n++] = task_pl.scalars[i];
-        }
+        // dispatch_args is pre-built by orchestrator in PTO2TaskPayload::init().
+        // PTO2DispatchPayload only carries a pointer to that argument array.
+        out.args = task_pl.dispatch_args;
     }
 
     // Template methods for Phase 1 and Phase 2
@@ -635,9 +630,9 @@ struct AicpuExecutor {
 #if defined(PTO2_SIM_AICORE_UT)
         {
             uint64_t reg_addr = core_id_to_reg_addr_[core_id];
-            write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(pto2_task_id_local(task.mixed_task_id) + 1));
+            write_reg(reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(task.mixed_task_id.local() + 1));
         }
-        int32_t reg_task_id = static_cast<int32_t>(pto2_task_id_local(task.mixed_task_id));
+        int32_t reg_task_id = static_cast<int32_t>(task.mixed_task_id.local());
 #if PTO2_PROFILING
         CoreType sim_ct = (subslot == PTO2SubtaskSlot::AIC) ? CoreType::AIC : CoreType::AIV;
         pto2_sim_record_dispatch(static_cast<int32_t>(sim_ct));
@@ -1794,6 +1789,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
         cycles_to_us(sched_total),
         (unsigned long long)sched_loop_count,
         cur_thread_completed);
+
 #endif
 
 #if PTO2_PROFILING

@@ -12,6 +12,43 @@
 
 // Forward declaration
 struct PTO2Runtime;
+// Forward declarations for scope API (declared in pto_runtime2.h)
+void pto2_rt_scope_begin(PTO2Runtime* rt);
+void pto2_rt_scope_end(PTO2Runtime* rt);
+
+// Runtime helpers used by perf test cases.
+#include "tensor.h"
+#include "data_type.h"
+
+static inline Tensor make_tensor_external(void* base, const uint32_t* shapes, uint32_t ndims, DataType dtype) {
+    uint32_t raw[RUNTIME_MAX_TENSOR_DIMS] = {};
+    uint32_t off[RUNTIME_MAX_TENSOR_DIMS] = {};
+    uint64_t elems = 1;
+    for (uint32_t i = 0; i < ndims; i++) {
+        raw[i] = shapes[i];
+        off[i] = 0;
+        elems *= static_cast<uint64_t>(shapes[i]);
+    }
+    uint64_t bytes = elems * get_element_size(dtype);
+    Tensor t;
+    t.init(base, bytes, raw, shapes, off, ndims, dtype, /*version*/0,
+           /*is_all_offset_zero*/true, /*is_raw_eq_shapes*/true);
+    return t;
+}
+
+static inline Tensor make_tensor(const uint32_t* shapes, uint32_t ndims, DataType dtype) {
+    return make_tensor_external(nullptr, shapes, ndims, dtype);
+}
+
+struct PTO2ScopeGuard {
+    explicit PTO2ScopeGuard(PTO2Runtime* rt_) : rt(rt_), active(true) { pto2_rt_scope_begin(rt); }
+    ~PTO2ScopeGuard() { if (active) pto2_rt_scope_end(rt); }
+    PTO2ScopeGuard(const PTO2ScopeGuard&) = delete;
+    PTO2ScopeGuard& operator=(const PTO2ScopeGuard&) = delete;
+    PTO2Runtime* rt;
+    bool active;
+};
+#define PTO2_SCOPE(rt) for (PTO2ScopeGuard _pto2_scope_guard((rt)); _pto2_scope_guard.active; _pto2_scope_guard.active = false)
 
 // Global test counters
 extern int g_pass;
