@@ -1,12 +1,10 @@
 /**
  * sim_run_pto2.cpp
  *
- * PTO2_SIM_AICORE_UT: implementation of aicpu_sim_run_pto2 and related getters/setters.
+ * Implementation of aicpu_sim_run_pto2 and related getters/setters.
  * Moved from aicpu_executor.cpp so simulation entry points live in aicpu_ut.
  * Calls executor via aicpu_sim_set_rt, aicpu_executor_sim_* wrappers.
  */
-
-#if defined(PTO2_SIM_AICORE_UT)
 
 #include <atomic>
 #include <cstring>
@@ -256,5 +254,3 @@ void pto2_sim_get_dispatch_counts(int64_t* out, int n) {
         out[i] = s_sim_tasks_dispatched[i].load(std::memory_order_relaxed);
 }
 #endif
-
-#endif  // PTO2_SIM_AICORE_UT

@@ -21,9 +21,7 @@
 
 #include "pto_runtime2.h"
 #include "test_common.h"
-#if defined(PTO2_SIM_AICORE_UT)
 #include "sim_aicore.h"
-#endif
 #include "common/platform_config.h"
 #include "cpu_affinity.h"
 #include <cstdint>
@@ -49,8 +47,6 @@ static constexpr int BGEMM_CASE_COUNT = 5;
 static_assert(PERF_CASE_IDX >= 0 && PERF_CASE_IDX < BGEMM_CASE_COUNT,
               "PERF_CASE_IDX out of range");
 
-extern const BgemmTestCase PERF_CASES[BGEMM_CASE_COUNT];
-
 // Buffer sizes covering the largest case.
 // Case 0: num_groups=250, grid_k=2, incore_loop=4, tile=128
 //   A/B: [250, 2, 4, 128, 128] → 32,768,000 floats
@@ -59,11 +55,6 @@ static constexpr size_t BGEMM_MAX_AB_NELEMS = 250UL * 2 * 4 * 128 * 128;  // 32,
 static constexpr size_t BGEMM_MAX_C_NELEMS  =  4UL * 250 * 128 * 128;     // 16,384,000
 static constexpr size_t BGEMM_CONFIG_NELEMS = 4;  // [tile_size, grid_k, num_groups, incore_loop]
 
-extern float   g_bgemm_A[BGEMM_MAX_AB_NELEMS];
-extern float   g_bgemm_B[BGEMM_MAX_AB_NELEMS];
-extern float   g_bgemm_C[BGEMM_MAX_C_NELEMS];
-extern int64_t g_bgemm_config[BGEMM_CONFIG_NELEMS];
-
 #define FUNC_GEMM_TILE 0
 #define FUNC_TILE_ADD  1
 
@@ -71,17 +62,6 @@ struct GraphCtx {
     int64_t  config[4];   // tile_size, grid_k, num_groups, incore_loop
     uint64_t args[10];
 };
-
-int          get_num_sched_threads();
-void         perf_wait_sigstop();
-void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const BgemmTestCase& tc, GraphCtx& ctx);
-
-#if PTO2_PROFILING
-void section_header_100(char pad_char, const char* title);
-void print_config(const BgemmTestCase& tc);
-void print_cpu_affinity(int num_sched, int orch_cpu);
-#endif
 
 // ─── Definitions ──────────────────────────────────────────────────────────────
 
@@ -97,26 +77,6 @@ float   g_bgemm_A[BGEMM_MAX_AB_NELEMS];
 float   g_bgemm_B[BGEMM_MAX_AB_NELEMS];
 float   g_bgemm_C[BGEMM_MAX_C_NELEMS];
 int64_t g_bgemm_config[BGEMM_CONFIG_NELEMS];
-
-int get_num_sched_threads() {
-    int n = 3;
-    const char* env = std::getenv("AICPU_UT_NUM_SCHED_THREADS");
-    if (env && *env) n = std::atoi(env);
-    if (n < 1) n = 1;
-    if (n > PLATFORM_MAX_AICPU_THREADS) n = PLATFORM_MAX_AICPU_THREADS;
-    return n;
-}
-
-void perf_wait_sigstop() {
-    if (std::getenv("PERF_WAIT_AFTER_INIT")) {
-        pid_t pid = getpid();
-        printf("  [perf] Init done. PID=%d — attach perf, then send SIGCONT:\n", (int)pid);
-        printf("  [perf]   perf record -g -p %d -o perf.data\n", (int)pid);
-        printf("  [perf]   kill -CONT %d\n", (int)pid);
-        fflush(stdout);
-        raise(SIGSTOP);
-    }
-}
 
 /**
  * build_graph — builds a batched tiled-GEMM task graph.
@@ -234,34 +194,11 @@ PTO2Runtime* setup_run(const BgemmTestCase& tc, GraphCtx& ctx) {
 
 #if PTO2_PROFILING
 
-void section_header_100(char pad_char, const char* title) {
-    int len   = static_cast<int>(strlen(title));
-    int left  = (100 - len) / 2;
-    int right = 100 - len - left;
-    for (int i = 0; i < left;  i++) putchar(pad_char);
-    printf("%s", title);
-    for (int i = 0; i < right; i++) putchar(pad_char);
-    putchar('\n');
-}
-
 void print_config(const BgemmTestCase& tc) {
     section_header_100('-', "--- Config ---");
     int total_tasks = tc.num_groups * tc.grid_k * 2;  // gemm + add per (group, k)
     printf("  tile_size=%d, grid_k=%d, num_groups=%d, incore_loop=%d, total_tasks=%d\n",
            tc.tile_size, tc.grid_k, tc.num_groups, tc.incore_loop, total_tasks);
-}
-
-void print_cpu_affinity(int num_sched, int orch_cpu) {
-    static const int sched_cpus[] = {
-        SCHED_CPU0, SCHED_CPU1, SCHED_CPU2, SCHED_CPU3,
-        SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
-    };
-    section_header_100('-', "--- CPU affinity ---");
-    printf("  orchestrator → core %d\n", orch_cpu >= 0 ? orch_cpu : ORCH_CPU);
-    int max_sched = static_cast<int>(sizeof(sched_cpus) / sizeof(sched_cpus[0]));
-    for (int i = 0; i < num_sched && i < max_sched; i++)
-        printf("  scheduler[%d]  → core %d (configured)\n", i, sched_cpus[i]);
-    printf("\n");
 }
 
 #endif  // PTO2_PROFILING

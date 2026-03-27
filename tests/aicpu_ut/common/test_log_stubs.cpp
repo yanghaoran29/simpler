@@ -2,7 +2,7 @@
  * test_log_stubs.cpp
  *
  * Unified log function stubs for orchestration unit tests.
- * When PTO2_SIM_AICORE_UT: also provides device_log (dev_log_*) stubs for aicpu_executor.
+ * Also provides device_log (dev_log_*) stubs for aicpu_executor.
  * When AICPU_UT_PHASE_LOG is set, dev_log_always also appends each line to that file
  * (Thread release, PTO2 progress, Scheduler Phase Breakdown, etc.).
  */
@@ -13,7 +13,6 @@
 #include <cstring>
 #include <mutex>
 
-#if defined(PTO2_SIM_AICORE_UT)
 #include "aicpu/device_log.h"
 bool g_is_log_enable_debug = false;
 bool g_is_log_enable_info = false;
@@ -58,7 +57,6 @@ void dev_log_always(const char* /* func */, const char* fmt, ...) {
         }
     }
 }
-#endif
 
 extern "C" {
 

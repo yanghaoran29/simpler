@@ -58,7 +58,14 @@ int main() {
     if (aicpu_sim_run_pto2_concurrent(rt, num_sched, [&ctx, &orch_actual_cpu](PTO2Runtime* r) {
             bind_to_cpu(ORCH_CPU);
             orch_actual_cpu = current_cpu();
+#if defined(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE) && PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE
+            /* QEMU insn_count: start (orr x17) enc 0xaa110231 — distinct from submit_mixed_task markers */
+            __asm__ volatile("orr x17, x17, x17" ::: "memory");
+#endif
             build_graph(r, ctx.args, 10);
+#if defined(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE) && PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE
+            __asm__ volatile("orr x18, x18, x18" ::: "memory");
+#endif
         }) != 0) {
 #if PTO2_PROFILING
         printf("  [ERROR] aicpu_sim_run_pto2_concurrent failed\n");

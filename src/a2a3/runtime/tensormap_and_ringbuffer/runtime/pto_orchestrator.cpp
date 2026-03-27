@@ -244,6 +244,7 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 void pto2_submit_mixed_task(
     PTO2OrchestratorState* orch, const MixedKernels& mixed_kernels, const PTOParam& params) {
 #if defined(__aarch64__)
+    // Whole submit range marker (legacy pair used by existing tooling).
     __asm__ __volatile__("orr x3, x3, x3");
     struct Pto2SubmitMarkerScope {
         ~Pto2SubmitMarkerScope()
@@ -356,6 +357,9 @@ void pto2_submit_mixed_task(
     }
 
     // === STEP 1: Unified alloc — task slot + packed output buffer (blocks until available) ===
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x5, x5, x5");
+#endif
     PTO2TaskAllocResult alloc_result = allocator.alloc(total_output_size);
     if (alloc_result.failed()) { orch->fatal = true; return; }
 
@@ -406,6 +410,9 @@ void pto2_submit_mixed_task(
     PTO2TaskSlotState* fanin_states[PTO2_MAX_INPUTS];
     int32_t fanin_count = 0;
 
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x6, x6, x6");
+#endif
     CYCLE_COUNT_LAP_RECORD(g_orch_alloc_cycle, AicpuPhaseId::ORCH_ALLOC, task_id.raw);
 
 #if PTO2_PROFILING
@@ -416,6 +423,9 @@ void pto2_submit_mixed_task(
 #endif
 
     // === STEP 2: Sync TensorMap validity and optional cleanup ===
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x7, x7, x7");
+#endif
     // Read current last_task_alive from shared memory for this ring
     int32_t sm_last_task_alive = fc.last_task_alive.load(std::memory_order_acquire);
 
@@ -425,9 +435,15 @@ void pto2_submit_mixed_task(
         orch->rings[ring_id].dep_pool.reclaim(*sched, ring_id, sm_last_task_alive);
     }
 
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x8, x8, x8");
+#endif
     CYCLE_COUNT_LAP_RECORD(g_orch_sync_cycle, AicpuPhaseId::ORCH_SYNC, task_id.raw);
 
     // === STEP 3: Lookup inputs + assign output addrs (all from params, no GM) ===
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x9, x9, x9");
+#endif
     int32_t offset = 0;
     for (int i = 0; i < params.tensor_count; i++) {
         PTOParamType ptype = params.tensor_types[i];
@@ -487,9 +503,15 @@ void pto2_submit_mixed_task(
         }
     }
 
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x10, x10, x10");
+#endif
     CYCLE_COUNT_LAP_RECORD(g_orch_lookup_cycle, AicpuPhaseId::ORCH_LOOKUP, task_id.raw);
 
     // === STEP 4: Register outputs/inouts in TensorMap (must be separate from lookup) ===
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x11, x11, x11");
+#endif
     for (int i = 0; i < params.tensor_count; i++) {
         PTOParamType ptype = params.tensor_types[i];
         if (ptype == PTOParamType::OUTPUT || ptype == PTOParamType::INOUT) {
@@ -499,9 +521,15 @@ void pto2_submit_mixed_task(
         }
     }
 
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x12, x12, x12");
+#endif
     CYCLE_COUNT_LAP_RECORD(g_orch_insert_cycle, AicpuPhaseId::ORCH_INSERT, task_id.raw);
 
     // === STEP 5: Batch-write to GM (single cache line burst) ===
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x13, x13, x13");
+#endif
     // Deferred from allocation phase to avoid scattered GM writes that get
     // evicted by TensorMap lookup/insert cache pressure.
     __builtin_prefetch(&task, 1, 1);
@@ -524,12 +552,18 @@ void pto2_submit_mixed_task(
 
     payload->init(params);
 
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x14, x14, x14");
+#endif
     CYCLE_COUNT_LAP_RECORD(g_orch_params_cycle, AicpuPhaseId::ORCH_PARAMS, task_id.raw);
 #if PTO2_ORCH_PROFILING
     g_orch_params_atomic_count += 2;  // fanout_lock.store + fanout_count.store
 #endif
 
     // === STEP 6: Finalize fanin list ===
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x1, x1, x1");
+#endif
     // First build the fanin list
     if (sched) {
         auto& rs = sched->ring_sched_states[ring_id];
@@ -589,6 +623,9 @@ void pto2_submit_mixed_task(
 #endif
     }
 
+#if defined(__aarch64__)
+    __asm__ __volatile__("orr x2, x2, x2");
+#endif
     CYCLE_COUNT_LAP_RECORD(g_orch_fanin_cycle, AicpuPhaseId::ORCH_FANIN, task_id.raw);
 
 #if PTO2_PROFILING

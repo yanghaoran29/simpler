@@ -30,7 +30,8 @@
 #   ./run_tests.sh --profiling 2 --swimlane        # 完整 profiling + 将 swimlane JSON 转为 Perfetto + Mermaid
 #   ./run_tests.sh --no-check                        # skip P1/P2 invariant checks (AICPU_UT_NO_CHECK=1)
 #   ./run_tests.sh --count-submit-task-instructions --test test_batch_paged_attention --idx 0
-#     # 统计 pto2_submit_mixed_task 标记区间动态指令数（调用 tools/count_between_markers.sh）
+#     # 先统计 build_graph（需 CMake -DPTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE=ON），再统计 pto2_submit_mixed_task 各段
+#     # （tools/count_between_markers.sh；脚本内会打开该选项并构建）
 #   ./run_tests.sh --list                          # list all available tests
 #
 # Available tests:
@@ -559,6 +560,7 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
     -DPTO2_ORCH_PROFILING="$PTO2_ORCH_PROFILING" \
     -DPTO2_TENSORMAP_PROFILING="$PTO2_TENSORMAP_PROFILING" \
     -DPTO2_TRACE_SUBMIT_ARGS_ENABLE="${PTO2_TRACE_SUBMIT_ARGS_ENABLE:-0}" \
+    -DPTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE="${PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE:-0}" \
     -DAICPU_UT_LATENCY_NUM_CHAINS="${AICPU_UT_LATENCY_NUM_CHAINS:-}" \
     -DAICPU_UT_LATENCY_CHAIN_LENGTH="${AICPU_UT_LATENCY_CHAIN_LENGTH:-}" \
     $( [ -n "${AICPU_UT_THROUGHPUT_LAYERS:-}" ]       && echo "-DAICPU_UT_THROUGHPUT_LAYERS=$AICPU_UT_THROUGHPUT_LAYERS" ) \

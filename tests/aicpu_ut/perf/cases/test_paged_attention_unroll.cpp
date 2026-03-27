@@ -25,9 +25,7 @@
 #include "pto_runtime2.h"
 #include "test_common.h"
 #include "json_cases.h"
-#if defined(PTO2_SIM_AICORE_UT)
 #include "sim_aicore.h"
-#endif
 #include "common/platform_config.h"
 #include "cpu_affinity.h"
 #include <algorithm>
@@ -46,8 +44,6 @@ static constexpr int PAU_CASE_COUNT = 3;
 static_assert(PERF_CASE_IDX >= 0 && PERF_CASE_IDX < PAU_CASE_COUNT,
               "PERF_CASE_IDX out of range");
 
-extern const PerfTestCase PERF_CASES[PAU_CASE_COUNT];
-
 // N_UNROLL: KV blocks fused per task group (must match the device kernels).
 static constexpr int N_UNROLL = 8;
 
@@ -64,13 +60,6 @@ static constexpr size_t PAU_KV_NELEMS       = PAU_MAX_BATCH * PAU_MAX_BLOCK_NUM
                                             * PAU_MAX_BLOCK_SIZE * PAU_MAX_HEAD_DIM;
 static constexpr size_t PAU_BLOCK_TABLE_CNT = PAU_MAX_BATCH * PAU_MAX_BLOCK_NUM;
 
-extern float g_pau_query[PAU_QUERY_NELEMS];
-extern float g_pau_key_cache[PAU_KV_NELEMS];
-extern float g_pau_value_cache[PAU_KV_NELEMS];
-extern float g_pau_out[PAU_QUERY_NELEMS];
-extern int   g_pau_block_table[PAU_BLOCK_TABLE_CNT];
-extern int   g_pau_context_lens[PAU_MAX_BATCH];
-
 #define FUNC_QK_MATMUL       0
 #define FUNC_SOFTMAX_PREPARE 1
 #define FUNC_PV_MATMUL       2
@@ -82,17 +71,6 @@ struct GraphCtx {
     int64_t  config[7];
     uint64_t args[10];
 };
-
-int          get_num_sched_threads();
-void         perf_wait_sigstop();
-void         build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx);
-
-#if PTO2_PROFILING
-void section_header_100(char pad_char, const char* title);
-void print_config(const PerfTestCase& tc);
-void print_cpu_affinity(int num_sched, int orch_cpu);
-#endif
 
 // ─── Definitions ──────────────────────────────────────────────────────────────
 
@@ -112,26 +90,6 @@ float g_pau_value_cache[PAU_KV_NELEMS];
 float g_pau_out[PAU_QUERY_NELEMS];
 int   g_pau_block_table[PAU_BLOCK_TABLE_CNT];
 int   g_pau_context_lens[PAU_MAX_BATCH];
-
-int get_num_sched_threads() {
-    int n = 3;
-    const char* env = std::getenv("AICPU_UT_NUM_SCHED_THREADS");
-    if (env && *env) n = std::atoi(env);
-    if (n < 1) n = 1;
-    if (n > PLATFORM_MAX_AICPU_THREADS) n = PLATFORM_MAX_AICPU_THREADS;
-    return n;
-}
-
-void perf_wait_sigstop() {
-    if (std::getenv("PERF_WAIT_AFTER_INIT")) {
-        pid_t pid = getpid();
-        printf("  [perf] Init done. PID=%d — attach perf, then send SIGCONT:\n", (int)pid);
-        printf("  [perf]   perf record -g -p %d -o perf.data\n", (int)pid);
-        printf("  [perf]   kill -CONT %d\n", (int)pid);
-        fflush(stdout);
-        raise(SIGSTOP);
-    }
-}
 
 /**
  * build_graph — builds the unrolled paged attention graph.
@@ -359,16 +317,6 @@ PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx) {
 
 #if PTO2_PROFILING
 
-void section_header_100(char pad_char, const char* title) {
-    int len   = static_cast<int>(strlen(title));
-    int left  = (100 - len) / 2;
-    int right = 100 - len - left;
-    for (int i = 0; i < left;  i++) putchar(pad_char);
-    printf("%s", title);
-    for (int i = 0; i < right; i++) putchar(pad_char);
-    putchar('\n');
-}
-
 void print_config(const PerfTestCase& tc) {
     section_header_100('-', "--- Config ---");
     uint64_t bn_per_req   = (tc.context_lens_count > 0)
@@ -385,19 +333,6 @@ void print_config(const PerfTestCase& tc) {
            tc.batch, tc.num_heads, tc.head_dim, tc.block_size, tc.block_num);
     printf("  N_UNROLL=%d, groups_per_scope=%lu, expected_total_tasks=%d\n",
            N_UNROLL, (unsigned long)groups, total_tasks);
-}
-
-void print_cpu_affinity(int num_sched, int orch_cpu) {
-    static const int sched_cpus[] = {
-        SCHED_CPU0, SCHED_CPU1, SCHED_CPU2, SCHED_CPU3,
-        SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
-    };
-    section_header_100('-', "--- CPU affinity ---");
-    printf("  orchestrator → core %d\n", orch_cpu >= 0 ? orch_cpu : ORCH_CPU);
-    int max_sched = static_cast<int>(sizeof(sched_cpus) / sizeof(sched_cpus[0]));
-    for (int i = 0; i < num_sched && i < max_sched; i++)
-        printf("  scheduler[%d]  → core %d (configured)\n", i, sched_cpus[i]);
-    printf("\n");
 }
 
 #endif  // PTO2_PROFILING

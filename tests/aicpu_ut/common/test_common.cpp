@@ -12,6 +12,9 @@
 #include "aicpu/device_time.h"
 #include "sim_aicore.h"
 #include <time.h>
+#include <unistd.h>
+#include <csignal>
+#include <cstring>
 #include <thread>
 #include <vector>
 #include <cstdlib>
@@ -126,6 +129,26 @@ int sim_drain_one_pass(PTO2Runtime* rt) {
 /**
  * Run simulation until all tasks complete
  */
+int get_num_sched_threads() {
+    int n = 3;
+    const char* env = std::getenv("AICPU_UT_NUM_SCHED_THREADS");
+    if (env && *env) n = std::atoi(env);
+    if (n < 1) n = 1;
+    if (n > PLATFORM_MAX_AICPU_THREADS) n = PLATFORM_MAX_AICPU_THREADS;
+    return n;
+}
+
+void perf_wait_sigstop() {
+    if (std::getenv("PERF_WAIT_AFTER_INIT")) {
+        pid_t pid = getpid();
+        printf("  [perf] Init done. PID=%d — attach perf, then send SIGCONT:\n", (int)pid);
+        printf("  [perf]   perf record -g -p %d -o perf.data\n", (int)pid);
+        printf("  [perf]   kill -CONT %d\n", (int)pid);
+        fflush(stdout);
+        raise(SIGSTOP);
+    }
+}
+
 int sim_run_all(PTO2Runtime* rt, int max_rounds) {
 #if PTO2_PROFILING
     g_sched_prof_data = {};
@@ -150,9 +173,7 @@ int sim_run_all(PTO2Runtime* rt, int max_rounds) {
 #if PTO2_PROFILING
 void print_sched_profiling(PTO2Runtime* rt) {
 #if PTO2_SCHED_PROFILING
-#if defined(PTO2_SIM_AICORE_UT)
     pto2_sim_get_accumulated_cycles(&g_sched_prof_data.complete_cycle, &g_sched_prof_data.dispatch_cycle);
-#endif
     pto2_print_sim_sched_summary(
         &g_sched_prof_data,
         (int64_t)rt->scheduler.tasks_completed.load(std::memory_order_relaxed),
@@ -186,7 +207,6 @@ void pto2_print_sim_sched_summary(SchedProfilingData* data, int64_t tasks_comple
     printf("    tasks_completed: %lld\n", (long long)tasks_completed);
     printf("    tasks_consumed:  %lld\n", (long long)tasks_consumed);
 
-#if defined(PTO2_SIM_AICORE_UT)
     PTO2SchedProfilingData sp = {};
     aicpu_sim_get_saved_sched_prof(0, &sp);
 
@@ -230,7 +250,6 @@ void pto2_print_sim_sched_summary(SchedProfilingData* data, int64_t tasks_comple
     if (sp.complete_count > 0 && data->complete_cycle > 0)
         printf("    avg/complete   : %.3fus\n",
                cycles_to_us(data->complete_cycle) / sp.complete_count);
-#endif  // PTO2_SIM_AICORE_UT
 }
 #endif  // PTO2_SCHED_PROFILING
 
@@ -248,9 +267,7 @@ void run_sched_checks(PTO2Runtime* rt, int num_sched) {
             submitted += rt->sm_handle->header->rings[ri].fc.current_task_index.load(std::memory_order_acquire);
 
     // P1: total dispatched == submitted
-#if defined(PTO2_SIM_AICORE_UT)
     pto2_sim_get_dispatch_counts(g_sched_prof_data.tasks_dispatched, PTO2_NUM_WORKER_TYPES);
-#endif
     int64_t total_dispatched = 0;
     for (int wt = 0; wt < PTO2_NUM_WORKER_TYPES; wt++)
         total_dispatched += g_sched_prof_data.tasks_dispatched[wt];
@@ -264,8 +281,33 @@ void run_sched_checks(PTO2Runtime* rt, int num_sched) {
 
 
     (void)num_sched;
-    // P2 unavailable: PTO2_SIM_AICORE_UT path has no per-thread profiling
+    // P2: per-thread profiling not used in this UT path
 }
 #else
 void print_sched_profiling(PTO2Runtime* rt) { (void)rt; }
+#endif
+
+#if PTO2_PROFILING
+void section_header_100(char pad_char, const char* title) {
+    int len = static_cast<int>(strlen(title));
+    int left = (100 - len) / 2;
+    int right = 100 - len - left;
+    for (int i = 0; i < left; i++) putchar(pad_char);
+    printf("%s", title);
+    for (int i = 0; i < right; i++) putchar(pad_char);
+    putchar('\n');
+}
+
+void print_cpu_affinity(int num_sched, int orch_cpu) {
+    static const int sched_cpus[] = {
+        SCHED_CPU0, SCHED_CPU1, SCHED_CPU2, SCHED_CPU3,
+        SCHED_CPU4, SCHED_CPU5, SCHED_CPU6, SCHED_CPU7,
+    };
+    section_header_100('-', "--- CPU affinity ---");
+    printf("  orchestrator → core %d\n", orch_cpu >= 0 ? orch_cpu : ORCH_CPU);
+    int max_sched = static_cast<int>(sizeof(sched_cpus) / sizeof(sched_cpus[0]));
+    for (int i = 0; i < num_sched && i < max_sched; i++)
+        printf("  scheduler[%d]  → core %d (configured)\n", i, sched_cpus[i]);
+    printf("\n");
+}
 #endif

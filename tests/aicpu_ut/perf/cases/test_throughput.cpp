@@ -20,9 +20,7 @@
 
 #include "pto_runtime2.h"
 #include "test_common.h"
-#if defined(PTO2_SIM_AICORE_UT)
 #include "sim_aicore.h"
-#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -35,10 +33,6 @@
 
 #include "common/platform_config.h"
 #include "cpu_affinity.h"
-
-#ifndef PERF_CASE_IDX
-#define PERF_CASE_IDX 0
-#endif
 
 // ─── Compile-time parameters (overridable via CMake / run_tests.sh) ──────────
 
@@ -92,27 +86,12 @@ struct ThroughputTestCase {
 static constexpr int THROUGHPUT_CASE_COUNT = 3;
 static_assert(PERF_CASE_IDX >= 0 && PERF_CASE_IDX < THROUGHPUT_CASE_COUNT, "PERF_CASE_IDX out of range");
 
-extern const ThroughputTestCase PERF_CASES[THROUGHPUT_CASE_COUNT];
-
-extern float g_throughput_input_buf;
-
 #define FUNC_ELEMENT_WISE 0
 
 struct GraphCtx {
     int64_t config[6];  // num_layers, layer0_size, deps_per_task, overlap, worker_mode, fix_tail
     uint64_t args[10];
 };
-
-int get_num_sched_threads();
-void perf_wait_sigstop();
-void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const ThroughputTestCase& tc, GraphCtx& ctx);
-
-#if PTO2_PROFILING
-void section_header_100(char pad_char, const char* title);
-void print_config(const ThroughputTestCase& tc);
-void print_cpu_affinity(int num_sched, int orch_cpu);
-#endif
 
 // ─── Definitions ─────────────────────────────────────────────────────────────
 
@@ -153,26 +132,6 @@ const ThroughputTestCase PERF_CASES[THROUGHPUT_CASE_COUNT] = {
 };
 
 float g_throughput_input_buf;
-
-int get_num_sched_threads() {
-    int n = 3;
-    const char* env = std::getenv("AICPU_UT_NUM_SCHED_THREADS");
-    if (env && *env) n = std::atoi(env);
-    if (n < 1) n = 1;
-    if (n > PLATFORM_MAX_AICPU_THREADS) n = PLATFORM_MAX_AICPU_THREADS;
-    return n;
-}
-
-void perf_wait_sigstop() {
-    if (std::getenv("PERF_WAIT_AFTER_INIT")) {
-        pid_t pid = getpid();
-        printf("  [perf] Init done. PID=%d — attach perf, then send SIGCONT:\n", (int)pid);
-        printf("  [perf]   perf record -g -p %d -o perf.data\n", (int)pid);
-        printf("  [perf]   kill -CONT %d\n", (int)pid);
-        fflush(stdout);
-        raise(SIGSTOP);
-    }
-}
 
 // 计算第 k 层任务数：size[0]=W0, size[k]=D+(size[k-1]-1)*(D-O)
 static int layer_size(int k, int layer0_size, int D, int O) {
@@ -325,16 +284,6 @@ PTO2Runtime* setup_run(const ThroughputTestCase& tc, GraphCtx& ctx) {
 
 #if PTO2_PROFILING
 
-void section_header_100(char pad_char, const char* title) {
-    int len = static_cast<int>(strlen(title));
-    int left = (100 - len) / 2;
-    int right = 100 - len - left;
-    for (int i = 0; i < left; i++) putchar(pad_char);
-    printf("%s", title);
-    for (int i = 0; i < right; i++) putchar(pad_char);
-    putchar('\n');
-}
-
 void print_config(const ThroughputTestCase& tc) {
     static const char* worker_mode_names[] = {
         "all-AIV",
@@ -352,25 +301,6 @@ void print_config(const ThroughputTestCase& tc) {
     printf("  worker_mode = %s\n", mode_str);
     if (tc.fix_tail)
         printf("  fix_tail = 1 (each layer size = layer0_size when deps_per_task - overlap == 1)\n");
-}
-
-void print_cpu_affinity(int num_sched, int orch_cpu) {
-    static const int sched_cpus[] = {
-        SCHED_CPU0,
-        SCHED_CPU1,
-        SCHED_CPU2,
-        SCHED_CPU3,
-        SCHED_CPU4,
-        SCHED_CPU5,
-        SCHED_CPU6,
-        SCHED_CPU7,
-    };
-    section_header_100('-', "--- CPU affinity ---");
-    printf("  orchestrator → core %d\n", orch_cpu >= 0 ? orch_cpu : ORCH_CPU);
-    int max_sched = static_cast<int>(sizeof(sched_cpus) / sizeof(sched_cpus[0]));
-    for (int i = 0; i < num_sched && i < max_sched; i++)
-        printf("  scheduler[%d]  → core %d (configured)\n", i, sched_cpus[i]);
-    printf("\n");
 }
 
 #endif  // PTO2_PROFILING

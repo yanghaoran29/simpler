@@ -15,9 +15,7 @@
 
 #include "pto_runtime2.h"
 #include "test_common.h"
-#if defined(PTO2_SIM_AICORE_UT)
 #include "sim_aicore.h"
-#endif
 #include <unistd.h>
 
 #include <csignal>
@@ -29,9 +27,6 @@
 #include "common/platform_config.h"
 #include "cpu_affinity.h"
 
-#ifndef PERF_CASE_IDX
-#define PERF_CASE_IDX 0
-#endif
 #ifndef AICPU_UT_LATENCY_NUM_CHAINS
 #define AICPU_UT_LATENCY_NUM_CHAINS 64
 #endif
@@ -55,27 +50,12 @@ struct LatencyTestCase {
 static constexpr int LATENCY_CASE_COUNT = 2;
 static_assert(PERF_CASE_IDX >= 0 && PERF_CASE_IDX < LATENCY_CASE_COUNT, "PERF_CASE_IDX out of range");
 
-extern const LatencyTestCase PERF_CASES[LATENCY_CASE_COUNT];
-extern float g_latency_input_buf[AICPU_UT_LATENCY_NUM_CHAINS];
-extern float g_latency_output_buf[AICPU_UT_LATENCY_NUM_CHAINS];
-
 #define FUNC_ELEMENT_WISE 0
 
 struct GraphCtx {
     int64_t config[3];  // num_chains, chain_length, case_index (0=all aiv, 1=aic/aiv alternate)
     uint64_t args[10];
 };
-
-int get_num_sched_threads();
-void perf_wait_sigstop();
-void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
-PTO2Runtime* setup_run(const LatencyTestCase& tc, GraphCtx& ctx);
-
-#if PTO2_PROFILING
-void section_header_100(char pad_char, const char* title);
-void print_config(const LatencyTestCase& tc);
-void print_cpu_affinity(int num_sched, int orch_cpu);
-#endif
 
 // ─── Definitions ─────────────────────────────────────────────────────────────
 
@@ -86,26 +66,6 @@ const LatencyTestCase PERF_CASES[LATENCY_CASE_COUNT] = {
 
 float g_latency_input_buf[AICPU_UT_LATENCY_NUM_CHAINS];
 float g_latency_output_buf[AICPU_UT_LATENCY_NUM_CHAINS];
-
-int get_num_sched_threads() {
-    int n = 3;
-    const char* env = std::getenv("AICPU_UT_NUM_SCHED_THREADS");
-    if (env && *env) n = std::atoi(env);
-    if (n < 1) n = 1;
-    if (n > PLATFORM_MAX_AICPU_THREADS) n = PLATFORM_MAX_AICPU_THREADS;
-    return n;
-}
-
-void perf_wait_sigstop() {
-    if (std::getenv("PERF_WAIT_AFTER_INIT")) {
-        pid_t pid = getpid();
-        printf("  [perf] Init done. PID=%d — attach perf, then send SIGCONT:\n", (int)pid);
-        printf("  [perf]   perf record -g -p %d -o perf.data\n", (int)pid);
-        printf("  [perf]   kill -CONT %d\n", (int)pid);
-        fflush(stdout);
-        raise(SIGSTOP);
-    }
-}
 
 void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)arg_count;
@@ -174,38 +134,9 @@ PTO2Runtime* setup_run(const LatencyTestCase& tc, GraphCtx& ctx) {
 
 #if PTO2_PROFILING
 
-void section_header_100(char pad_char, const char* title) {
-    int len = static_cast<int>(strlen(title));
-    int left = (100 - len) / 2;
-    int right = 100 - len - left;
-    for (int i = 0; i < left; i++) putchar(pad_char);
-    printf("%s", title);
-    for (int i = 0; i < right; i++) putchar(pad_char);
-    putchar('\n');
-}
-
 void print_config(const LatencyTestCase& tc) {
     section_header_100('-', "--- Config ---");
     printf("  num_chains = %d, chain_length = %d (latency: task1→…→taskN per chain)\n", tc.num_chains, tc.chain_length);
-}
-
-void print_cpu_affinity(int num_sched, int orch_cpu) {
-    static const int sched_cpus[] = {
-        SCHED_CPU0,
-        SCHED_CPU1,
-        SCHED_CPU2,
-        SCHED_CPU3,
-        SCHED_CPU4,
-        SCHED_CPU5,
-        SCHED_CPU6,
-        SCHED_CPU7,
-    };
-    section_header_100('-', "--- CPU affinity ---");
-    printf("  orchestrator → core %d\n", orch_cpu >= 0 ? orch_cpu : ORCH_CPU);
-    int max_sched = static_cast<int>(sizeof(sched_cpus) / sizeof(sched_cpus[0]));
-    for (int i = 0; i < num_sched && i < max_sched; i++)
-        printf("  scheduler[%d]  → core %d (configured)\n", i, sched_cpus[i]);
-    printf("\n");
 }
 
 #endif  // PTO2_PROFILING

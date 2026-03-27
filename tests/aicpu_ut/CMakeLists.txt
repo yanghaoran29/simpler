@@ -48,12 +48,11 @@ option(PTO2_SCHED_PROFILING "Enable scheduler profiling" OFF)
 option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" OFF)
 option(PTO2_TENSORMAP_PROFILING "Enable tensormap lookup profiling" OFF)
 option(PTO2_TRACE_SUBMIT_ARGS_ENABLE "Enable pto2_submit_mixed_task argument tracing" OFF)
+# When ON: test_orchestrator_scheduler.cpp emits orr x17/x18 around build_graph() for QEMU insn_count markers.
+option(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE "Emit build_graph insn-count markers (orr x17/x18) in scheduler driver" OFF)
 
-# ─── Sim AICore / 0-core paths (for aicpu_ut perf) ─────────────────────────────
-# When ON: enables cores_total_num_==0, sim_aicore_mode, core_num==0 drain loop in executor.
-# Define PTO2_SIM_AICORE_UT=1 so that executor/Runtime sim branches are compiled in.
-# Default ON for aicpu_ut so that perf tests get current behavior when executor is linked.
-option(PTO2_SIM_AICORE_UT "Enable sim AICore and 0-core paths (aicpu_ut perf)" ON)
+# ─── Sim AICore / 0-core paths (aicpu_ut 始终编译进仿真与 executor) ────────────
+# 始终定义 PTO2_SIM_AICORE_UT=1；不再提供 CMake 开关。
 
 # ─── Source directories ────────────────────────────────────────────────────────
 set(ROOT_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/../..)
@@ -72,10 +71,9 @@ set(COMMON_INCLUDES
     ${ROOT_DIR}/src/common/task_interface
     ${ORCH_DIR}
     ${COMMON_DIR}
+    ${AICPU_DIR}
+    ${ROOT_DIR}/src/a2a3/platform/sim/aicpu
 )
-if(PTO2_SIM_AICORE_UT)
-    list(APPEND COMMON_INCLUDES ${AICPU_DIR} ${ROOT_DIR}/src/a2a3/platform/sim/aicpu)
-endif()
 
 # ─── Common compile definitions ───────────────────────────────────────────────
 set(COMMON_COMPILE_DEFS
@@ -92,6 +90,7 @@ set(COMMON_COMPILE_DEFS
     PLATFORM_AIC_CORES_PER_BLOCKDIM=${PLATFORM_AIC_CORES_PER_BLOCKDIM}
     PLATFORM_AIV_CORES_PER_BLOCKDIM=${PLATFORM_AIV_CORES_PER_BLOCKDIM}
     PLATFORM_MAX_AICPU_THREADS=${PLATFORM_MAX_AICPU_THREADS}
+    PTO2_SIM_AICORE_UT=1
 )
 if(PTO2_PROFILING)
     list(APPEND COMMON_COMPILE_DEFS PTO2_PROFILING=1)
@@ -109,9 +108,6 @@ if(PTO2_TENSORMAP_PROFILING)
 endif()
 if(PTO2_TRACE_SUBMIT_ARGS_ENABLE)
     list(APPEND COMMON_COMPILE_DEFS PTO2_TRACE_SUBMIT_ARGS_ENABLE=1)
-endif()
-if(PTO2_SIM_AICORE_UT)
-    list(APPEND COMMON_COMPILE_DEFS PTO2_SIM_AICORE_UT=1)
 endif()
 
 # ─── Optimization level ───────────────────────────────────────────────────────
@@ -185,29 +181,23 @@ set(RUNTIME_SRCS
     ${RUNTIME_DIR}/pto_tensormap.cpp
     ${ORCH_DIR}/common.cpp
     ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/device_time.cpp
+    ${RUNTIME_DIR}/runtime.cpp
+    ${AICPU_DIR}/aicpu_executor.cpp
+    ${AICPU_DIR}/sim_aicore.cpp
+    ${AICPU_DIR}/msgq_cpu_sim.cpp
+    ${AICPU_DIR}/hscb_cpu_sim.cpp
+    ${PLATFORM_AICPU_DIR}/platform_regs.cpp
+    ${PLATFORM_AICPU_DIR}/performance_collector_aicpu.cpp
+    ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/cache_ops.cpp
 )
-if(PTO2_SIM_AICORE_UT)
-    list(APPEND RUNTIME_SRCS
-        ${RUNTIME_DIR}/runtime.cpp
-        ${AICPU_DIR}/aicpu_executor.cpp
-        ${AICPU_DIR}/sim_aicore.cpp
-        ${AICPU_DIR}/msgq_cpu_sim.cpp
-        ${AICPU_DIR}/hscb_cpu_sim.cpp
-        ${PLATFORM_AICPU_DIR}/platform_regs.cpp
-        ${PLATFORM_AICPU_DIR}/performance_collector_aicpu.cpp
-        ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/cache_ops.cpp
-    )
-endif()
 
 # ─── Common test source files ─────────────────────────────────────────────────
 set(COMMON_TEST_SRCS
     ${COMMON_DIR}/test_common.cpp
     ${COMMON_DIR}/test_log_stubs.cpp
     ${COMMON_DIR}/cpu_affinity.cpp
+    ${COMMON_DIR}/sim_run_pto2.cpp
 )
-if(PTO2_SIM_AICORE_UT)
-    list(APPEND COMMON_TEST_SRCS ${COMMON_DIR}/sim_run_pto2.cpp)
-endif()
 
 # ─── Discover static libraries from the current system ────────────────────────
 
@@ -321,6 +311,12 @@ function(configure_test_target target_name)
         ${STATIC_LIBGCC_EH}
         -Wl,--end-group
     )
+endfunction()
+
+function(apply_sched_build_graph_markers target_name)
+    if(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE)
+        target_compile_definitions(${target_name} PRIVATE PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE=1)
+    endif()
 endfunction()
 
 # ─── Test executable 1: CPU affinity functional tests ─────────────────────────
@@ -454,6 +450,7 @@ foreach(i IN LISTS PA_CASE_INDICES)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
     target_compile_definitions(${target} PRIVATE PERF_BACKEND=1 PERF_CASE_IDX=${i})
+    apply_sched_build_graph_markers(${target})
 endforeach()
 foreach(i IN LISTS BPA_CASE_INDICES)
     set(target test_concurrent_${i})
@@ -461,6 +458,7 @@ foreach(i IN LISTS BPA_CASE_INDICES)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
     target_compile_definitions(${target} PRIVATE PERF_BACKEND=2 PERF_CASE_IDX=${i})
+    apply_sched_build_graph_markers(${target})
 endforeach()
 foreach(i IN LISTS ALT_CASE_INDICES)
     set(target test_alt_concurrent_${i})
@@ -468,6 +466,7 @@ foreach(i IN LISTS ALT_CASE_INDICES)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
     target_compile_definitions(${target} PRIVATE PERF_BACKEND=4 PERF_CASE_IDX=${i})
+    apply_sched_build_graph_markers(${target})
 endforeach()
 foreach(i IN LISTS BGEMM_CASE_INDICES)
     set(target test_bgemm_concurrent_${i})
@@ -475,6 +474,7 @@ foreach(i IN LISTS BGEMM_CASE_INDICES)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
     target_compile_definitions(${target} PRIVATE PERF_BACKEND=5 PERF_CASE_IDX=${i})
+    apply_sched_build_graph_markers(${target})
 endforeach()
 foreach(i IN LISTS PAU_CASE_INDICES)
     set(target test_pau_concurrent_${i})
@@ -482,6 +482,7 @@ foreach(i IN LISTS PAU_CASE_INDICES)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
     target_compile_definitions(${target} PRIVATE PERF_BACKEND=6 PERF_CASE_IDX=${i})
+    apply_sched_build_graph_markers(${target})
 endforeach()
 foreach(i IN LISTS THROUGHPUT_CASE_INDICES)
     set(target test_throughput_concurrent_${i})
@@ -489,6 +490,7 @@ foreach(i IN LISTS THROUGHPUT_CASE_INDICES)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
     target_compile_definitions(${target} PRIVATE PERF_BACKEND=7 PERF_CASE_IDX=${i} ${THROUGHPUT_EXTRA_DEFS})
+    apply_sched_build_graph_markers(${target})
 endforeach()
 foreach(i IN LISTS LATENCY_CASE_INDICES)
     set(target test_latency_concurrent_${i})
@@ -496,6 +498,7 @@ foreach(i IN LISTS LATENCY_CASE_INDICES)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
     target_compile_definitions(${target} PRIVATE PERF_BACKEND=8 PERF_CASE_IDX=${i} ${LATENCY_EXTRA_DEFS})
+    apply_sched_build_graph_markers(${target})
 endforeach()
 
 # ─── CTest integration ────────────────────────────────────────────────────────

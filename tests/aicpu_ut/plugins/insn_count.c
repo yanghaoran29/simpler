@@ -24,6 +24,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 #define MAX_VCPU 64
 #define MAX_STACK 192
+#define MAX_MARKER_STACK 32
 
 static uint64_t g_total_insns;
 static uint64_t g_self_insns;
@@ -39,17 +40,45 @@ static int g_is_aarch64;
 static char* g_root_display_name;
 static uint32_t g_marker_start_enc = 0xaa030063u; /* orr x3, x3, x3 */
 static uint32_t g_marker_end_enc = 0xaa040084u;   /* orr x4, x4, x4 */
+static int g_marker_phases_mode;
 static uint64_t g_between_markers_insns;
 static uint64_t g_between_markers_sessions;
 typedef struct {
     uint64_t session_id;
+    uint32_t phase_id;
     uint32_t cpu_id;
     uint64_t insn_count;
 } MarkerSession;
 static MarkerSession* g_marker_sessions;
 static size_t g_marker_sessions_count;
 static size_t g_marker_sessions_cap;
-static int64_t g_active_marker_session_idx[MAX_VCPU];
+static int64_t g_active_marker_session_stack[MAX_VCPU][MAX_MARKER_STACK];
+static uint32_t g_active_marker_phase_stack[MAX_VCPU][MAX_MARKER_STACK];
+static uint32_t g_active_marker_depth[MAX_VCPU];
+
+typedef struct {
+    uint32_t phase_id;
+    uint32_t start_enc;
+    uint32_t end_enc;
+    const char* phase_name;
+} MarkerPair;
+
+static MarkerPair g_marker_pairs_default[] = {
+    {0, 0xaa030063u, 0xaa040084u, "submit_total"},
+};
+
+static const MarkerPair g_marker_pairs_phases[] = {
+    {0, 0xaa030063u, 0xaa040084u, "submit_total"},
+    {1, 0xaa0500a5u, 0xaa0600c6u, "alloc"},
+    {2, 0xaa0700e7u, 0xaa080108u, "sync"},
+    {3, 0xaa090129u, 0xaa0a014au, "lookup"},
+    {4, 0xaa0b016bu, 0xaa0c018cu, "insert"},
+    {5, 0xaa0d01adu, 0xaa0e01ceu, "params"},
+    {6, 0xaa010021u, 0xaa020042u, "fanin"},
+};
+
+static const MarkerPair* g_marker_pairs = g_marker_pairs_default;
+static size_t g_marker_pair_count = sizeof(g_marker_pairs_default) / sizeof(g_marker_pairs_default[0]);
 
 typedef struct {
     uint64_t lo;
@@ -71,7 +100,7 @@ typedef struct TNode {
 
 static TNode* g_root_accum;
 
-static int marker_append_session(uint32_t cpu_id)
+static int marker_append_session(uint32_t cpu_id, uint32_t phase_id)
 {
     if (g_marker_sessions_count == g_marker_sessions_cap) {
         size_t new_cap = (g_marker_sessions_cap == 0) ? 1024 : (g_marker_sessions_cap * 2);
@@ -84,6 +113,7 @@ static int marker_append_session(uint32_t cpu_id)
     }
     size_t idx = g_marker_sessions_count++;
     g_marker_sessions[idx].session_id = g_between_markers_sessions + 1;
+    g_marker_sessions[idx].phase_id = phase_id;
     g_marker_sessions[idx].cpu_id = cpu_id;
     g_marker_sessions[idx].insn_count = 0;
     g_between_markers_sessions++;
@@ -522,20 +552,42 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
     if (cpu_index >= MAX_VCPU) {
         cpu_index = 0;
     }
-    if (enc == g_marker_start_enc) {
-        int idx = marker_append_session((uint32_t)cpu_index);
-        if (idx >= 0) {
-            g_active_marker_session_idx[cpu_index] = idx;
+    for (size_t i = 0; i < g_marker_pair_count; i++) {
+        if (enc == g_marker_pairs[i].start_enc) {
+            int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
+            if (idx >= 0) {
+                uint32_t d = g_active_marker_depth[cpu_index];
+                if (d < MAX_MARKER_STACK) {
+                    g_active_marker_session_stack[cpu_index][d] = idx;
+                    g_active_marker_phase_stack[cpu_index][d] = g_marker_pairs[i].phase_id;
+                    g_active_marker_depth[cpu_index] = d + 1;
+                }
+            }
+            return;
         }
-        return;
     }
-    if (enc == g_marker_end_enc) {
-        g_active_marker_session_idx[cpu_index] = -1;
-        return;
+    for (size_t i = 0; i < g_marker_pair_count; i++) {
+        if (enc == g_marker_pairs[i].end_enc) {
+            uint32_t d = g_active_marker_depth[cpu_index];
+            while (d > 0) {
+                uint32_t top = d - 1;
+                if (g_active_marker_phase_stack[cpu_index][top] == g_marker_pairs[i].phase_id) {
+                    g_active_marker_depth[cpu_index] = top;
+                    break;
+                }
+                d--;
+            }
+            return;
+        }
     }
-    int64_t active_idx = g_active_marker_session_idx[cpu_index];
-    if (active_idx >= 0 && (size_t)active_idx < g_marker_sessions_count) {
-        g_marker_sessions[active_idx].insn_count++;
+    uint32_t d = g_active_marker_depth[cpu_index];
+    if (d > 0) {
+        for (uint32_t k = 0; k < d; k++) {
+            int64_t active_idx = g_active_marker_session_stack[cpu_index][k];
+            if (active_idx >= 0 && (size_t)active_idx < g_marker_sessions_count) {
+                g_marker_sessions[active_idx].insn_count++;
+            }
+        }
         g_between_markers_insns++;
     }
 }
@@ -778,6 +830,13 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
     }
 
     if (g_marker_mode) {
+        uint64_t phase_sum[16] = {0};
+        uint64_t phase_cnt[16] = {0};
+        uint64_t phase_max[16] = {0};
+        uint64_t phase_min[16];
+        for (size_t i = 0; i < 16; i++) {
+            phase_min[i] = UINT64_MAX;
+        }
         uint64_t max_session_insns = 0;
         uint64_t min_session_insns = 0;
         uint64_t avg_session_insns = 0;
@@ -791,6 +850,17 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
                 if (v < min_session_insns) {
                     min_session_insns = v;
                 }
+                uint32_t pid = g_marker_sessions[i].phase_id;
+                if (pid < 16) {
+                    phase_sum[pid] += v;
+                    phase_cnt[pid] += 1;
+                    if (v > phase_max[pid]) {
+                        phase_max[pid] = v;
+                    }
+                    if (v < phase_min[pid]) {
+                        phase_min[pid] = v;
+                    }
+                }
             }
             avg_session_insns = g_between_markers_insns / g_marker_sessions_count;
         }
@@ -798,23 +868,64 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
             "QEMU_TCG between_markers_insns: %" PRIu64
             " (sessions=%" PRIu64 ", avg_per_session=%" PRIu64
             ", max_session_insns=%" PRIu64 ", min_session_insns=%" PRIu64
-            ", start=0x%08x, end=0x%08x)\n",
+            ", start=0x%08x, end=0x%08x, phase_markers=%d)\n",
             g_between_markers_insns,
             g_between_markers_sessions,
             avg_session_insns,
             max_session_insns,
             min_session_insns,
             g_marker_start_enc,
-            g_marker_end_enc);
+            g_marker_end_enc,
+            g_marker_phases_mode);
         qemu_plugin_outs(line);
+        char summary_line[384];
+        snprintf(summary_line, sizeof summary_line,
+            "QEMU_TCG between_markers_insns: %" PRIu64
+            " (sessions=%" PRIu64 ", avg_per_session=%" PRIu64
+            ", max_session_insns=%" PRIu64 ", min_session_insns=%" PRIu64
+            ", start=0x%08x, end=0x%08x, phase_markers=%d)\n",
+            g_between_markers_insns,
+            g_between_markers_sessions,
+            avg_session_insns,
+            max_session_insns,
+            min_session_insns,
+            g_marker_start_enc,
+            g_marker_end_enc,
+            g_marker_phases_mode);
+        for (size_t i = 0; i < g_marker_pair_count; i++) {
+            uint32_t pid = g_marker_pairs[i].phase_id;
+            uint64_t cnt = (pid < 16) ? phase_cnt[pid] : 0;
+            uint64_t sum = (pid < 16) ? phase_sum[pid] : 0;
+            uint64_t avg = (cnt > 0) ? (sum / cnt) : 0;
+            uint64_t pmax = (pid < 16) ? phase_max[pid] : 0;
+            uint64_t pmin = (pid < 16 && phase_min[pid] != UINT64_MAX) ? phase_min[pid] : 0;
+            snprintf(line, sizeof line,
+                "QEMU_TCG phase_insns: phase_id=%u name=%s sessions=%" PRIu64
+                " avg=%" PRIu64 " max=%" PRIu64 " min=%" PRIu64 "\n",
+                pid, g_marker_pairs[i].phase_name, cnt, avg, pmax, pmin);
+            qemu_plugin_outs(line);
+        }
         if (g_outfile && g_outfile[0]) {
             FILE* f = fopen(g_outfile, "w");
             if (f) {
-                fputs(line, f);
-                fputs("session_id,cpu_id,insn_count\n", f);
+                fputs(summary_line, f);
+                for (size_t i = 0; i < g_marker_pair_count; i++) {
+                    uint32_t pid = g_marker_pairs[i].phase_id;
+                    uint64_t cnt = (pid < 16) ? phase_cnt[pid] : 0;
+                    uint64_t sum = (pid < 16) ? phase_sum[pid] : 0;
+                    uint64_t avg = (cnt > 0) ? (sum / cnt) : 0;
+                    uint64_t pmax = (pid < 16) ? phase_max[pid] : 0;
+                    uint64_t pmin = (pid < 16 && phase_min[pid] != UINT64_MAX) ? phase_min[pid] : 0;
+                    fprintf(f,
+                        "QEMU_TCG phase_insns: phase_id=%u name=%s sessions=%" PRIu64
+                        " avg=%" PRIu64 " max=%" PRIu64 " min=%" PRIu64 "\n",
+                        pid, g_marker_pairs[i].phase_name, cnt, avg, pmax, pmin);
+                }
+                fputs("session_id,phase_id,cpu_id,insn_count\n", f);
                 for (size_t i = 0; i < g_marker_sessions_count; i++) {
-                    fprintf(f, "%" PRIu64 ",%u,%" PRIu64 "\n",
+                    fprintf(f, "%" PRIu64 ",%u,%u,%" PRIu64 "\n",
                         g_marker_sessions[i].session_id,
+                        g_marker_sessions[i].phase_id,
                         g_marker_sessions[i].cpu_id,
                         g_marker_sessions[i].insn_count);
                 }
@@ -905,6 +1016,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             g_marker_start_enc = (uint32_t)strtoul(argv[i] + 13, NULL, 0);
         } else if (strncmp(argv[i], "marker_end=", 11) == 0) {
             g_marker_end_enc = (uint32_t)strtoul(argv[i] + 11, NULL, 0);
+        } else if (strcmp(argv[i], "marker_phases=1") == 0) {
+            g_marker_phases_mode = 1;
         }
     }
     if (have_low && have_high && g_filter_low < g_filter_high) {
@@ -949,8 +1062,19 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             qemu_plugin_outs("insn_count: markers=1 is only supported for aarch64 user-mode guests\n");
             return -1;
         }
+        if (g_marker_phases_mode) {
+            g_marker_pairs = g_marker_pairs_phases;
+            g_marker_pair_count = sizeof(g_marker_pairs_phases) / sizeof(g_marker_pairs_phases[0]);
+        } else {
+            g_marker_pairs_default[0].start_enc = g_marker_start_enc;
+            g_marker_pairs_default[0].end_enc = g_marker_end_enc;
+        }
         for (int c = 0; c < MAX_VCPU; c++) {
-            g_active_marker_session_idx[c] = -1;
+            g_active_marker_depth[c] = 0;
+            for (int k = 0; k < MAX_MARKER_STACK; k++) {
+                g_active_marker_session_stack[c][k] = -1;
+                g_active_marker_phase_stack[c][k] = 0;
+            }
         }
     }
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);

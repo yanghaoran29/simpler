@@ -79,6 +79,24 @@ uint64_t perf_now_us();          // Monotonic clock, returns microseconds, for p
 PTO2Runtime* make_runtime();
 int sim_drain_one_pass(PTO2Runtime* rt);
 int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000);
+
+// Perf backends: each case file defines GraphCtx + one setup_run overload (included by drivers).
+struct GraphCtx;
+struct LatencyTestCase;
+struct PerfTestCase;
+struct AlternatingTestCase;
+struct BgemmTestCase;
+struct ThroughputTestCase;
+
+int get_num_sched_threads();
+void perf_wait_sigstop();
+void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count);
+PTO2Runtime* setup_run(const LatencyTestCase& tc, GraphCtx& ctx);
+PTO2Runtime* setup_run(const PerfTestCase& tc, GraphCtx& ctx);
+PTO2Runtime* setup_run(const AlternatingTestCase& tc, GraphCtx& ctx);
+PTO2Runtime* setup_run(const BgemmTestCase& tc, GraphCtx& ctx);
+PTO2Runtime* setup_run(const ThroughputTestCase& tc, GraphCtx& ctx);
+
 // Scheduler profiling
 #if PTO2_PROFILING
 #include "common/platform_config.h"
@@ -108,6 +126,13 @@ void pto2_print_sim_sched_summary(SchedProfilingData* data, int64_t tasks_comple
 #endif
 
 #if PTO2_PROFILING
+void section_header_100(char pad_char, const char* title);
+void print_cpu_affinity(int num_sched, int orch_cpu);
+void print_config(const LatencyTestCase& tc);
+void print_config(const PerfTestCase& tc);
+void print_config(const AlternatingTestCase& tc);
+void print_config(const BgemmTestCase& tc);
+void print_config(const ThroughputTestCase& tc);
 void run_sched_checks(PTO2Runtime* rt, int num_sched);
 #endif
 
