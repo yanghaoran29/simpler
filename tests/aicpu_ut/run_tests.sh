@@ -239,18 +239,19 @@ if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ]; then
     tool_script="${SCRIPT_DIR}/tools/count_between_markers.sh"
     plugin_so="${SCRIPT_DIR}/plugins/libinsn_count.so"
     plugin_dir="${SCRIPT_DIR}/plugins"
+    plugin_src="${plugin_dir}/insn_count.c"
     if [ ! -x "$tool_script" ]; then
         echo "[run_tests] missing executable tool: $tool_script" >&2
         echo "[run_tests] run: chmod +x ${SCRIPT_DIR}/tools/count_between_markers.sh" >&2
         exit 1
     fi
-    # Auto-build qemu plugin when missing, so users don't need a manual make step.
-    if [ ! -f "$plugin_so" ]; then
+    # Auto-build qemu plugin when missing or stale, so marker_phases support is effective.
+    if [ ! -f "$plugin_so" ] || [ -f "$plugin_src" ] && [ "$plugin_src" -nt "$plugin_so" ]; then
         if [ ! -d "$plugin_dir" ]; then
             echo "[run_tests] missing plugin directory: $plugin_dir" >&2
             exit 1
         fi
-        echo "[run_tests] plugin missing, auto-building: $plugin_so"
+        echo "[run_tests] plugin missing/stale, auto-building: $plugin_so"
         if [ -n "${QEMU_BUILD_DIR:-}" ]; then
             make -C "$plugin_dir" QEMU_BUILD_DIR="$QEMU_BUILD_DIR"
         else
@@ -270,7 +271,134 @@ if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ]; then
     test_arg="${FILTER_TEST:-test_batch_paged_attention}"
     idx_arg="${FILTER_IDX:-0}"
     "$tool_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg"
-    exit $?
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        exit $rc
+    fi
+
+    # Best-effort: also collect instruction type statistics and emit a full markdown report.
+    insn_script="${SCRIPT_DIR}/tools/analysis/count_insn_types.sh"
+    if [ -x "$insn_script" ]; then
+        "$insn_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg" || true
+    fi
+
+    log_dir="${SCRIPT_DIR}/outputs/log"
+    latest_phase="$(ls -t "${log_dir}/${test_arg}_${idx_arg}_submit_phases_"*.txt 2>/dev/null | head -1 || true)"
+    latest_insn="$(ls -t "${log_dir}/${test_arg}_${idx_arg}_insn_types_"*.txt 2>/dev/null | head -1 || true)"
+    report_script="${SCRIPT_DIR}/tools/analysis/generate_submit_report_md.py"
+    if [ -n "$latest_phase" ] && [ -f "$latest_phase" ] && [ -n "$latest_insn" ] && [ -f "$latest_insn" ] && [ -f "$report_script" ]; then
+        ts="$(basename "$latest_phase" | sed -E 's/.*_submit_phases_([0-9]{8}_[0-9]{6})\.txt/\1/')"
+        md_out="${log_dir}/${test_arg}_${idx_arg}_submit_report_${ts}.md"
+        submit_args_log="${log_dir}/${test_arg}_${idx_arg}_submit_args_${ts}.log"
+        trace_submit_total="${log_dir}/${test_arg}_${idx_arg}_trace_submit_total_${ts}.txt"
+        trace_alloc="${log_dir}/${test_arg}_${idx_arg}_trace_alloc_${ts}.txt"
+        trace_sync="${log_dir}/${test_arg}_${idx_arg}_trace_sync_${ts}.txt"
+        trace_lookup="${log_dir}/${test_arg}_${idx_arg}_trace_lookup_${ts}.txt"
+        trace_insert="${log_dir}/${test_arg}_${idx_arg}_trace_insert_${ts}.txt"
+        trace_params="${log_dir}/${test_arg}_${idx_arg}_trace_params_${ts}.txt"
+        trace_fanin="${log_dir}/${test_arg}_${idx_arg}_trace_fanin_${ts}.txt"
+        trace_others="${log_dir}/${test_arg}_${idx_arg}_trace_others_${ts}.txt"
+        build_graph_insns="$(sed -n 's/^build_graph 指令数: \([0-9][0-9]*\).*/\1/p' "$latest_phase" | head -1)"
+        if [ -z "$build_graph_insns" ]; then
+            build_graph_insns="-1"
+        fi
+
+        python3 - "$latest_phase" "$submit_args_log" "$trace_submit_total" "$trace_alloc" "$trace_sync" "$trace_lookup" "$trace_insert" "$trace_params" "$trace_fanin" "$trace_others" <<'PY'
+import re
+import sys
+
+phase_path = sys.argv[1]
+submit_args_log = sys.argv[2]
+trace_paths = {
+    "submit_total": sys.argv[3],
+    "alloc": sys.argv[4],
+    "sync": sys.argv[5],
+    "lookup": sys.argv[6],
+    "insert": sys.argv[7],
+    "params": sys.argv[8],
+    "fanin": sys.argv[9],
+    "others": sys.argv[10],
+}
+
+phase_re = re.compile(r"^\s*(submit_total|alloc|sync|lookup|insert|params|fanin|others)\s*:\s*(\d+)\s*$")
+submit_args = []
+values = {k: [] for k in trace_paths}
+
+current = {}
+with open(phase_path, "r", encoding="utf-8", errors="replace") as f:
+    for raw in f:
+        line = raw.rstrip("\n")
+        if line.startswith("[submit-args] "):
+            if current:
+                if all(k in current for k in trace_paths):
+                    for k in trace_paths:
+                        values[k].append(current[k])
+                current = {}
+            submit_args.append(line)
+            continue
+        m = phase_re.match(line)
+        if m:
+            current[m.group(1)] = int(m.group(2))
+
+if current and all(k in current for k in trace_paths):
+    for k in trace_paths:
+        values[k].append(current[k])
+
+n = min(len(submit_args), *(len(values[k]) for k in trace_paths))
+submit_args = submit_args[:n]
+for k in trace_paths:
+    values[k] = values[k][:n]
+
+with open(submit_args_log, "w", encoding="utf-8") as f:
+    for line in submit_args:
+        f.write(line + "\n")
+
+for key, path in trace_paths.items():
+    with open(path, "w", encoding="utf-8") as f:
+        for i, v in enumerate(values[key]):
+            f.write(f"session[{i}]: {v}\n")
+PY
+
+        if ! python3 "$report_script" \
+            --submit-args-log "$submit_args_log" \
+            --submit-total-trace "$trace_submit_total" \
+            --alloc-trace "$trace_alloc" \
+            --sync-trace "$trace_sync" \
+            --lookup-trace "$trace_lookup" \
+            --insert-trace "$trace_insert" \
+            --params-trace "$trace_params" \
+            --fanin-trace "$trace_fanin" \
+            --others-trace "$trace_others" \
+            --insn-types "$latest_insn" \
+            --build-graph-insns "$build_graph_insns" \
+            --output "$md_out"; then
+            echo "[run_tests] warn: full markdown generation failed, fallback to simplified report"
+            {
+                echo "# ${test_arg} idx=${idx_arg} 提交任务报告"
+                echo ""
+                echo "## 说明"
+                echo "- 完整报告生成失败，当前为降级报告。"
+                echo "- 原始阶段统计来自 \`$(basename "$latest_phase")\`。"
+                echo "- 指令类型统计来自 \`$(basename "$latest_insn")\`。"
+                echo ""
+                echo "## 任务分阶段统计（原始）"
+                echo ""
+                echo '```'
+                sed -n '1,240p' "$latest_phase"
+                echo '```'
+                echo ""
+                echo "## 主要汇编指令统计（节选）"
+                echo ""
+                echo '```'
+                sed -n '1,120p' "$latest_insn"
+                echo '```'
+            } > "$md_out"
+        fi
+        echo "[run_tests] markdown report: $md_out"
+    elif [ -n "$latest_phase" ] && [ -f "$latest_phase" ]; then
+        echo "[run_tests] skip markdown generation: need submit_phases + insn_types + generate_submit_report_md.py"
+    fi
+    exit 0
 fi
 
 # When --sched-threads N is used, ensure PLATFORM_MAX_AICPU_THREADS >= N so the build supports N threads

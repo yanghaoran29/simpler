@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <functional>
 
 // Forward declaration
 struct PTO2Runtime;
@@ -79,6 +80,16 @@ uint64_t perf_now_us();          // Monotonic clock, returns microseconds, for p
 PTO2Runtime* make_runtime();
 int sim_drain_one_pass(PTO2Runtime* rt);
 int sim_run_all(PTO2Runtime* rt, int max_rounds = 1000);
+#ifdef __cplusplus
+extern "C" {
+#endif
+int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads);
+int aicpu_sim_get_actual_sched_cpu(int thread_idx);
+#ifdef __cplusplus
+}
+#endif
+int aicpu_sim_run_pto2_concurrent(
+    PTO2Runtime* pto2_rt, int num_sched_threads, std::function<void(PTO2Runtime*)> orch_fn);
 
 // Perf backends: each case file defines GraphCtx + one setup_run overload (included by drivers).
 struct GraphCtx;

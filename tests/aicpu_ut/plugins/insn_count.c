@@ -10,13 +10,13 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-#include <ctype.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <glib.h>
 
 #include <qemu-plugin.h>
 
@@ -36,6 +36,8 @@ static uint64_t g_filter_high;
 static int g_inclusive_mode;
 static int g_hierarchy_mode;
 static int g_marker_mode;
+static int g_insn_types_mode;
+static int g_insn_mem_mode;
 static int g_is_aarch64;
 static char* g_root_display_name;
 static uint32_t g_marker_start_enc = 0xaa030063u; /* orr x3, x3, x3 */
@@ -55,6 +57,29 @@ static size_t g_marker_sessions_cap;
 static int64_t g_active_marker_session_stack[MAX_VCPU][MAX_MARKER_STACK];
 static uint32_t g_active_marker_phase_stack[MAX_VCPU][MAX_MARKER_STACK];
 static uint32_t g_active_marker_depth[MAX_VCPU];
+
+typedef struct {
+    char* mnemonic;
+    uint64_t count;
+} InsnTypeStat;
+static InsnTypeStat* g_insn_type_stats;
+static size_t g_insn_type_stats_count;
+static size_t g_insn_type_stats_cap;
+typedef struct {
+    uint64_t vaddr;
+    uint64_t total;
+    uint64_t load;
+    uint64_t store;
+} MemAddrRow;
+typedef struct {
+    uint64_t total;
+    uint64_t load;
+    uint64_t store;
+} MemAddrStat;
+static GHashTable* g_mem_addr_table;
+static uint64_t g_mem_total;
+static uint64_t g_mem_load_total;
+static uint64_t g_mem_store_total;
 
 typedef struct {
     uint32_t phase_id;
@@ -118,6 +143,108 @@ static int marker_append_session(uint32_t cpu_id, uint32_t phase_id)
     g_marker_sessions[idx].insn_count = 0;
     g_between_markers_sessions++;
     return (int)idx;
+}
+
+static int insn_type_cmp_desc(const void* a, const void* b)
+{
+    const InsnTypeStat* x = (const InsnTypeStat*)a;
+    const InsnTypeStat* y = (const InsnTypeStat*)b;
+    if (x->count < y->count) {
+        return 1;
+    }
+    if (x->count > y->count) {
+        return -1;
+    }
+    if (!x->mnemonic && !y->mnemonic) {
+        return 0;
+    }
+    if (!x->mnemonic) {
+        return 1;
+    }
+    if (!y->mnemonic) {
+        return -1;
+    }
+    return strcmp(x->mnemonic, y->mnemonic);
+}
+
+static void insn_type_record(const char* mnemonic)
+{
+    if (!mnemonic || !*mnemonic) {
+        return;
+    }
+    for (size_t i = 0; i < g_insn_type_stats_count; i++) {
+        if (strcmp(g_insn_type_stats[i].mnemonic, mnemonic) == 0) {
+            g_insn_type_stats[i].count++;
+            return;
+        }
+    }
+    if (g_insn_type_stats_count == g_insn_type_stats_cap) {
+        size_t new_cap = g_insn_type_stats_cap ? g_insn_type_stats_cap * 2 : 64;
+        InsnTypeStat* ns = realloc(g_insn_type_stats, new_cap * sizeof(InsnTypeStat));
+        if (!ns) {
+            return;
+        }
+        g_insn_type_stats = ns;
+        g_insn_type_stats_cap = new_cap;
+    }
+    g_insn_type_stats[g_insn_type_stats_count].mnemonic = strdup(mnemonic);
+    if (!g_insn_type_stats[g_insn_type_stats_count].mnemonic) {
+        return;
+    }
+    g_insn_type_stats[g_insn_type_stats_count].count = 1;
+    g_insn_type_stats_count++;
+}
+
+static int mem_addr_cmp_desc(const void* a, const void* b)
+{
+    const MemAddrRow* x = (const MemAddrRow*)a;
+    const MemAddrRow* y = (const MemAddrRow*)b;
+    if (x->total < y->total) {
+        return 1;
+    }
+    if (x->total > y->total) {
+        return -1;
+    }
+    if (x->vaddr < y->vaddr) {
+        return -1;
+    }
+    if (x->vaddr > y->vaddr) {
+        return 1;
+    }
+    return 0;
+}
+
+static void mem_addr_record(uint64_t vaddr, bool is_store)
+{
+    if (!g_mem_addr_table) {
+        g_mem_addr_table = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
+    }
+    uint64_t key_tmp = vaddr;
+    MemAddrStat* stat = (MemAddrStat*)g_hash_table_lookup(g_mem_addr_table, &key_tmp);
+    if (!stat) {
+        uint64_t* key = g_new(uint64_t, 1);
+        MemAddrStat* val = g_new0(MemAddrStat, 1);
+        if (!key || !val) {
+            g_free(key);
+            g_free(val);
+            return;
+        }
+        *key = vaddr;
+        g_hash_table_insert(g_mem_addr_table, key, val);
+        stat = val;
+    }
+    stat->total++;
+    if (is_store) {
+        stat->store++;
+    } else {
+        stat->load++;
+    }
+    g_mem_total++;
+    if (is_store) {
+        g_mem_store_total++;
+    } else {
+        g_mem_load_total++;
+    }
 }
 
 /* Guest link-time offset: guest_pc - bias == nm symbol file address (learned at runtime). */
@@ -589,7 +716,68 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
             }
         }
         g_between_markers_insns++;
+        if (g_insn_types_mode && u && u->sym) {
+            insn_type_record(u->sym);
+        }
     }
+}
+
+static void vcpu_insn_exec_insn_types(unsigned int cpu_index, void* udata)
+{
+    if (cpu_index >= MAX_VCPU || !udata) {
+        return;
+    }
+    struct insn_ud* ud = (struct insn_ud*)udata;
+    uint32_t enc = ud->enc;
+    for (size_t i = 0; i < g_marker_pair_count; i++) {
+        if (enc == g_marker_pairs[i].start_enc) {
+            int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
+            if (idx >= 0) {
+                uint32_t d = g_active_marker_depth[cpu_index];
+                if (d < MAX_MARKER_STACK) {
+                    g_active_marker_session_stack[cpu_index][d] = idx;
+                    g_active_marker_phase_stack[cpu_index][d] = g_marker_pairs[i].phase_id;
+                    g_active_marker_depth[cpu_index] = d + 1;
+                }
+            }
+            return;
+        }
+    }
+    for (size_t i = 0; i < g_marker_pair_count; i++) {
+        if (enc == g_marker_pairs[i].end_enc) {
+            uint32_t d = g_active_marker_depth[cpu_index];
+            while (d > 0) {
+                uint32_t top = d - 1;
+                if (g_active_marker_phase_stack[cpu_index][top] == g_marker_pairs[i].phase_id) {
+                    g_active_marker_depth[cpu_index] = top;
+                    break;
+                }
+                d--;
+            }
+            return;
+        }
+    }
+    uint32_t d = g_active_marker_depth[cpu_index];
+    if (d > 0) {
+        g_between_markers_insns++;
+        insn_type_record(ud->sym);
+    }
+}
+
+static void vcpu_mem_cb_insn_types(unsigned int cpu_index,
+                                   qemu_plugin_meminfo_t info,
+                                   uint64_t vaddr,
+                                   void* userdata)
+{
+    (void)userdata;
+    if (cpu_index >= MAX_VCPU) {
+        return;
+    }
+    if (g_active_marker_depth[cpu_index] == 0) {
+        return;
+    }
+    bool is_store = qemu_plugin_mem_is_store(info);
+    mem_addr_record(vaddr, is_store);
 }
 
 static void vcpu_insn_exec_hier(unsigned int cpu_index, void* udata)
@@ -750,8 +938,74 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb* tb)
             const void* d = qemu_plugin_insn_data(insn);
             memcpy(&block[i].enc, d, sizeof(uint32_t));
             block[i].sym = NULL;
+            if (g_insn_types_mode) {
+                char* disas = qemu_plugin_insn_disas(insn);
+                if (disas && disas[0]) {
+                    char* p = disas;
+                    while (*p == ' ' || *p == '\t') p++;
+                    char* q = p;
+                    while (*q && *q != ' ' && *q != '\t') q++;
+                    size_t len = (size_t)(q - p);
+                    if (len > 0) {
+                        block[i].sym = malloc(len + 1);
+                        if (block[i].sym) {
+                            memcpy(block[i].sym, p, len);
+                            block[i].sym[len] = '\0';
+                        }
+                    }
+                    g_free(disas);
+                }
+                if (!block[i].sym) {
+                    block[i].sym = strdup("unknown");
+                }
+            }
             qemu_plugin_register_vcpu_insn_exec_cb(
                 insn, vcpu_insn_exec_markers, QEMU_PLUGIN_CB_NO_REGS, &block[i]);
+            if (g_insn_types_mode && g_insn_mem_mode) {
+                qemu_plugin_register_vcpu_mem_cb(
+                    insn, vcpu_mem_cb_insn_types, QEMU_PLUGIN_CB_NO_REGS, QEMU_PLUGIN_MEM_RW, NULL);
+            }
+        }
+        return;
+    }
+
+    if (g_insn_types_mode) {
+        struct insn_ud* block = calloc(n, sizeof(struct insn_ud));
+        if (!block) {
+            return;
+        }
+        for (size_t i = 0; i < n; i++) {
+            struct qemu_plugin_insn* insn = qemu_plugin_tb_get_insn(tb, i);
+            block[i].pc = qemu_plugin_insn_vaddr(insn);
+            const void* d = qemu_plugin_insn_data(insn);
+            memcpy(&block[i].enc, d, sizeof(uint32_t));
+            char* disas = qemu_plugin_insn_disas(insn);
+            if (disas && disas[0]) {
+                char* p = disas;
+                while (*p == ' ' || *p == '\t') p++;
+                char* q = p;
+                while (*q && *q != ' ' && *q != '\t') q++;
+                size_t len = (size_t)(q - p);
+                if (len == 0) {
+                    block[i].sym = strdup("unknown");
+                } else {
+                    block[i].sym = malloc(len + 1);
+                    if (block[i].sym) {
+                        memcpy(block[i].sym, p, len);
+                        block[i].sym[len] = '\0';
+                    }
+                }
+                g_free(disas);
+            }
+            if (!block[i].sym) {
+                block[i].sym = strdup("unknown");
+            }
+            qemu_plugin_register_vcpu_insn_exec_cb(
+                insn, vcpu_insn_exec_insn_types, QEMU_PLUGIN_CB_NO_REGS, &block[i]);
+            if (g_insn_mem_mode) {
+                qemu_plugin_register_vcpu_mem_cb(
+                    insn, vcpu_mem_cb_insn_types, QEMU_PLUGIN_CB_NO_REGS, QEMU_PLUGIN_MEM_RW, NULL);
+            }
         }
         return;
     }
@@ -830,6 +1084,61 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
     }
 
     if (g_marker_mode) {
+        if (g_insn_types_mode) {
+            if (g_insn_type_stats_count > 1) {
+                qsort(g_insn_type_stats, g_insn_type_stats_count, sizeof(InsnTypeStat), insn_type_cmp_desc);
+            }
+            if (g_outfile && g_outfile[0]) {
+                FILE* f = fopen(g_outfile, "w");
+                if (f) {
+                    fprintf(f, "# pto2_submit_mixed_task 指令类型统计 (marker: 0x%08x→0x%08x, 累计所有会话)\n",
+                            g_marker_start_enc, g_marker_end_enc);
+                    fprintf(f, "# mnemonic                count\n");
+                    for (size_t i = 0; i < g_insn_type_stats_count; i++) {
+                        fprintf(f, "%-24s %" PRIu64 "\n",
+                                g_insn_type_stats[i].mnemonic ? g_insn_type_stats[i].mnemonic : "unknown",
+                                g_insn_type_stats[i].count);
+                    }
+                    if (g_insn_mem_mode) {
+                        size_t uniq = g_mem_addr_table ? g_hash_table_size(g_mem_addr_table) : 0;
+                        MemAddrRow* rows = NULL;
+                        if (uniq > 0) {
+                            rows = g_new0(MemAddrRow, uniq);
+                        }
+                        size_t idx = 0;
+                        if (g_mem_addr_table && rows) {
+                            GHashTableIter iter;
+                            gpointer k = NULL;
+                            gpointer v = NULL;
+                            g_hash_table_iter_init(&iter, g_mem_addr_table);
+                            while (g_hash_table_iter_next(&iter, &k, &v)) {
+                                uint64_t addr = *(uint64_t*)k;
+                                MemAddrStat* st = (MemAddrStat*)v;
+                                rows[idx].vaddr = addr;
+                                rows[idx].total = st->total;
+                                rows[idx].load = st->load;
+                                rows[idx].store = st->store;
+                                idx++;
+                            }
+                        }
+                        if (rows && uniq > 1) {
+                            qsort(rows, uniq, sizeof(MemAddrRow), mem_addr_cmp_desc);
+                        }
+                        fprintf(f, "\n# memory access summary\n");
+                        fprintf(f, "# total=%" PRIu64 " load=%" PRIu64 " store=%" PRIu64 " unique_addr=%zu\n",
+                                g_mem_total, g_mem_load_total, g_mem_store_total, uniq);
+                        for (size_t i = 0; i < uniq; i++) {
+                            fprintf(f, "0x%016" PRIx64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+                                    rows[i].vaddr, rows[i].total, rows[i].load, rows[i].store);
+                        }
+                        g_free(rows);
+                    }
+                    fclose(f);
+                }
+            }
+            goto cleanup;
+        }
+
         uint64_t phase_sum[16] = {0};
         uint64_t phase_cnt[16] = {0};
         uint64_t phase_max[16] = {0};
@@ -935,6 +1244,64 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
         goto cleanup;
     }
 
+    if (g_insn_types_mode) {
+        if (g_insn_type_stats_count > 1) {
+            qsort(g_insn_type_stats, g_insn_type_stats_count, sizeof(InsnTypeStat), insn_type_cmp_desc);
+        }
+        if (g_outfile && g_outfile[0]) {
+            FILE* f = fopen(g_outfile, "w");
+            if (f) {
+                fprintf(f, "# pto2_submit_mixed_task 指令类型统计 (marker: 0x%08x→0x%08x, 累计所有会话)\n",
+                        g_marker_start_enc, g_marker_end_enc);
+                fprintf(f, "# mnemonic                count\n");
+                for (size_t i = 0; i < g_insn_type_stats_count; i++) {
+                    fprintf(f, "%-24s %" PRIu64 "\n",
+                            g_insn_type_stats[i].mnemonic ? g_insn_type_stats[i].mnemonic : "unknown",
+                            g_insn_type_stats[i].count);
+                }
+                if (g_insn_mem_mode) {
+                    size_t uniq = g_mem_addr_table ? g_hash_table_size(g_mem_addr_table) : 0;
+                    MemAddrRow* rows = NULL;
+                    if (uniq > 0) {
+                        rows = g_new0(MemAddrRow, uniq);
+                    }
+                    size_t idx = 0;
+                    if (g_mem_addr_table && rows) {
+                        GHashTableIter iter;
+                        gpointer k = NULL;
+                        gpointer v = NULL;
+                        g_hash_table_iter_init(&iter, g_mem_addr_table);
+                        while (g_hash_table_iter_next(&iter, &k, &v)) {
+                            uint64_t addr = *(uint64_t*)k;
+                            MemAddrStat* st = (MemAddrStat*)v;
+                            rows[idx].vaddr = addr;
+                            rows[idx].total = st->total;
+                            rows[idx].load = st->load;
+                            rows[idx].store = st->store;
+                            idx++;
+                        }
+                    }
+                    if (rows && uniq > 1) {
+                        qsort(rows, uniq, sizeof(MemAddrRow), mem_addr_cmp_desc);
+                    }
+                    fprintf(f, "\n# memory access summary\n");
+                    fprintf(f, "# total=%" PRIu64 " load=%" PRIu64 " store=%" PRIu64 " unique_addr=%zu\n",
+                            g_mem_total, g_mem_load_total, g_mem_store_total, uniq);
+                    for (size_t i = 0; i < uniq; i++) {
+                        fprintf(f, "0x%016" PRIx64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+                                rows[i].vaddr,
+                                rows[i].total,
+                                rows[i].load,
+                                rows[i].store);
+                    }
+                    g_free(rows);
+                }
+                fclose(f);
+            }
+        }
+        goto cleanup;
+    }
+
     if (g_inclusive_mode && g_filter_enabled) {
         snprintf(line, sizeof line,
             "QEMU_TCG guest instructions: self-only (PC in [0x%" PRIx64 ", 0x%" PRIx64 ")) %" PRIu64
@@ -957,6 +1324,22 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
     }
 
 cleanup:
+    if (g_insn_type_stats) {
+        for (size_t i = 0; i < g_insn_type_stats_count; i++) {
+            free(g_insn_type_stats[i].mnemonic);
+        }
+        free(g_insn_type_stats);
+        g_insn_type_stats = NULL;
+        g_insn_type_stats_count = 0;
+        g_insn_type_stats_cap = 0;
+    }
+    if (g_mem_addr_table) {
+        g_hash_table_destroy(g_mem_addr_table);
+        g_mem_addr_table = NULL;
+    }
+    g_mem_total = 0;
+    g_mem_load_total = 0;
+    g_mem_store_total = 0;
     free(g_marker_sessions);
     g_marker_sessions = NULL;
     g_marker_sessions_count = 0;
@@ -998,6 +1381,10 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             g_hierarchy_mode = 1;
         } else if (strcmp(argv[i], "markers=1") == 0) {
             g_marker_mode = 1;
+        } else if (strcmp(argv[i], "insn_types=1") == 0) {
+            g_insn_types_mode = 1;
+        } else if (strcmp(argv[i], "insn_mem=1") == 0) {
+            g_insn_mem_mode = 1;
         } else if (strncmp(argv[i], "symfile=", 8) == 0) {
             free(symfile);
             symfile = strdup(argv[i] + 8);
@@ -1069,6 +1456,21 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             g_marker_pairs_default[0].start_enc = g_marker_start_enc;
             g_marker_pairs_default[0].end_enc = g_marker_end_enc;
         }
+        for (int c = 0; c < MAX_VCPU; c++) {
+            g_active_marker_depth[c] = 0;
+            for (int k = 0; k < MAX_MARKER_STACK; k++) {
+                g_active_marker_session_stack[c][k] = -1;
+                g_active_marker_phase_stack[c][k] = 0;
+            }
+        }
+    }
+    if (g_insn_types_mode) {
+        if (!g_is_aarch64) {
+            qemu_plugin_outs("insn_count: insn_types=1 is only supported for aarch64 user-mode guests\n");
+            return -1;
+        }
+        g_marker_pairs = g_marker_pairs_phases;
+        g_marker_pair_count = sizeof(g_marker_pairs_phases) / sizeof(g_marker_pairs_phases[0]);
         for (int c = 0; c < MAX_VCPU; c++) {
             g_active_marker_depth[c] = 0;
             for (int k = 0; k < MAX_MARKER_STACK; k++) {

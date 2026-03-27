@@ -72,6 +72,7 @@ set(COMMON_INCLUDES
     ${ORCH_DIR}
     ${COMMON_DIR}
     ${AICPU_DIR}
+    ${PLATFORM_AICPU_DIR}
     ${ROOT_DIR}/src/a2a3/platform/sim/aicpu
 )
 
@@ -86,10 +87,6 @@ set(COMMON_COMPILE_DEFS
     SCHED_CPU5=${SCHED_CPU5}
     SCHED_CPU6=${SCHED_CPU6}
     SCHED_CPU7=${SCHED_CPU7}
-    PLATFORM_MAX_BLOCKDIM=${PLATFORM_MAX_BLOCKDIM}
-    PLATFORM_AIC_CORES_PER_BLOCKDIM=${PLATFORM_AIC_CORES_PER_BLOCKDIM}
-    PLATFORM_AIV_CORES_PER_BLOCKDIM=${PLATFORM_AIV_CORES_PER_BLOCKDIM}
-    PLATFORM_MAX_AICPU_THREADS=${PLATFORM_MAX_AICPU_THREADS}
     PTO2_SIM_AICORE_UT=1
 )
 if(PTO2_PROFILING)
@@ -183,7 +180,7 @@ set(RUNTIME_SRCS
     ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/device_time.cpp
     ${RUNTIME_DIR}/runtime.cpp
     ${AICPU_DIR}/aicpu_executor.cpp
-    ${AICPU_DIR}/sim_aicore.cpp
+    ${PLATFORM_AICPU_DIR}/sim_aicore.cpp
     ${AICPU_DIR}/msgq_cpu_sim.cpp
     ${AICPU_DIR}/hscb_cpu_sim.cpp
     ${PLATFORM_AICPU_DIR}/platform_regs.cpp

@@ -547,13 +547,8 @@ struct PTO2SchedulerState {
         if (new_refcount == slot_state.fanin_count) {
             // Local-first: try per-CoreType thread-local buffer before global queue
             // Route by active_mask: AIC-containing tasks → buf[0], AIV-only → buf[1]
-            bool pushed_local = false;
-            if (local_bufs) {
-                int32_t buf_idx = (slot_state.active_mask & 0x01) ? 0 : 1;
-                pushed_local = local_bufs[buf_idx].try_push(&slot_state);
-            }
             PTO2ResourceShape shape = pto2_active_mask_to_shape(slot_state.active_mask);
-            if (!pushed_local) {
+            if (!local_bufs || !local_bufs[static_cast<int32_t>(shape)].try_push(&slot_state)) {
                 ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
             }
             return true;
@@ -576,12 +571,7 @@ struct PTO2SchedulerState {
                 atomic_count += 1;  // CAS(task_state PENDING→READY)
                 // Local-first: try per-CoreType thread-local buffer before global queue
                 PTO2ResourceShape shape = pto2_active_mask_to_shape(slot_state.active_mask);
-                bool pushed_local = false;
-                if (local_bufs) {
-                    int32_t buf_idx = (slot_state.active_mask & 0x01) ? 0 : 1;
-                    pushed_local = local_bufs[buf_idx].try_push(&slot_state);
-                }
-                if (!pushed_local) {
+                if (!local_bufs || !local_bufs[static_cast<int32_t>(shape)].try_push(&slot_state)) {
                     ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
                 }
                 return true;
@@ -597,12 +587,9 @@ struct PTO2SchedulerState {
         while (count < max_count && local_buf.count > 0) {
             out[count++] = local_buf.slot_states[--local_buf.count];
         }
-        while (count < max_count) {
-            PTO2TaskSlotState* slot_state = ready_queues[static_cast<int32_t>(shape)].pop();
-            if (slot_state == nullptr) {
-                break;
-            }
-            out[count++] = slot_state;
+        int remaining = max_count - count;
+        if (remaining > 0) {
+            count += ready_queues[static_cast<int32_t>(shape)].pop_batch(out + count, remaining);
         }
         return count;
     }
@@ -616,13 +603,10 @@ struct PTO2SchedulerState {
             local_dispatch_count++;
             out[count++] = local_buf.slot_states[--local_buf.count];
         }
-        while (count < max_count) {
-            PTO2TaskSlotState* slot_state =
-                ready_queues[static_cast<int32_t>(shape)].pop(atomic_count, wait_cycle);
-            if (slot_state == nullptr) {
-                break;
-            }
-            out[count++] = slot_state;
+        int remaining = max_count - count;
+        if (remaining > 0) {
+            count += ready_queues[static_cast<int32_t>(shape)].pop_batch(
+                out + count, remaining, atomic_count, wait_cycle);
         }
         return count;
     }
@@ -644,7 +628,6 @@ struct PTO2SchedulerState {
         }
 #endif
     }
-
 
     /**
      * Two-stage completion: first stage.
@@ -672,7 +655,7 @@ struct PTO2SchedulerState {
 #else
     void
 #endif
-    on_mixed_task_complete(PTO2TaskSlotState& slot_state,
+    on_mixed_task_complete(PTO2TaskSlotState& slot_state, 
 #if PTO2_SCHED_PROFILING
         int thread_idx,
 #endif
@@ -709,7 +692,6 @@ struct PTO2SchedulerState {
 #if PTO2_SCHED_PROFILING
         uint64_t fanout_atomics = 0, push_wait = 0;
 #endif
-
         while (current != nullptr) {
             PTO2TaskSlotState& consumer_slot = *current->slot_state;
 #if PTO2_SCHED_PROFILING

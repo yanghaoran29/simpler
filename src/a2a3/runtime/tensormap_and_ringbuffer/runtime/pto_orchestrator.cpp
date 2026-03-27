@@ -56,7 +56,6 @@ static int64_t  g_orch_submit_count = 0;
 static uint32_t g_orch_submit_idx = 0;
 uint64_t g_orch_alloc_wait_cycle = 0;
 uint64_t g_orch_fanin_wait_cycle = 0;
-uint64_t g_orch_finalize_wait_cycle = 0;
 uint64_t g_orch_alloc_atomic_count = 0;
 uint64_t g_orch_params_atomic_count = 0;
 uint64_t g_orch_fanin_atomic_count = 0;
@@ -243,6 +242,7 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 // =============================================================================
 void pto2_submit_mixed_task(
     PTO2OrchestratorState* orch, const MixedKernels& mixed_kernels, const PTOParam& params) {
+    CYCLE_COUNT_START();
 #if defined(__aarch64__)
     // Whole submit range marker (legacy pair used by existing tooling).
     __asm__ __volatile__("orr x3, x3, x3");
@@ -253,7 +253,6 @@ void pto2_submit_mixed_task(
         }
     } marker_scope;
 #endif
-    CYCLE_COUNT_START();
 
     // Fast path after fatal error — all subsequent submits are no-ops
     if (orch->fatal) {
@@ -276,12 +275,28 @@ void pto2_submit_mixed_task(
     }
 
 #if defined(PTO2_TRACE_SUBMIT_ARGS_ENABLE) && PTO2_TRACE_SUBMIT_ARGS_ENABLE
-    printf("[submit-args] mixed=(aic=%d,aiv0=%d,aiv1=%d) tensors=%d scalars=%d\n",
+    int input_count = 0;
+    int output_count = 0;
+    int inout_count = 0;
+    for (int i = 0; i < params.tensor_count; i++) {
+        PTOParamType ptype = params.tensor_types[i];
+        if (ptype == PTOParamType::INPUT) {
+            input_count++;
+        } else if (ptype == PTOParamType::OUTPUT) {
+            output_count++;
+        } else if (ptype == PTOParamType::INOUT) {
+            inout_count++;
+        }
+    }
+    printf("[submit-args] mixed=(aic=%d,aiv0=%d,aiv1=%d) tensors=%d scalars=%d input=%d output=%d inout=%d\n",
            mixed_kernels.aic_kernel_id,
            mixed_kernels.aiv0_kernel_id,
            mixed_kernels.aiv1_kernel_id,
            params.tensor_count,
-           params.scalar_count);
+           params.scalar_count,
+           input_count,
+           output_count,
+           inout_count);
 #endif
 
 
@@ -295,13 +310,16 @@ void pto2_submit_mixed_task(
     uint8_t active_mask = pto2_mixed_kernels_to_active_mask(mixed_kernels);
     always_assert(active_mask != 0 && "MixedKernels must have at least one active slot");
 
-    // Normalize single-AIV tasks: if only aiv1 is set, move it to the aiv0 slot.
-    // This guarantees the dispatch path can always use PTO2SubtaskSlot::AIV0 for
-    // AIV_X1 and AIC_AIV_X1 shapes without inspecting active_mask.
+    // Normalize single-AIV tasks: if only aiv1 is set (no aic, no aiv0), move
+    // it to the aiv0 slot.  This guarantees the dispatch path can always use
+    // PTO2SubtaskSlot::AIV0 for single-AIV shapes without inspecting active_mask.
+    // Mixed tasks (AIC+AIV) keep their original AIV identity so the correct
+    // hardware channel (AIV0→AIC vs AIV1→AIC) is used at dispatch time.
     MixedKernels normalized = mixed_kernels;
+    bool has_aic  = (active_mask & PTO2_SUBTASK_MASK_AIC) != 0;
     bool has_aiv0 = (active_mask & PTO2_SUBTASK_MASK_AIV0) != 0;
     bool has_aiv1 = (active_mask & PTO2_SUBTASK_MASK_AIV1) != 0;
-    if (has_aiv1 && !has_aiv0) {
+    if (!has_aic && has_aiv1 && !has_aiv0) {
         normalized.aiv0_kernel_id = normalized.aiv1_kernel_id;
         normalized.aiv1_kernel_id = INVALID_KERNEL_ID;
         active_mask = pto2_mixed_kernels_to_active_mask(normalized);
@@ -410,9 +428,9 @@ void pto2_submit_mixed_task(
     PTO2TaskSlotState* fanin_states[PTO2_MAX_INPUTS];
     int32_t fanin_count = 0;
 
-#if defined(__aarch64__)
+    #if defined(__aarch64__)
     __asm__ __volatile__("orr x6, x6, x6");
-#endif
+    #endif
     CYCLE_COUNT_LAP_RECORD(g_orch_alloc_cycle, AicpuPhaseId::ORCH_ALLOC, task_id.raw);
 
 #if PTO2_PROFILING
@@ -435,9 +453,9 @@ void pto2_submit_mixed_task(
         orch->rings[ring_id].dep_pool.reclaim(*sched, ring_id, sm_last_task_alive);
     }
 
-#if defined(__aarch64__)
+    #if defined(__aarch64__)
     __asm__ __volatile__("orr x8, x8, x8");
-#endif
+    #endif
     CYCLE_COUNT_LAP_RECORD(g_orch_sync_cycle, AicpuPhaseId::ORCH_SYNC, task_id.raw);
 
     // === STEP 3: Lookup inputs + assign output addrs (all from params, no GM) ===
@@ -497,15 +515,32 @@ void pto2_submit_mixed_task(
                     uint64_t alloc_addr = reinterpret_cast<uint64_t>((char*)alloc_result.packed_base + offset);
                     tensor.buffer.addr = alloc_addr;
                     offset += PTO2_ALIGN_UP(tensor.buffer.size, PTO2_PACKED_OUTPUT_ALIGN);
+                    // Cache line 1 is hot (just wrote buffer.addr at offset 0).
+                    // has_initial_value sits on the same cache line (offset 39) — zero-cost check.
+                    if (tensor.has_initial_value) {
+                        uint64_t elem_size = get_element_size(tensor.dtype);
+                        tensor.has_initial_value = false;
+                        uint64_t total = tensor.buffer.size;
+                        char* dst = reinterpret_cast<char*>(alloc_addr);
+                        constexpr uint64_t BLK = 64;
+                        uint64_t blk = (total < BLK) ? total : BLK;
+                        for (uint64_t b = 0; b < blk; b += elem_size)
+                            memcpy(dst + b, &tensor.initial_value, elem_size);
+                        uint64_t off = blk;
+                        for (; off + blk <= total; off += blk)
+                            memcpy(dst + off, dst, blk);
+                        if (off < total)
+                            memcpy(dst + off, dst, total - off);
+                    }
                 }
                 break;
             }
         }
     }
 
-#if defined(__aarch64__)
+    #if defined(__aarch64__)
     __asm__ __volatile__("orr x10, x10, x10");
-#endif
+    #endif
     CYCLE_COUNT_LAP_RECORD(g_orch_lookup_cycle, AicpuPhaseId::ORCH_LOOKUP, task_id.raw);
 
     // === STEP 4: Register outputs/inouts in TensorMap (must be separate from lookup) ===
@@ -521,9 +556,9 @@ void pto2_submit_mixed_task(
         }
     }
 
-#if defined(__aarch64__)
+    #if defined(__aarch64__)
     __asm__ __volatile__("orr x12, x12, x12");
-#endif
+    #endif
     CYCLE_COUNT_LAP_RECORD(g_orch_insert_cycle, AicpuPhaseId::ORCH_INSERT, task_id.raw);
 
     // === STEP 5: Batch-write to GM (single cache line burst) ===
@@ -552,9 +587,9 @@ void pto2_submit_mixed_task(
 
     payload->init(params);
 
-#if defined(__aarch64__)
+    #if defined(__aarch64__)
     __asm__ __volatile__("orr x14, x14, x14");
-#endif
+    #endif
     CYCLE_COUNT_LAP_RECORD(g_orch_params_cycle, AicpuPhaseId::ORCH_PARAMS, task_id.raw);
 #if PTO2_ORCH_PROFILING
     g_orch_params_atomic_count += 2;  // fanout_lock.store + fanout_count.store
@@ -623,9 +658,9 @@ void pto2_submit_mixed_task(
 #endif
     }
 
-#if defined(__aarch64__)
+    #if defined(__aarch64__)
     __asm__ __volatile__("orr x2, x2, x2");
-#endif
+    #endif
     CYCLE_COUNT_LAP_RECORD(g_orch_fanin_cycle, AicpuPhaseId::ORCH_FANIN, task_id.raw);
 
 #if PTO2_PROFILING

@@ -44,16 +44,6 @@ uint64_t get_platform_regs();
 }
 #endif
 
-// Sim AICore helpers (used internally when PTO2_SIM_AICORE_UT is enabled)
-#if defined(PTO2_SIM_AICORE_UT)
-extern "C" uint64_t pto2_sim_read_cond_reg(int32_t core_id);
-extern "C" void pto2_sim_aicore_on_task_received(int32_t core_id, int32_t task_id);
-extern "C" void pto2_sim_aicore_set_idle(int32_t core_id);
-// Set/clear current sim core context for register access (implemented in platform_regs.cpp)
-extern "C" void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
-extern "C" void pto2_sim_clear_current_core();
-#endif
-
 /**
  * Read a register value from an AICore's register block
  *

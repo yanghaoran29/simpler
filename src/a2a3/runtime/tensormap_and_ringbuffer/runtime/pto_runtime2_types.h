@@ -78,7 +78,7 @@
 // NOTE: PTO2_TASK_WINDOW_SIZE is now a per-ring default value.
 // Actual window size is passed at runtime to pto2_runtime_create_threaded_custom().
 // Use pto2_task_slot(sched, task_id) for slot calculation.
-#define PTO2_TASK_WINDOW_SIZE     131072   // Default per-ring task window size (power of 2)
+#define PTO2_TASK_WINDOW_SIZE     16384   // Default per-ring task window size (power of 2)
 
 // Multi-ring: number of independent ring layers (HeapRing + TaskRing + DepPool per layer)
 // Scope depth maps to ring index via: min(scope_depth, PTO2_MAX_RING_DEPTH - 1)
@@ -86,16 +86,16 @@
 
 // Memory pools (per-ring defaults; total = value × PTO2_MAX_RING_DEPTH)
 #define PTO2_HEAP_SIZE            (256 * 1024 * 1024)  // 256MB per ring (1GB total)
-#define PTO2_DEP_LIST_POOL_SIZE    131072    // Per-ring dependency list pool entries
-#define PTO2_TENSORMAP_POOL_SIZE   (262144)   // TensorMap entry pool
-#define PTO2_TENSORMAP_NUM_BUCKETS 262144    // Power of 2 for fast hash
+#define PTO2_DEP_LIST_POOL_SIZE    16384    // Per-ring dependency list pool entries
+#define PTO2_TENSORMAP_POOL_SIZE   (65536)   // TensorMap entry pool
+#define PTO2_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH      64      // Maximum nesting depth
-#define PTO2_SCOPE_TASKS_INIT_CAP 262144     // Initial capacity for scope task buffer
+#define PTO2_SCOPE_TASKS_INIT_CAP 65536     // Initial capacity for scope task buffer
 
 // Ready queue
-#define PTO2_READY_QUEUE_SIZE     262144   // Per-shape queue size
+#define PTO2_READY_QUEUE_SIZE     65536   // Per-shape queue size
 
 // Memory alignment
 #define PTO2_ALIGN_SIZE           64      // Cache line alignment
@@ -105,6 +105,10 @@
 // TensorMap cleanup interval
 #define PTO2_TENSORMAP_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
 #define PTO2_DEP_POOL_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
+
+// get_tensor_data/set_tensor_data spin wait timeout in cycles.
+// ~10s on hardware (1.5 GHz counter), ~10s on simulation (chrono-based).
+constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_CYCLES = 15 * 1000 * 1000 * 1000ULL;
 
 // =============================================================================
 // Multi-Ring task_id Encoding
@@ -379,10 +383,6 @@ struct PTO2TaskPayload {
         auto src_tensors = params.tensors;
         for (int32_t i = 0; i < params.tensor_count; i++) {
             tensors[i].copy(*src_tensors[i]);
-        }
-
-        // 2. Build dispatch_args[]: tensor pointers first, then scalar values
-        for (int32_t i = 0; i < params.tensor_count; i++) {
             tensors[i].update_start_offset();
             dispatch_args[i] = reinterpret_cast<uint64_t>(&tensors[i]);
         }

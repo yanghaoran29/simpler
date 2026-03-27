@@ -66,9 +66,6 @@ struct PerfRecord {
     uint64_t start_time;         // Task start timestamp (get_sys_cnt)
     uint64_t end_time;           // Task end timestamp
     uint64_t duration;           // Execution duration (end - start)
-    uint64_t kernel_ready_time;  // Kernel ready timestamp (before first task)
-                                 // Records when AICore enters main loop (ready to execute)
-                                 // Used for: 1) startup overhead analysis, 2) cross-core alignment
 
     // AICPU-side timestamps (written by AICPU, not AICore)
     uint64_t dispatch_time;      // AICPU timestamp: when task was dispatched to AICore (task_status set to 1)
@@ -293,7 +290,7 @@ struct AicpuOrchSummary {
 } __attribute__((aligned(64)));
 
 constexpr uint32_t AICPU_PHASE_MAGIC = 0x41435048;  // "ACPH"
-constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 131072;  // ~512KB per thread
+constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 16384;  // ~512KB per thread
 
 /**
  * Fixed-size phase record buffer (analogous to PerfBuffer)

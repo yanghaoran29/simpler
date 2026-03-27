@@ -17,6 +17,9 @@
  */
 
 #include <cstdint>
+#include <cstdlib>
+#include <chrono>
+#include <thread>
 #include "aicpu/platform_regs.h"
 #include "common/platform_config.h"
 #if defined(PTO2_SIM_AICORE_UT)
@@ -24,6 +27,30 @@
 #endif
 
 static uint64_t g_platform_regs = 0;
+
+#if defined(PTO2_SIM_AICORE_UT)
+static inline int32_t pto2_sim_task_recv_delay_us() {
+    static int32_t cached = -2;  // -2: uninitialized
+    if (cached != -2) {
+        return cached;
+    }
+    const char* s = std::getenv("AICPU_UT_SIM_AICORE_TASK_RECV_DELAY_US");
+    if (!s || !*s) {
+        cached = 0;
+        return cached;
+    }
+    char* end = nullptr;
+    long v = std::strtol(s, &end, 10);
+    if (end == s || v <= 0) {
+        cached = 0;
+    } else if (v > 1000000) {
+        cached = 1000000;  // clamp to 1s
+    } else {
+        cached = static_cast<int32_t>(v);
+    }
+    return cached;
+}
+#endif
 
 void set_platform_regs(uint64_t regs) {
     g_platform_regs = regs;
@@ -58,8 +85,13 @@ void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value) {
         int32_t core_id = static_cast<int32_t>(reg_base_addr);
         if (value == 0 || value == AICORE_EXIT_SIGNAL)
             pto2_sim_aicore_set_idle(core_id);
-        else
+        else {
+            int32_t delay_us = pto2_sim_task_recv_delay_us();
+            if (delay_us > 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+            }
             pto2_sim_aicore_on_task_received(core_id, static_cast<int32_t>(value - 1));
+        }
         return;
     }
 #endif
