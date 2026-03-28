@@ -885,6 +885,14 @@ int32_t AicpuExecutor::shutdown_aicore(Runtime* runtime, int32_t thread_idx, con
 }
 
 int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t thread_idx) {
+#if defined(__aarch64__)
+    // Whole scheduler resolve+dispatch range marker (aligned with tensormap_and_ringbuffer executor).
+    __asm__ __volatile__("orr x15, x15, x15");
+    struct Pto2SchedMarkerScope {
+        ~Pto2SchedMarkerScope() { __asm__ __volatile__("orr x16, x16, x16"); }
+    } sched_marker_scope;
+#endif
+
     int32_t &core_num = core_count_per_thread_[thread_idx];
     CoreStateTracker& tracker = trackers_[thread_idx];
     DEV_INFO("Thread %d: resolve_and_dispatch_pto2 entry", thread_idx);
@@ -976,18 +984,36 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 
     bool cores_released = false;
 
+#if PTO2_PROFILING
+    uint64_t sched_start_ts = get_sys_cnt_aicpu();
+#endif
+
     while (true) {
+#if defined(__aarch64__) && defined(PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE) && PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE
+        __asm__ __volatile__("orr x23, x23, x23" ::: "memory");
+        struct Pto2SchedLoopInsnMarkerScope {
+            ~Pto2SchedLoopInsnMarkerScope() {
+                __asm__ __volatile__("orr x24, x24, x24" ::: "memory");
+            }
+        } sched_loop_insn_marker_scope;
+#endif
         bool made_progress = false;
 #if PTO2_PROFILING
         CYCLE_COUNT_START();
         sched_loop_count++;
         uint64_t _t0_phase = _t0;
 #endif
+        // Align with tensormap_and_ringbuffer: read orch_done / task_count every iteration so
+        // stall logs and empty-graph exit behave correctly when cores are still running.
         int32_t task_count = 0;
-        if (tracker.aic().running_count == 0 && tracker.aiv().running_count == 0) {
-            bool orch_done = orchestrator_done_;
-            if (orch_done) {
-                // Check for orchestrator fatal error — exit immediately
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        bool orch_done = orchestrator_done_;
+        if (orch_done) {
+            task_count = total_tasks_;
+            if (task_count == 0) {
+                break;
+            }
+            if (tracker.aic().running_count == 0 && tracker.aiv().running_count == 0) {
                 int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
                 if (orch_err != PTO2_ERROR_NONE) {
                     DEV_ERROR("Thread %d: Fatal error (code=%d), sending EXIT_SIGNAL to all cores. "
@@ -999,12 +1025,10 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                     completed_.store(true, std::memory_order_release);
                     break;
                 }
-
-                // Normal exit: all tasks complete
-                task_count = total_tasks_;
-                if (task_count > 0 && completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
+                if (completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
                     completed_.store(true, std::memory_order_release);
-                    DEV_INFO("Thread %d: PTO2 completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed), task_count);
+                    DEV_INFO("Thread %d: PTO2 completed tasks %d/%d", thread_idx,
+                        completed_tasks_.load(std::memory_order_relaxed), task_count);
                     break;
                 }
             }
@@ -1029,6 +1053,11 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 
 #if PTO2_PROFILING
         CYCLE_COUNT_LAP(sched_idle_cycle);
+        // Scan: same as tensormap — Phase 1 window at loop start (minimal)
+        uint64_t t_scan0 = get_sys_cnt_aicpu();
+        uint64_t t_scan1 = get_sys_cnt_aicpu();
+        sched_scan_cycle += (t_scan1 - t_scan0);
+        CYCLE_COUNT_LAP(sched_scan_cycle);
 #endif
 
         // Process completed and dispatch FIRST to minimize Sched (dispatch→finish) latency.
@@ -1036,6 +1065,9 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
         // tail overhead (time from AICore done to AICPU recording finish).
 
         // Phase 1: Check running cores for completion, process and move to idle
+#if defined(__aarch64__)
+        __asm__ __volatile__("orr x17, x17, x17");
+#endif
         int32_t completed_this_turn = 0;
 
         // Check AIC running cores
@@ -1107,10 +1139,16 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
         }
 #endif
+#if defined(__aarch64__)
+        __asm__ __volatile__("orr x18, x18, x18");
+#endif
 
         // Phase 2: Local dispatch — drain local_bufs, match to idle clusters (zero MPMC operations)
         // Phase 3: Global queue — push overflow to readyQ + fill remaining idle cores from readyQ
         bool try_pushed = false;
+#if defined(__aarch64__)
+        __asm__ __volatile__("orr x19, x19, x19");
+#endif
 
         // Local dispatch: drain both per-CoreType local_bufs, match to idle clusters by shape
         PTO2TaskSlotState* overflow_ptrs[LOCAL_READY_CAP_PER_TYPE * PTO2_LOCAL_DISPATCH_TYPE_NUM];
@@ -1260,8 +1298,15 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                 _t0_phase = _t1;
                 phase_dispatch_count = 0;
             }
-#endif
         }
+#endif
+#if defined(__aarch64__)
+        __asm__ __volatile__("orr x20, x20, x20");
+#endif
+#if !PTO2_PROFILING
+        (void)try_completed;
+        (void)try_pushed;
+#endif
 
         if (made_progress) {
             idle_iterations = 0;
@@ -1382,22 +1427,42 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
             if (idle_iterations > MAX_IDLE_ITERATIONS) {
                 DEV_ERROR("Thread %d: PTO2 timeout after %d idle iterations", thread_idx, idle_iterations);
+#if PTO2_PROFILING
+                uint64_t sched_timeout_ts = get_sys_cnt_aicpu();
+                DEV_ALWAYS("Thread %d: sched_start=%llu sched_end(timeout)=%llu sched_cost=%.3fus",
+                           thread_idx, (unsigned long long)sched_start_ts,
+                           (unsigned long long)sched_timeout_ts,
+                           cycles_to_us(sched_timeout_ts - sched_start_ts));
+#endif
                 return -1;
             } else {
                 SPIN_WAIT_HINT();
             }
 #if PTO2_PROFILING
+#if defined(__aarch64__)
+            __asm__ __volatile__("orr x21, x21, x21");
+#endif
             CYCLE_COUNT_LAP(sched_idle_cycle);
             if (profiling_enabled) {
                 perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_IDLE_WAIT,
                                         _t0_phase, _t1, sched_loop_count, 0);
                 _t0_phase = _t1;
             }
+#if defined(__aarch64__)
+            __asm__ __volatile__("orr x22, x22, x22");
+#endif
 #endif
         }
     }
 
 #if PTO2_PROFILING
+    // Record sched_end before summary (aligned with tensormap_and_ringbuffer executor)
+    uint64_t sched_end_ts = get_sys_cnt_aicpu();
+    DEV_ALWAYS("Thread %d: sched_start=%llu sched_end=%llu sched_cost=%.3fus",
+        thread_idx, (unsigned long long)sched_start_ts,
+        (unsigned long long)sched_end_ts,
+        cycles_to_us(sched_end_ts - sched_start_ts));
+
     // Scheduler summary logging (always print when PTO2_PROFILING=1)
     uint64_t sched_total =
         sched_complete_cycle + sched_scan_cycle + sched_dispatch_cycle + sched_idle_cycle;

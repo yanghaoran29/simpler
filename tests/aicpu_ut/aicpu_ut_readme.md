@@ -25,7 +25,7 @@
 
 | 参数 | 说明 |
 |------|------|
-| *(无参数)* | 运行全部测试（功能测试 + 性能测试） |
+| *(无参数)* | 运行默认 perf 集合（当前为 `test_batch_paged_attention`/`test_alt`/`test_pau`/`test_throughput`/`test_latency` 的 idx=0） |
 | `--func` | 仅运行功能测试 |
 | `--perf` | 仅运行性能测试 |
 | `--test <name>` | 运行指定测试的全部参数组 |
@@ -38,7 +38,7 @@
 | 参数 | 说明 |
 |------|------|
 | `--build-only` | 仅构建，不运行任何测试 |
-| `--no-profiling` | 关闭 `PTO2_PROFILING` 宏（默认开启） |
+| `--profiling <0|1|2>` | 设置 profiling 级别：`0` 关闭（默认），`1` 基础 profiling，`2` 完整 profiling（sched+orch+tensormap） |
 | `--sched-threads N` | 设置 Scheduler 线程数（仅 perf 测试生效，默认 3，范围 1～PLATFORM_MAX_AICPU_THREADS） |
 | `--no-early-return` | （已废弃）旧版通过编译时定义 `PTO2_SIM_NO_EARLY_RETURN` 在 break/return 前先 drain `deferred_release`；当前分支已移除相关分支代码，该选项不再生效，仅保留参数占位以兼容旧脚本 |
 
@@ -82,7 +82,7 @@
 ./run_tests.sh --test test_batch_paged_attention
 
 # 只运行 test_batch_paged_attention 的第 1 组参数
-./run_tests.sh --test test_batch_paged_attention --index 1
+./run_tests.sh --test test_batch_paged_attention --idx 1
 
 # 只运行 test_cpu_affinity（功能测试，无参数索引）
 ./run_tests.sh --test test_cpu_affinity
@@ -90,8 +90,8 @@
 # 仅构建，不运行
 ./run_tests.sh --build-only
 
-# 关闭 profiling 后运行全部测试
-./run_tests.sh --no-profiling
+# 开启基础 profiling 运行
+./run_tests.sh --profiling 1
 
 # 开启 no-early-return，校验 completed==consumed、fanout==fanin（test_batch_paged_attention 会据此判 fail）
 ./run_tests.sh --test test_batch_paged_attention --idx 0 --no-early-return
@@ -112,14 +112,14 @@
 |------|--------|------|
 | `TIMEOUT` | `600` | 单个测试的超时时间（秒） |
 | `BUILD_DIR` | `<脚本目录>/build` | CMake 构建目录 |
-| `PTO2_PROFILING` | `ON` | 是否开启 profiling 宏（`ON` / `OFF`） |
+| `PROFILING_MODE` | `0` | profiling 级别（与 `--profiling` 含义一致：0/1/2） |
 
 ### CPU 绑核
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `ORCH_CPU` | `0` | Orchestrator 线程绑定的 CPU 核心 |
-| `SCHED_CPU0` ~ `SCHED_CPU7` | `1` ~ `8` | 8 个 Scheduler 线程依次绑定的 CPU 核心 |
+| `ORCH_CPU` | `4` | Orchestrator 线程绑定的 CPU 核心 |
+| `SCHED_CPU0` ~ `SCHED_CPU7` | `8` ~ `15` | 8 个 Scheduler 线程依次绑定的 CPU 核心 |
 
 ### 平台参数
 

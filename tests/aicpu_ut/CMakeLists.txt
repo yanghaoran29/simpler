@@ -50,6 +50,8 @@ option(PTO2_TENSORMAP_PROFILING "Enable tensormap lookup profiling" OFF)
 option(PTO2_TRACE_SUBMIT_ARGS_ENABLE "Enable pto2_submit_mixed_task argument tracing" OFF)
 # When ON: test_orchestrator_scheduler.cpp emits orr x17/x18 around build_graph() for QEMU insn_count markers.
 option(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE "Emit build_graph insn-count markers (orr x17/x18) in scheduler driver" OFF)
+# When ON: aicpu_executor.cpp emits orr x23/x24 per scheduler loop iteration for QEMU insn_count (see count_scheduler_loop_markers.sh).
+option(PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE "Emit per-iteration scheduler loop insn-count markers (orr x23/x24) in aicpu_executor" OFF)
 
 # ─── Sim AICore / 0-core paths (aicpu_ut 始终编译进仿真与 executor) ────────────
 # 始终定义 PTO2_SIM_AICORE_UT=1；不再提供 CMake 开关。
@@ -283,6 +285,9 @@ add_library(runtime_common OBJECT
 target_include_directories(runtime_common PUBLIC ${COMMON_INCLUDES})
 target_compile_definitions(runtime_common PUBLIC ${COMMON_COMPILE_DEFS})
 target_compile_options(runtime_common PRIVATE ${COMMON_COMPILE_OPTIONS})
+if(PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE)
+    target_compile_definitions(runtime_common PRIVATE PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE=1)
+endif()
 
 # ─── Helper: configure a test executable ──────────────────────────────────────
 # Each test binary links against the shared OBJECT library and the static system

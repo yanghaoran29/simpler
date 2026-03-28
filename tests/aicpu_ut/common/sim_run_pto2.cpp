@@ -1,9 +1,8 @@
 /**
  * sim_run_pto2.cpp
  *
- * Implementation of aicpu_sim_run_pto2 and related getters/setters.
- * Moved from aicpu_executor.cpp so simulation entry points live in aicpu_ut.
- * Calls executor via aicpu_sim_set_rt, aicpu_executor_sim_* wrappers.
+ * PTO2_SIM_AICORE_UT: aicpu_sim_run_pto2 / concurrent — drive scheduler via
+ * AicpuExecutor::resolve_and_dispatch_pto2 (see aicpu_executor.cpp sim wrappers).
  */
 
 #include <atomic>
@@ -14,12 +13,15 @@
 
 #include "common/platform_config.h"
 #include "cpu_affinity.h"
-#include "test_common.h"
 #include "pto_runtime2.h"
 #include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
 #include "runtime.h"
 #include "sim_aicore.h"
+
+#if defined(PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE) && PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE
+extern "C" void aicpu_sim_print_rdp2_invoke_stats(void);
+#endif
 
 // Scheduler CPU list (same as formerly in aicpu_executor.cpp; SCHED_CPU* from CMake)
 static const int s_sched_cpus[] = {
@@ -68,14 +70,54 @@ extern "C" void pto2_sim_reset_run_prof(void) {
 extern "C" {
 
 int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
-    (void)num_sched_threads;
     if (!pto2_rt || !pto2_rt->sm_handle) return -1;
+    void* sm_base = pto2_rt->sm_handle->sm_base;
+    if (!sm_base) return -1;
+    if (num_sched_threads < 1) return -1;
 
     pto2_sim_reset_run_prof();
 
+    const int SIM_CORE_COUNT = PLATFORM_MAX_CORES;
+    Runtime runtime;
+    runtime.set_pto2_gm_sm_ptr(sm_base);
+    runtime.worker_count = SIM_CORE_COUNT;
+    memset(runtime.workers, 0, sizeof(runtime.workers));
+    runtime.sche_cpu_num = num_sched_threads;
+    runtime.orch_thread_num = 0;
+    runtime.set_orch_built_on_host(true);
+
+    int rc = aicpu_executor_sim_init(&runtime);
+    if (rc != 0) return rc;
+
+    aicpu_sim_set_rt(pto2_rt);
+    PTO2SharedMemoryHeader* header = static_cast<PTO2SharedMemoryHeader*>(sm_base);
+    int32_t total = 0;
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        total += header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
+    }
+    aicpu_executor_sim_setup_after_host_orch(total);
+
     for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) s_actual_sched_cpu[i] = -1;
-    int total = sim_run_all(pto2_rt, 1000000);
-    return (total >= 0) ? 0 : -1;
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < num_sched_threads; i++) {
+        threads.emplace_back([&runtime, i]() {
+            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0]))) bind_to_cpu(s_sched_cpus[i]);
+            if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
+                int cur = current_cpu();
+                s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;
+            }
+            aicpu_executor_sim_run_resolve_and_dispatch_pto2(&runtime, i);
+        });
+    }
+    for (auto& t : threads) t.join();
+
+#if defined(PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE) && PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE
+    aicpu_sim_print_rdp2_invoke_stats();
+#endif
+
+    aicpu_executor_sim_shutdown_aicore(&runtime);
+    return 0;
 }
 
 }  // extern "C"
@@ -83,49 +125,119 @@ int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
 int aicpu_sim_run_pto2_concurrent(
     PTO2Runtime* pto2_rt, int num_sched_threads, std::function<void(PTO2Runtime*)> orch_fn) {
     if (!pto2_rt || !pto2_rt->sm_handle) return -1;
+    void* sm_base = pto2_rt->sm_handle->sm_base;
+    if (!sm_base) return -1;
     if (!orch_fn) return -1;
+    if (num_sched_threads < 1) return -1;
 
-    std::thread orch_thread([pto2_rt, &orch_fn, num_sched_threads]() {
+    pto2_sim_reset_run_prof();
+
+    const int SIM_CORE_COUNT = PLATFORM_MAX_CORES;
+    Runtime runtime;
+    runtime.set_pto2_gm_sm_ptr(sm_base);
+    runtime.worker_count = SIM_CORE_COUNT;
+    memset(runtime.workers, 0, sizeof(runtime.workers));
+    runtime.sche_cpu_num = num_sched_threads;
+    runtime.orch_thread_num = 0;
+    runtime.set_orch_built_on_host(true);
+    runtime.set_orch_deferred_on_host(true);
+
+    int rc = aicpu_executor_sim_init(&runtime);
+    if (rc != 0) return rc;
+
+    aicpu_sim_set_rt(pto2_rt);
+
+    for (int i = 0; i < PLATFORM_MAX_AICPU_THREADS; i++) s_actual_sched_cpu[i] = -1;
+
+    std::thread orch_thread([pto2_rt, sm_base, orch_fn, num_sched_threads]() {
 #if PTO2_PROFILING
         uint64_t orch_t0 = get_sys_cnt_aicpu();
 #endif
         orch_fn(pto2_rt);
 #if PTO2_PROFILING
         DEV_ALWAYS("Thread %d: aicpu_orchestration_entry returned, cost %.3fus (orch_idx=0)",
-                   num_sched_threads, cycles_to_us(get_sys_cnt_aicpu() - orch_t0));
+            num_sched_threads,
+            cycles_to_us(get_sys_cnt_aicpu() - orch_t0));
 #endif
 #if PTO2_ORCH_PROFILING
         {
             PTO2OrchProfilingData p = pto2_orchestrator_get_profiling();
-            uint64_t total = p.sync_cycle + p.alloc_cycle + p.params_cycle +
-                             p.lookup_cycle + p.insert_cycle + p.fanin_cycle;
+            uint64_t total =
+                p.sync_cycle + p.alloc_cycle + p.params_cycle + p.lookup_cycle + p.insert_cycle + p.fanin_cycle;
             if (total == 0) total = 1;
-            DEV_ALWAYS("Thread %d: === Orchestrator Profiling: %lld tasks, total=%.3fus ===", num_sched_threads,
-                     (long long)p.submit_count, cycles_to_us(total));
-            DEV_ALWAYS("Thread %d:   sync_tensormap : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.sync_cycle), p.sync_cycle * 100.0 / total);
-            DEV_ALWAYS("Thread %d:   task_ring_alloc: %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu", num_sched_threads,
-                cycles_to_us(p.alloc_cycle), p.alloc_cycle * 100.0 / total,
-                cycles_to_us(p.alloc_cycle - p.alloc_wait_cycle), cycles_to_us(p.alloc_wait_cycle),
+            DEV_ALWAYS("Thread %d: === Orchestrator Profiling: %lld tasks, total=%.3fus ===",
+                num_sched_threads,
+                (long long)p.submit_count,
+                cycles_to_us(total));
+            DEV_ALWAYS("Thread %d:   sync_tensormap : %.3fus (%.1f%%)",
+                num_sched_threads,
+                cycles_to_us(p.sync_cycle),
+                p.sync_cycle * 100.0 / total);
+            DEV_ALWAYS("Thread %d:   task_ring_alloc: %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu",
+                num_sched_threads,
+                cycles_to_us(p.alloc_cycle),
+                p.alloc_cycle * 100.0 / total,
+                cycles_to_us(p.alloc_cycle - p.alloc_wait_cycle),
+                cycles_to_us(p.alloc_wait_cycle),
                 (unsigned long long)p.alloc_atomic_count);
-            DEV_ALWAYS("Thread %d:   param_copy     : %.3fus (%.1f%%)  atomics=%llu", num_sched_threads,
-                cycles_to_us(p.params_cycle), p.params_cycle * 100.0 / total,
+            DEV_ALWAYS("Thread %d:   param_copy     : %.3fus (%.1f%%)  atomics=%llu",
+                num_sched_threads,
+                cycles_to_us(p.params_cycle),
+                p.params_cycle * 100.0 / total,
                 (unsigned long long)p.params_atomic_count);
-            DEV_ALWAYS("Thread %d:   lookup+dep     : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.lookup_cycle), p.lookup_cycle * 100.0 / total);
-            DEV_ALWAYS("Thread %d:   tensormap_ins  : %.3fus (%.1f%%)", num_sched_threads, cycles_to_us(p.insert_cycle), p.insert_cycle * 100.0 / total);
-            DEV_ALWAYS("Thread %d:   fanin+ready    : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu", num_sched_threads,
-                cycles_to_us(p.fanin_cycle), p.fanin_cycle * 100.0 / total,
-                cycles_to_us(p.fanin_cycle - p.fanin_wait_cycle), cycles_to_us(p.fanin_wait_cycle),
+            DEV_ALWAYS("Thread %d:   lookup+dep     : %.3fus (%.1f%%)",
+                num_sched_threads,
+                cycles_to_us(p.lookup_cycle),
+                p.lookup_cycle * 100.0 / total);
+            DEV_ALWAYS("Thread %d:   tensormap_ins  : %.3fus (%.1f%%)",
+                num_sched_threads,
+                cycles_to_us(p.insert_cycle),
+                p.insert_cycle * 100.0 / total);
+            DEV_ALWAYS("Thread %d:   fanin+ready    : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%llu",
+                num_sched_threads,
+                cycles_to_us(p.fanin_cycle),
+                p.fanin_cycle * 100.0 / total,
+                cycles_to_us(p.fanin_cycle - p.fanin_wait_cycle),
+                cycles_to_us(p.fanin_wait_cycle),
                 (unsigned long long)p.fanin_atomic_count);
-            DEV_ALWAYS("Thread %d:   scope_end      : %.3fus  atomics=%llu", num_sched_threads,
+            DEV_ALWAYS("Thread %d:   scope_end      : %.3fus  atomics=%llu",
+                num_sched_threads,
                 cycles_to_us(p.scope_end_cycle),
                 (unsigned long long)p.scope_end_atomic_count);
-            DEV_ALWAYS("Thread %d:   avg/task       : %.3fus", num_sched_threads,
+            DEV_ALWAYS("Thread %d:   avg/task       : %.3fus",
+                num_sched_threads,
                 p.submit_count > 0 ? cycles_to_us(total) / p.submit_count : 0.0);
         }
 #endif
+        PTO2SharedMemoryHeader* hdr = static_cast<PTO2SharedMemoryHeader*>(sm_base);
+        int32_t total_tasks = 0;
+        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+            total_tasks += hdr->rings[r].fc.current_task_index.load(std::memory_order_acquire);
+        }
+        aicpu_executor_sim_setup_after_host_orch(total_tasks);
     });
+
+    std::vector<std::thread> sched_threads;
+    for (int i = 0; i < num_sched_threads; i++) {
+        sched_threads.emplace_back([&runtime, i]() {
+            if (i < (int)(sizeof(s_sched_cpus) / sizeof(s_sched_cpus[0]))) bind_to_cpu(s_sched_cpus[i]);
+            if (i >= 0 && i < PLATFORM_MAX_AICPU_THREADS) {
+                int cur = current_cpu();
+                s_actual_sched_cpu[i] = (cur >= 0) ? cur : -1;
+            }
+            aicpu_executor_sim_run_resolve_and_dispatch_pto2(&runtime, i);
+        });
+    }
+
     orch_thread.join();
-    return aicpu_sim_run_pto2(pto2_rt, num_sched_threads);
+    for (auto& t : sched_threads) t.join();
+
+#if defined(PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE) && PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE
+    aicpu_sim_print_rdp2_invoke_stats();
+#endif
+
+    aicpu_executor_sim_shutdown_aicore(&runtime);
+    return 0;
 }
 
 extern "C" {

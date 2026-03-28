@@ -55,7 +55,7 @@ struct PTO2ScopeGuard {
 extern int g_pass;
 extern int g_fail;
 
-// Test framework macros. When PTO2_PROFILING=0 (--no-profiling), only pass/fail count is output.
+// Test framework macros. When PTO2_PROFILING=0 (--profiling 0), only pass/fail count is output.
 #define CHECK(cond)                                                          \
     do {                                                                     \
         if (!(cond)) {                                                       \
@@ -124,6 +124,8 @@ struct SchedProfilingData {
     uint64_t dispatch_cycle;
     uint64_t complete_cycle;
 };
+// Implemented in sim_run_pto2.cpp (no separate sim header).
+void pto2_sim_get_dispatch_counts(int64_t* out, int n);
 #endif
 
 void print_sched_profiling(PTO2Runtime* rt);
@@ -133,6 +135,9 @@ extern SchedProfilingData g_sched_prof_data;
 #endif
 
 #if PTO2_SCHED_PROFILING
+struct PTO2SchedProfilingData;
+void pto2_sim_get_accumulated_cycles(uint64_t* out_complete, uint64_t* out_dispatch);
+void aicpu_sim_get_saved_sched_prof(int thread_idx, PTO2SchedProfilingData* out);
 void pto2_print_sim_sched_summary(SchedProfilingData* data, int64_t tasks_completed, int64_t tasks_consumed);
 #endif
 

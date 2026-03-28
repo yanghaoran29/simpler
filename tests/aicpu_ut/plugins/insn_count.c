@@ -54,6 +54,9 @@ typedef struct {
 static MarkerSession* g_marker_sessions;
 static size_t g_marker_sessions_count;
 static size_t g_marker_sessions_cap;
+/* Marker/session state must be updated atomically w.r.t. concurrent plugin callbacks. */
+static GMutex g_marker_mu;
+static int g_marker_mu_inited;
 static int64_t g_active_marker_session_stack[MAX_VCPU][MAX_MARKER_STACK];
 static uint32_t g_active_marker_phase_stack[MAX_VCPU][MAX_MARKER_STACK];
 static uint32_t g_active_marker_depth[MAX_VCPU];
@@ -679,17 +682,19 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
     if (cpu_index >= MAX_VCPU) {
         cpu_index = 0;
     }
+    g_mutex_lock(&g_marker_mu);
     for (size_t i = 0; i < g_marker_pair_count; i++) {
         if (enc == g_marker_pairs[i].start_enc) {
-            int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
-            if (idx >= 0) {
-                uint32_t d = g_active_marker_depth[cpu_index];
-                if (d < MAX_MARKER_STACK) {
+            uint32_t d = g_active_marker_depth[cpu_index];
+            if (d < MAX_MARKER_STACK) {
+                int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
+                if (idx >= 0) {
                     g_active_marker_session_stack[cpu_index][d] = idx;
                     g_active_marker_phase_stack[cpu_index][d] = g_marker_pairs[i].phase_id;
                     g_active_marker_depth[cpu_index] = d + 1;
                 }
             }
+            g_mutex_unlock(&g_marker_mu);
             return;
         }
     }
@@ -704,6 +709,7 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
                 }
                 d--;
             }
+            g_mutex_unlock(&g_marker_mu);
             return;
         }
     }
@@ -720,6 +726,7 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
             insn_type_record(u->sym);
         }
     }
+    g_mutex_unlock(&g_marker_mu);
 }
 
 static void vcpu_insn_exec_insn_types(unsigned int cpu_index, void* udata)
@@ -729,17 +736,19 @@ static void vcpu_insn_exec_insn_types(unsigned int cpu_index, void* udata)
     }
     struct insn_ud* ud = (struct insn_ud*)udata;
     uint32_t enc = ud->enc;
+    g_mutex_lock(&g_marker_mu);
     for (size_t i = 0; i < g_marker_pair_count; i++) {
         if (enc == g_marker_pairs[i].start_enc) {
-            int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
-            if (idx >= 0) {
-                uint32_t d = g_active_marker_depth[cpu_index];
-                if (d < MAX_MARKER_STACK) {
+            uint32_t d = g_active_marker_depth[cpu_index];
+            if (d < MAX_MARKER_STACK) {
+                int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
+                if (idx >= 0) {
                     g_active_marker_session_stack[cpu_index][d] = idx;
                     g_active_marker_phase_stack[cpu_index][d] = g_marker_pairs[i].phase_id;
                     g_active_marker_depth[cpu_index] = d + 1;
                 }
             }
+            g_mutex_unlock(&g_marker_mu);
             return;
         }
     }
@@ -754,6 +763,7 @@ static void vcpu_insn_exec_insn_types(unsigned int cpu_index, void* udata)
                 }
                 d--;
             }
+            g_mutex_unlock(&g_marker_mu);
             return;
         }
     }
@@ -762,6 +772,7 @@ static void vcpu_insn_exec_insn_types(unsigned int cpu_index, void* udata)
         g_between_markers_insns++;
         insn_type_record(ud->sym);
     }
+    g_mutex_unlock(&g_marker_mu);
 }
 
 static void vcpu_mem_cb_insn_types(unsigned int cpu_index,
@@ -773,11 +784,14 @@ static void vcpu_mem_cb_insn_types(unsigned int cpu_index,
     if (cpu_index >= MAX_VCPU) {
         return;
     }
+    g_mutex_lock(&g_marker_mu);
     if (g_active_marker_depth[cpu_index] == 0) {
+        g_mutex_unlock(&g_marker_mu);
         return;
     }
     bool is_store = qemu_plugin_mem_is_store(info);
     mem_addr_record(vaddr, is_store);
+    g_mutex_unlock(&g_marker_mu);
 }
 
 static void vcpu_insn_exec_hier(unsigned int cpu_index, void* udata)
@@ -1091,7 +1105,7 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
             if (g_outfile && g_outfile[0]) {
                 FILE* f = fopen(g_outfile, "w");
                 if (f) {
-                    fprintf(f, "# pto2_submit_mixed_task 指令类型统计 (marker: 0x%08x→0x%08x, 累计所有会话)\n",
+                    fprintf(f, "# marker-window 指令类型统计 (0x%08x→0x%08x, 累计所有会话)\n",
                             g_marker_start_enc, g_marker_end_enc);
                     fprintf(f, "# mnemonic                count\n");
                     for (size_t i = 0; i < g_insn_type_stats_count; i++) {
@@ -1251,7 +1265,7 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
         if (g_outfile && g_outfile[0]) {
             FILE* f = fopen(g_outfile, "w");
             if (f) {
-                fprintf(f, "# pto2_submit_mixed_task 指令类型统计 (marker: 0x%08x→0x%08x, 累计所有会话)\n",
+                fprintf(f, "# marker-window 指令类型统计 (0x%08x→0x%08x, 累计所有会话)\n",
                         g_marker_start_enc, g_marker_end_enc);
                 fprintf(f, "# mnemonic                count\n");
                 for (size_t i = 0; i < g_insn_type_stats_count; i++) {
@@ -1469,8 +1483,15 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             qemu_plugin_outs("insn_count: insn_types=1 is only supported for aarch64 user-mode guests\n");
             return -1;
         }
-        g_marker_pairs = g_marker_pairs_phases;
-        g_marker_pair_count = sizeof(g_marker_pairs_phases) / sizeof(g_marker_pairs_phases[0]);
+        if (g_marker_phases_mode) {
+            g_marker_pairs = g_marker_pairs_phases;
+            g_marker_pair_count = sizeof(g_marker_pairs_phases) / sizeof(g_marker_pairs_phases[0]);
+        } else {
+            g_marker_pairs_default[0].start_enc = g_marker_start_enc;
+            g_marker_pairs_default[0].end_enc = g_marker_end_enc;
+            g_marker_pairs = g_marker_pairs_default;
+            g_marker_pair_count = 1;
+        }
         for (int c = 0; c < MAX_VCPU; c++) {
             g_active_marker_depth[c] = 0;
             for (int k = 0; k < MAX_MARKER_STACK; k++) {
@@ -1478,6 +1499,10 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
                 g_active_marker_phase_stack[c][k] = 0;
             }
         }
+    }
+    if ((g_marker_mode || g_insn_types_mode) && !g_marker_mu_inited) {
+        g_mutex_init(&g_marker_mu);
+        g_marker_mu_inited = 1;
     }
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
     qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);

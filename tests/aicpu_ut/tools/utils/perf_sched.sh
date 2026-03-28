@@ -91,11 +91,15 @@ if $DO_BUILD; then
     echo "============================================================"
     echo "  Building all binaries"
     echo "============================================================"
+    PROFILING_MODE=0
+    if $PROFILING; then
+        PROFILING_MODE=2
+    fi
     bash "${AICPU_UT_DIR}/run_tests.sh" \
         --build-only \
         --sched-threads "$SCHED_THREADS" \
-        $($PROFILING || echo "--no-profiling") \
-        2>&1 | grep -v "^$" || true
+        --profiling "$PROFILING_MODE" \
+        2>&1 | awk 'NF'
 fi
 
 if [[ ! -x "$BIN" ]]; then

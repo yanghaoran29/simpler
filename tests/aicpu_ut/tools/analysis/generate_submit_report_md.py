@@ -127,6 +127,12 @@ def main():
     ap.add_argument("--others-trace", required=True)
     ap.add_argument("--insn-types", required=True)
     ap.add_argument("--build-graph-insns", type=int, default=-1)
+    ap.add_argument(
+        "--test-name",
+        default="test_batch_paged_attention",
+        help="Report title (default: test_batch_paged_attention)",
+    )
+    ap.add_argument("--report-idx", default="0", help="Index shown in report title")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
@@ -171,7 +177,7 @@ def main():
         groups[key].append(r)
     out = Path(args.output)
     with out.open("w", encoding="utf-8") as f:
-        f.write("# test_batch_paged_attention idx=0 提交任务分阶段指令报告\n\n")
+        f.write(f"# {args.test_name} idx={args.report_idx} 提交任务分阶段指令报告\n\n")
         if args.build_graph_insns >= 0 and n > 0:
             other_insns = args.build_graph_insns - total
             avg_task_insns = args.build_graph_insns / n

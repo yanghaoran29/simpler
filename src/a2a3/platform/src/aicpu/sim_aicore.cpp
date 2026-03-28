@@ -3,6 +3,8 @@
 #include <array>
 #include <atomic>
 
+#include "common/platform_config.h"
+
 namespace {
 constexpr int kMaxSimCores = 4096;
 std::array<std::atomic<uint64_t>, kMaxSimCores> g_cond_regs{};
@@ -17,7 +19,7 @@ inline bool core_valid(int32_t core_id) {
 
 extern "C" uint64_t pto2_sim_read_cond_reg(int32_t core_id) {
     if (!core_valid(core_id)) {
-        return 0;
+        return static_cast<uint64_t>(AICORE_IDLE_VALUE);
     }
     return g_cond_regs[core_id].load(std::memory_order_acquire);
 }
@@ -26,15 +28,15 @@ extern "C" void pto2_sim_aicore_on_task_received(int32_t core_id, int32_t task_i
     if (!core_valid(core_id)) {
         return;
     }
-    // Non-zero means "has recent task activity"; keep semantics lightweight.
-    g_cond_regs[core_id].store(static_cast<uint64_t>(task_id + 1), std::memory_order_release);
+    // Match hardware FIN encoding so EXTRACT_TASK_STATE sees completed (see simpler-03201 sim_aicore.cpp).
+    g_cond_regs[core_id].store(MAKE_FIN_VALUE(task_id), std::memory_order_release);
 }
 
 extern "C" void pto2_sim_aicore_set_idle(int32_t core_id) {
     if (!core_valid(core_id)) {
         return;
     }
-    g_cond_regs[core_id].store(0, std::memory_order_release);
+    g_cond_regs[core_id].store(static_cast<uint64_t>(AICORE_IDLE_VALUE), std::memory_order_release);
 }
 
 extern "C" void pto2_sim_set_current_core(int32_t core_id, bool is_sim) {

@@ -15,3 +15,17 @@ extern "C" void pto2_sim_aicore_set_idle(int32_t core_id);
 extern "C" void pto2_sim_set_current_core(int32_t core_id, bool is_sim);
 extern "C" void pto2_sim_clear_current_core();
 
+#if defined(PTO2_SIM_AICORE_UT)
+#ifdef __cplusplus
+extern "C" {
+struct Runtime;
+struct PTO2Runtime;
+void aicpu_sim_set_rt(struct PTO2Runtime* r);
+int aicpu_executor_sim_init(struct Runtime* r);
+void aicpu_executor_sim_setup_after_host_orch(int32_t total_task_count);
+int aicpu_executor_sim_run_resolve_and_dispatch_pto2(struct Runtime* r, int thread_idx);
+int aicpu_executor_sim_shutdown_aicore(struct Runtime* r);
+}
+#endif
+#endif
+

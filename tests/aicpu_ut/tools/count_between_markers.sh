@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RUN_TESTS_SH="${UT_DIR}/run_tests.sh"
 PLUGIN_SO="${UT_DIR}/plugins/libinsn_count.so"
-QEMU_BIN="${QEMU_BIN:-/data/y00955915/.local/bin/qemu-aarch64}"
+# Default: qemu-aarch64 from plugins/Makefile QEMU_BUILD_DIR (must match libinsn_count.so; ~/.local/bin often differs and causes SIGTRAP/double-free).
+QEMU_BIN="${QEMU_BIN:-"$("${UT_DIR}/tools/resolve_plugin_qemu.sh" "${UT_DIR}")"}"
 LOG_DIR="${UT_DIR}/outputs/log"
 
 TEST_NAME="${TEST_NAME:-test_batch_paged_attention}"
@@ -107,7 +108,7 @@ case "${TEST_NAME}" in
             sched) BIN="${BIN_DIR}/test_bgemm_sched_prof_only_${TEST_IDX}" ;;
         esac
         ;;
-    test_pau)
+    test_pau|test_paged_attention_unroll)
         case "${THREAD_MODE}" in
             concurrent) BIN="${BIN_DIR}/test_pau_concurrent_${TEST_IDX}" ;;
             orch) BIN="${BIN_DIR}/test_pau_orch_only_${TEST_IDX}" ;;
@@ -152,15 +153,70 @@ RUNLOG="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_submit_args_${TS}.log"
 
 # Pass#0: build_graph only — orr x17/x18 (concurrent driver); other thread modes have no such markers.
 if [[ "${THREAD_MODE}" == "concurrent" ]]; then
-    echo "[marker-count] run pass#0 (build_graph insn_count, markers x17/x17): ${BIN}"
-    "${QEMU_BIN}" -plugin "file=${PLUGIN_SO},outfile=${BG_OUT},markers=1,marker_start=${MARKER_BUILD_GRAPH_START},marker_end=${MARKER_BUILD_GRAPH_END}" "${BIN}" >/dev/null 2>&1 || true
+    echo "[marker-count] run pass#0 (build_graph insn_count, markers x17/x18): ${BIN}"
+    if [[ "$(uname -m 2>/dev/null)" == "aarch64" ]]; then
+        echo "[marker-count] note: host is aarch64; qemu-aarch64+TCG plugin sometimes hits SIGTRAP (Trace/breakpoint trap)." >&2
+        echo "[marker-count]       if pass#0 fails, try another QEMU build (QEMU_BIN=...) or run this script on x86_64 with user-mode aarch64." >&2
+    fi
+    set +e
+    _qemu_log="$(mktemp)"
+    "${QEMU_BIN}" -plugin "file=${PLUGIN_SO},outfile=${BG_OUT},markers=1,marker_start=${MARKER_BUILD_GRAPH_START},marker_end=${MARKER_BUILD_GRAPH_END}" "${BIN}" >"${_qemu_log}" 2>&1
+    _pass0_rc=$?
+    set -e
+    if [[ ${_pass0_rc} -ne 0 ]] || [[ ! -s "${BG_OUT}" ]]; then
+        _p0_sig=""
+        if [[ ${_pass0_rc} -gt 128 && ${_pass0_rc} -lt 256 ]]; then
+            _s=$((_pass0_rc - 128))
+            _p0_sig=" (128+${_s}"
+            [[ ${_s} -eq 5 ]] && _p0_sig+=", SIGTRAP"
+            _p0_sig+=")"
+        fi
+        echo "[marker-count] WARN: pass#0 QEMU rc=${_pass0_rc}${_p0_sig}; plugin outfile missing or empty. build_graph insn skipped." >&2
+        echo "[marker-count]       if log shows 'double free or corruption', rebuild plugins with QEMU_BUILD_DIR matching QEMU_BIN (see ${UT_DIR}/plugins/Makefile)." >&2
+        if [[ -s "${_qemu_log}" ]]; then
+            echo "[marker-count] --- QEMU log tail ---" >&2
+            tail -n 20 "${_qemu_log}" | sed 's/^/[qemu] /' >&2 || true
+        fi
+        if [[ ! -f "${BG_OUT}" ]] || [[ ! -s "${BG_OUT}" ]]; then
+            {
+                echo "# pass#0 failed: QEMU exited ${_pass0_rc}${_p0_sig}"
+                echo "# common: SIGTRAP / heap corruption when plugin and QEMU_BIN are from different QEMU builds."
+                echo "# raw tail from QEMU run:"
+                tail -n 30 "${_qemu_log}" 2>/dev/null || true
+            } >"${BG_OUT}"
+        fi
+    fi
+    rm -f "${_qemu_log}"
 else
     echo "[marker-count] skip pass#0 build_graph (markers exist only in concurrent test_orchestrator_scheduler.cpp)"
     echo "# (skipped: use --thread-mode concurrent for build_graph insn markers)" >"${BG_OUT}"
 fi
 
 echo "[marker-count] run pass#1 (pto2_submit_mixed_task phase insn_count): ${BIN}"
-"${QEMU_BIN}" -plugin "file=${PLUGIN_SO},outfile=${PHASE_OUT},markers=1,marker_phases=1,marker_start=${MARKER_START},marker_end=${MARKER_END}" "${BIN}" >/dev/null 2>&1 || true
+set +e
+_qemu_log1="$(mktemp)"
+"${QEMU_BIN}" -plugin "file=${PLUGIN_SO},outfile=${PHASE_OUT},markers=1,marker_phases=1,marker_start=${MARKER_START},marker_end=${MARKER_END}" "${BIN}" >"${_qemu_log1}" 2>&1
+_pass1_rc=$?
+set -e
+if [[ ${_pass1_rc} -ne 0 ]] || [[ ! -s "${PHASE_OUT}" ]]; then
+    _p1_sig=""
+    if [[ ${_pass1_rc} -gt 128 && ${_pass1_rc} -lt 256 ]]; then
+        _s=$((_pass1_rc - 128))
+        _p1_sig=" (128+${_s}"
+        [[ ${_s} -eq 5 ]] && _p1_sig+=", SIGTRAP"
+        _p1_sig+=")"
+    fi
+    echo "[marker-count] WARN: pass#1 QEMU rc=${_pass1_rc}${_p1_sig}; phase outfile missing or empty." >&2
+    if [[ -s "${_qemu_log1}" ]]; then
+        echo "[marker-count] --- QEMU log tail ---" >&2
+        tail -n 20 "${_qemu_log1}" | sed 's/^/[qemu] /' >&2 || true
+    fi
+    if [[ ! -f "${PHASE_OUT}" ]] || [[ ! -s "${PHASE_OUT}" ]]; then
+        echo "# pass#1 failed: QEMU exited ${_pass1_rc}" >"${PHASE_OUT}"
+        tail -n 30 "${_qemu_log1}" >>"${PHASE_OUT}" 2>/dev/null || true
+    fi
+fi
+rm -f "${_qemu_log1}"
 
 # Pass#2: rebuild without build_graph markers but with submit-args trace; run once without plugin.
 echo "[marker-count] run pass#2 (submit args trace): rebuild PTO2_TRACE_SUBMIT_ARGS_ENABLE=1, PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE=0"
@@ -316,10 +372,18 @@ fi
 
 {
     echo "# === build_graph (orr x17 start / orr x18 end; needs -DPTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE=ON at build) ==="
-    cat "${BG_OUT}"
+    if [[ -f "${BG_OUT}" ]]; then
+        cat "${BG_OUT}"
+    else
+        echo "# (missing ${BG_OUT}: pass#0 did not produce outfile)"
+    fi
     echo ""
     echo "# === pto2_submit_mixed_task / phase markers ==="
-    cat "${PHASE_OUT}"
+    if [[ -f "${PHASE_OUT}" ]]; then
+        cat "${PHASE_OUT}"
+    else
+        echo "# (missing ${PHASE_OUT})"
+    fi
 } > "${OUTFILE}"
 
 echo "[marker-count] result file: ${OUTFILE}"

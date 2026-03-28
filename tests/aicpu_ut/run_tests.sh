@@ -32,7 +32,12 @@
 #   ./run_tests.sh --count-submit-task-instructions --test test_batch_paged_attention --idx 0
 #     # 先统计 build_graph（需 CMake -DPTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE=ON），再统计 pto2_submit_mixed_task 各段
 #     # （tools/count_between_markers.sh；脚本内会打开该选项并构建）
+#   ./run_tests.sh --count-scheduler-submit-task-instructions --test test_batch_paged_attention --idx 0 [--sched]
+#     # aicpu_executor::resolve_and_dispatch_pto2 内 orr x23/x24 每迭代统计（QEMU 插件；见 tools/count_scheduler_loop_markers.sh）
+#     # 随后跑 scheduler 窗口内 insn_types，并生成 outputs/log/<test>_<idx>_scheduler_submit_report_<ts>.md
+#     # 注意：test_concurrent_* 等为 PTO2_MODE_SIMULATE，调度由 sim_drain_one_pass 在主线程完成，不会进入上述函数，故 QEMU 下可能 0 session
 #   ./run_tests.sh --list                          # list all available tests
+#   ./run_tests.sh --self-check                    # internal self-check: validate sub-scripts and key options
 #
 # Available tests:
 #   test_cpu_affinity               (functional)
@@ -41,7 +46,7 @@
 #   test_batch_paged_attention      (perf, indices: 0 1 2; --orch: orch-only, --sched: sched profiling only)
 #   test_alt                        (perf, alternating matmul+add, indices: 0 1; --orch: orch-only, --sched: sched profiling only)
 #   test_bgemm                      (perf, batched GEMM, indices: 0 1 2 3 4; --orch: orch-only, --sched: sched profiling only)
-#   test_pau                        (perf, paged attention unroll, indices: 0 1 2; --orch: orch-only, --sched: sched profiling only)
+#   test_pau | test_paged_attention_unroll  (同义：perf, paged attention unroll, indices: 0 1 2; --orch / --sched)
 #   test_throughput                 (perf, 分层 DAG 吞吐, indices: 0 1 2; idx=0 all-AIV, idx=1 odd-AIC/even-AIV, idx=2 half-AIC/half-AIV per layer; --layer-num n --layer0-task-num W --dependency D --overlap O, 默认 n=10 layer0=320 D=6 O=5; --orch/--sched)
 #   test_latency                    (perf, 极限延迟; indices: 0 1; idx=0 all-AIV, idx=1 aic/aiv alternate; 默认 chains=64 len=64; --chain-num/--chain-length/--latency-nelems 在编译期写入二进制; --orch/--sched)
 #
@@ -75,10 +80,11 @@ TEST_TYPE["test_batch_paged_attention"]="perf"   ; TEST_INDICES["test_batch_page
 TEST_TYPE["test_alt"]="perf"                     ; TEST_INDICES["test_alt"]="0 1"
 TEST_TYPE["test_bgemm"]="perf"                   ; TEST_INDICES["test_bgemm"]="0 1 2 3 4"
 TEST_TYPE["test_pau"]="perf"                     ; TEST_INDICES["test_pau"]="0 1 2"
+TEST_TYPE["test_paged_attention_unroll"]="perf" ; TEST_INDICES["test_paged_attention_unroll"]="0 1 2"
 TEST_TYPE["test_throughput"]="perf"              ; TEST_INDICES["test_throughput"]="0 1 2"
 TEST_TYPE["test_latency"]="perf"                ; TEST_INDICES["test_latency"]="0 1"
 
-ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention test_alt test_bgemm test_pau test_throughput test_latency)
+ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention test_alt test_bgemm test_pau test_paged_attention_unroll test_throughput test_latency)
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 TIMEOUT=${TIMEOUT:-600}
@@ -132,6 +138,73 @@ AICPU_UT_NO_EARLY_RETURN=""     # set by --no-early-return: drain before break/r
 AICPU_UT_NO_CHECK=""            # set by --no-check: skip P1/P2 invariant checks in test binaries
 GEN_SWIMLANE=false              # set by --swimlane: convert perf_swimlane_*.json after run
 COUNT_SUBMIT_TASK_INSNS=0       # set by --count-submit-task-instructions
+COUNT_SCHEDULER_LOOP_INSNS=0    # set by --count-scheduler-submit-task-instructions
+SELF_CHECK=false                # set by --self-check
+
+run_self_check() {
+    echo ""
+    echo "============================================================"
+    echo "  Running internal self-check"
+    echo "============================================================"
+
+    local required_files=(
+        "${SCRIPT_DIR}/tools/profiling/post_run_analysis.sh"
+        "${SCRIPT_DIR}/tools/profiling/sched_overhead_analysis.py"
+        "${SCRIPT_DIR}/tools/profiling/swimlane_converter.py"
+        "${SCRIPT_DIR}/tools/profiling/perf_to_mermaid.py"
+        "${SCRIPT_DIR}/tools/format_profiling_output.py"
+    )
+    local missing=0
+    for f in "${required_files[@]}"; do
+        if [ ! -f "$f" ]; then
+            echo "  [FAIL] missing required file: $f" >&2
+            missing=1
+        else
+            echo "  [OK]   found: $f"
+        fi
+    done
+    if [ "$missing" -ne 0 ]; then
+        echo "  SELF-CHECK FAILED (missing required files)" >&2
+        return 1
+    fi
+
+    local self="$0"
+    local -a checks=(
+        "--list"
+        "--build-only --profiling 0 --test test_batch_paged_attention --idx 0"
+        "--build-only --profiling 1 --test test_latency --idx 0 --chain-num 4 --chain-length 8"
+        "--build-only --profiling 2 --test test_throughput --idx 0 --layer-num 2 --layer0-task-num 8 --dependency 2 --overlap 1"
+        "--build-only --profiling 0 --test test_batch_paged_attention --idx 0 --orch"
+        "--build-only --profiling 0 --test test_batch_paged_attention --idx 0 --sched"
+    )
+
+    local i=0
+    local total="${#checks[@]}"
+    for cmd in "${checks[@]}"; do
+        i=$((i + 1))
+        echo ""
+        echo "  [${i}/${total}] check: ${cmd}"
+        local tmp_log
+        tmp_log="$(mktemp)"
+        set +e
+        bash "$self" ${cmd} 2>&1 | tee "$tmp_log"
+        local rc=$?
+        set -e
+        if [ $rc -eq 0 ] && ! rg -i "error:|\\[FAIL\\]|SELF-CHECK FAILED|gmake: \\*\\*\\*|cmake error|unknown argument|FAILED \\(exit" "$tmp_log" >/dev/null; then
+            echo "  [PASS] ${cmd}"
+            rm -f "$tmp_log"
+        else
+            echo "  [FAIL] ${cmd}" >&2
+            echo "  SELF-CHECK FAILED" >&2
+            rm -f "$tmp_log"
+            return 1
+        fi
+    done
+
+    echo ""
+    echo "  SELF-CHECK PASSED"
+    return 0
+}
 
 # ─── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -213,6 +286,10 @@ while [[ $# -gt 0 ]]; do
             GEN_SWIMLANE=true; shift ;;
         --count-submit-task-instructions)
             COUNT_SUBMIT_TASK_INSNS=1; shift ;;
+        --count-scheduler-submit-task-instructions)
+            COUNT_SCHEDULER_LOOP_INSNS=1; shift ;;
+        --self-check)
+            SELF_CHECK=true; shift ;;
         --list)
             echo "Available tests (use --orch or --sched to select thread mode for perf tests):"
             for name in "${ALL_TESTS[@]}"; do
@@ -234,6 +311,85 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if $SELF_CHECK; then
+    PROJECT_ROOT="${SCRIPT_DIR}/../.."
+    run_self_check
+    exit $?
+fi
+
+if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ] && [ "${COUNT_SCHEDULER_LOOP_INSNS:-0}" = 1 ]; then
+    echo "[run_tests] 不能同时使用 --count-submit-task-instructions 与 --count-scheduler-submit-task-instructions，请分开运行。" >&2
+    exit 1
+fi
+
+if [ "${COUNT_SCHEDULER_LOOP_INSNS:-0}" = 1 ]; then
+    sched_tool="${SCRIPT_DIR}/tools/count_scheduler_loop_markers.sh"
+    plugin_so="${SCRIPT_DIR}/plugins/libinsn_count.so"
+    plugin_dir="${SCRIPT_DIR}/plugins"
+    plugin_src="${plugin_dir}/insn_count.c"
+    if [ ! -x "$sched_tool" ]; then
+        echo "[run_tests] missing executable tool: $sched_tool" >&2
+        echo "[run_tests] run: chmod +x ${SCRIPT_DIR}/tools/count_scheduler_loop_markers.sh" >&2
+        exit 1
+    fi
+    if [ ! -f "$plugin_so" ] || [ -f "$plugin_src" ] && [ "$plugin_src" -nt "$plugin_so" ]; then
+        if [ ! -d "$plugin_dir" ]; then
+            echo "[run_tests] missing plugin directory: $plugin_dir" >&2
+            exit 1
+        fi
+        echo "[run_tests] plugin missing/stale, auto-building: $plugin_so"
+        if [ -n "${QEMU_BUILD_DIR:-}" ]; then
+            make -C "$plugin_dir" QEMU_BUILD_DIR="$QEMU_BUILD_DIR"
+        else
+            make -C "$plugin_dir"
+        fi
+        if [ ! -f "$plugin_so" ]; then
+            echo "[run_tests] plugin build failed: $plugin_so not found" >&2
+            exit 1
+        fi
+    fi
+    mode_arg="concurrent"
+    case "${THREAD_MODE}" in
+        orch) mode_arg="orch" ;;
+        sched) mode_arg="sched" ;;
+        *) mode_arg="concurrent" ;;
+    esac
+    test_arg="${FILTER_TEST:-test_batch_paged_attention}"
+    idx_arg="${FILTER_IDX:-0}"
+    "$sched_tool" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        exit $rc
+    fi
+
+    # Same spirit as --count-submit-task-instructions: insn_types inside marker window + markdown report.
+    sched_insn_script="${SCRIPT_DIR}/tools/analysis/count_scheduler_insn_types.sh"
+    if [ -x "$sched_insn_script" ]; then
+        "$sched_insn_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg" || true
+    fi
+
+    log_dir="${SCRIPT_DIR}/outputs/log"
+    latest_sum="$(ls -t "${log_dir}/${test_arg}_${idx_arg}_scheduler_loop_summary_"*.txt 2>/dev/null | head -1 || true)"
+    latest_sched_insn="$(ls -t "${log_dir}/${test_arg}_${idx_arg}_scheduler_insn_types_"*.txt 2>/dev/null | head -1 || true)"
+    sched_report_py="${SCRIPT_DIR}/tools/analysis/generate_scheduler_submit_report_md.py"
+    if [ -n "$latest_sum" ] && [ -f "$latest_sum" ] && [ -f "$sched_report_py" ]; then
+        ts="$(basename "$latest_sum" | sed -E 's/.*_scheduler_loop_summary_([0-9]{8}_[0-9]{6})\.txt/\1/')"
+        md_out="${log_dir}/${test_arg}_${idx_arg}_scheduler_submit_report_${ts}.md"
+        insn_arg=()
+        if [ -n "$latest_sched_insn" ] && [ -f "$latest_sched_insn" ]; then
+            insn_arg=(--insn-types "$latest_sched_insn")
+        fi
+        if python3 "$sched_report_py" --scheduler-summary "$latest_sum" "${insn_arg[@]}" --output "$md_out"; then
+            echo "[run_tests] scheduler markdown report: $md_out"
+        else
+            echo "[run_tests] warn: scheduler markdown generation failed" >&2
+        fi
+    else
+        echo "[run_tests] skip scheduler markdown: need scheduler_loop_summary + generate_scheduler_submit_report_md.py" >&2
+    fi
+    exit 0
+fi
 
 if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ]; then
     tool_script="${SCRIPT_DIR}/tools/count_between_markers.sh"
@@ -371,6 +527,8 @@ PY
             --others-trace "$trace_others" \
             --insn-types "$latest_insn" \
             --build-graph-insns "$build_graph_insns" \
+            --test-name "$test_arg" \
+            --report-idx "$idx_arg" \
             --output "$md_out"; then
             echo "[run_tests] warn: full markdown generation failed, fallback to simplified report"
             {
@@ -565,7 +723,7 @@ get_binary_path() {
                 sched) echo "${BIN_DIR}/test_bgemm_sched_prof_only_${idx}" ;;
                 *)     echo "${BIN_DIR}/test_bgemm_concurrent_${idx}" ;;
             esac ;;
-        test_pau)
+        test_pau|test_paged_attention_unroll)
             case "$THREAD_MODE" in
                 orch)  echo "${BIN_DIR}/test_pau_orch_only_${idx}" ;;
                 sched) echo "${BIN_DIR}/test_pau_sched_prof_only_${idx}" ;;
@@ -617,14 +775,14 @@ run_idx_analysis() {
     [ -z "${AICPU_UT_QUIET:-}" ] || return 0
     [ -n "${AICPU_UT_PHASE_LOG:-}" ] || return 0
     [ -s "$AICPU_UT_PHASE_LOG" ] || return 0
-    local sched_script="${PROJECT_ROOT}/tools/sched_overhead_analysis.py"
+    local sched_script="${SCRIPT_DIR}/tools/profiling/sched_overhead_analysis.py"
     [ -f "$sched_script" ] || return 0
     # profiling 1: timing lines were suppressed by format_profiling_output.py pipe; re-emit them here.
     # profiling 2: dev_log_always already outputs to stdout directly; no need to re-emit.
     if [ "$PROFILING_MODE" = "1" ]; then
         grep -E "aicpu_orchestration_entry returned|Scheduler summary:" "$AICPU_UT_PHASE_LOG" 2>/dev/null || true
     fi
-    (cd "$PROJECT_ROOT" && python3 tools/sched_overhead_analysis.py --sim-log "$AICPU_UT_PHASE_LOG" --no-sources 2>/dev/null) | awk 'NF{while(n--)print ""; n=0; print; next} {n++}' || true
+    python3 "$sched_script" --sim-log "$AICPU_UT_PHASE_LOG" --no-sources 2>/dev/null | awk 'NF{while(n--)print ""; n=0; print; next} {n++}' || true
     # (phase log kept per-test, not cleared)
     SKIP_FINAL_ANALYSIS=true
 }
@@ -689,6 +847,7 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
     -DPTO2_TENSORMAP_PROFILING="$PTO2_TENSORMAP_PROFILING" \
     -DPTO2_TRACE_SUBMIT_ARGS_ENABLE="${PTO2_TRACE_SUBMIT_ARGS_ENABLE:-0}" \
     -DPTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE="${PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE:-0}" \
+    -DPTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE="${PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE:-0}" \
     -DAICPU_UT_LATENCY_NUM_CHAINS="${AICPU_UT_LATENCY_NUM_CHAINS:-}" \
     -DAICPU_UT_LATENCY_CHAIN_LENGTH="${AICPU_UT_LATENCY_CHAIN_LENGTH:-}" \
     $( [ -n "${AICPU_UT_THROUGHPUT_LAYERS:-}" ]       && echo "-DAICPU_UT_THROUGHPUT_LAYERS=$AICPU_UT_THROUGHPUT_LAYERS" ) \
@@ -702,7 +861,7 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
 BIN_DIR="${BUILD_DIR}/bin"
 
 # Batch tests that default to idx 0 only unless --all
-BATCH_IDX0_ONLY_TESTS=(test_batch_paged_attention test_alt test_bgemm test_pau test_latency)
+BATCH_IDX0_ONLY_TESTS=(test_batch_paged_attention test_alt test_bgemm test_pau test_paged_attention_unroll test_latency)
 
 NPROC=$(nproc 2>/dev/null || echo 4)
 
@@ -813,59 +972,21 @@ else
     fi
 fi
 
-# ─── Scheduler overhead analysis ─────────────────────────────────────────────
-# 若传入 --sim-log，Part 2 使用本次 aicpu_ut(sim) 的终端输出，可得到各 Phase 数据。
-# 否则用 device log（需之前设备跑数）；无 perf_swimlane 时仅输出 Part 2（sim log）。
-# 不向控制台打印 Phase breakdown log 路径及 Scheduler overhead analysis 标题。
-# 若 run_idx_analysis 已逐 idx 运行分析，跳过此处汇总（避免多次 run 数据被覆盖）。
-if $RUN_PERF && [ -z "${AICPU_UT_QUIET:-}" ] && ! $SKIP_FINAL_ANALYSIS; then
-    SCHED_SCRIPT="${PROJECT_ROOT}/tools/sched_overhead_analysis.py"
-    if [ -f "$SCHED_SCRIPT" ]; then
-        # Use phase breakdown log for Part 2 when DEV_ALWAYS was redirected there (no Phase Breakdown in SIM_LOG)
-        SIM_LOG_ARGS=()
-        if [ -n "${AICPU_UT_PHASE_LOG:-}" ] && [ -s "$AICPU_UT_PHASE_LOG" ]; then
-            SIM_LOG_ARGS=("--sim-log" "$AICPU_UT_PHASE_LOG" "--no-sources")
-            if [ "$PROFILING_MODE" = "1" ]; then
-                grep -E "aicpu_orchestration_entry returned|Scheduler summary:" "$AICPU_UT_PHASE_LOG" 2>/dev/null || true
-            fi
-        elif [ -n "${SIM_LOG:-}" ] && [ -s "$SIM_LOG" ]; then
-            SIM_LOG_ARGS=("--sim-log" "$SIM_LOG" "--no-sources")
-            if [ "$PROFILING_MODE" = "1" ]; then
-                grep -E "aicpu_orchestration_entry returned|Scheduler summary:" "$SIM_LOG" 2>/dev/null || true
-            fi
-        fi
-        if (cd "$PROJECT_ROOT" && python3 tools/sched_overhead_analysis.py "${SIM_LOG_ARGS[@]}" ${AICPU_UT_DEVICE_ID:+-d "$AICPU_UT_DEVICE_ID"} 2>/dev/null); then
-            :
-        else
-            quiet_echo "  (Skip: no perf_swimlane_*.json in outputs/ and no --sim-log; or device log resolve failed.)"
-        fi
-    fi
-fi
-
-# ─── Swimlane diagram generation ─────────────────────────────────────────────
-# Convert perf_swimlane_*.json written by export_sim_swimlane() to Perfetto
-# Chrome Trace JSON (swimlane_converter.py) and Mermaid flowchart (perf_to_mermaid.py).
-# Only runs when profiling is enabled (AICPU_UT_SWIMLANE_DIR is set).
-if $RUN_PERF && [ -z "${AICPU_UT_QUIET:-}" ] && $GEN_SWIMLANE && [ -n "${AICPU_UT_SWIMLANE_DIR:-}" ]; then
-    SWIMLANE_SCRIPT="${PROJECT_ROOT}/tools/swimlane_converter.py"
-    MERMAID_SCRIPT="${PROJECT_ROOT}/tools/perf_to_mermaid.py"
-    # Find the latest swimlane JSON produced by this run.
-    LATEST_SWIMLANE=$(ls -t "${AICPU_UT_SWIMLANE_DIR}"/perf_swimlane_*.json 2>/dev/null | head -1)
-    if [ -n "$LATEST_SWIMLANE" ]; then
-        quiet_echo ""
-        quiet_echo "============================================================"
-        quiet_echo "  Generating swimlane diagrams"
-        quiet_echo "============================================================"
-        quiet_echo "  Source: $LATEST_SWIMLANE"
-        if [ -f "$SWIMLANE_SCRIPT" ]; then
-            (cd "$PROJECT_ROOT" && python3 tools/swimlane_converter.py "$LATEST_SWIMLANE" 2>/dev/null) || \
-                quiet_echo "  (swimlane_converter.py failed or no output)"
-        fi
-        if [ -f "$MERMAID_SCRIPT" ]; then
-            (cd "$PROJECT_ROOT" && python3 tools/perf_to_mermaid.py "$LATEST_SWIMLANE" 2>/dev/null) || \
-                quiet_echo "  (perf_to_mermaid.py failed or no output)"
-        fi
-    fi
+# ─── Post-run analysis (extracted helper) ───────────────────────────────────
+POST_ANALYSIS_SCRIPT="${SCRIPT_DIR}/tools/profiling/post_run_analysis.sh"
+if [ -f "$POST_ANALYSIS_SCRIPT" ]; then
+    RUN_PERF="$RUN_PERF" \
+    SKIP_FINAL_ANALYSIS="$SKIP_FINAL_ANALYSIS" \
+    GEN_SWIMLANE="$GEN_SWIMLANE" \
+    PROFILING_MODE="$PROFILING_MODE" \
+    PROJECT_ROOT="$PROJECT_ROOT" \
+    AICPU_UT_SCRIPT_DIR="$SCRIPT_DIR" \
+    AICPU_UT_QUIET="${AICPU_UT_QUIET:-}" \
+    AICPU_UT_PHASE_LOG="${AICPU_UT_PHASE_LOG:-}" \
+    AICPU_UT_SWIMLANE_DIR="${AICPU_UT_SWIMLANE_DIR:-}" \
+    SIM_LOG="${SIM_LOG:-}" \
+    AICPU_UT_DEVICE_ID="${AICPU_UT_DEVICE_ID:-}" \
+    bash "$POST_ANALYSIS_SCRIPT"
 fi
 
 # ─── Summary ──────────────────────────────────────────────────────────────────

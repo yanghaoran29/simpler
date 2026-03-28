@@ -2,10 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+UT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_TESTS_SH="${UT_DIR}/run_tests.sh"
 PLUGIN_SO="${UT_DIR}/plugins/libinsn_count.so"
-QEMU_BIN="${QEMU_BIN:-/data/y00955915/.local/bin/qemu-aarch64}"
+QEMU_BIN="${QEMU_BIN:-"$("${UT_DIR}/tools/resolve_plugin_qemu.sh" "${UT_DIR}")"}"
 LOG_DIR="${UT_DIR}/outputs/log"
 
 TEST_NAME="${TEST_NAME:-test_batch_paged_attention}"
@@ -85,6 +85,13 @@ case "${TEST_NAME}" in
             concurrent) BIN="${BIN_DIR}/test_concurrent_${TEST_IDX}" ;;
             orch) BIN="${BIN_DIR}/test_orch_only_${TEST_IDX}" ;;
             sched) BIN="${BIN_DIR}/test_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
+    test_pau|test_paged_attention_unroll)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_pau_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_pau_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_pau_sched_prof_only_${TEST_IDX}" ;;
         esac
         ;;
     *)
