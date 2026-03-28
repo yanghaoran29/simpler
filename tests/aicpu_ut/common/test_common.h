@@ -19,49 +19,55 @@ void pto2_rt_scope_end(PTO2Runtime* rt);
 
 // Runtime helpers used by perf test cases.
 #include "pto_types.h"
+#include "tensor_factory.h"
 
-inline Tensor make_tensor_external(void* addr, const uint32_t shapes[], uint32_t ndims, DataType dtype,
-    bool manual_dep = false, int32_t version = 0) {
-    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-    uint64_t total = 1;
-    for (uint32_t i = 0; i < ndims; i++) total *= shapes[i];
-    return Tensor(addr, total * get_element_size(dtype), shapes, shapes, zero_offsets, ndims, dtype, version,
-                  /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/true, manual_dep);
-}
-
-static inline Tensor make_tensor(const uint32_t* shapes, uint32_t ndims, DataType dtype) {
-    return make_tensor_external(nullptr, shapes, ndims, dtype);
-}
+#if defined(AICPU_UT_DISABLE_PRINTF) && AICPU_UT_DISABLE_PRINTF
+#define printf(...) ((int)0)
+#endif
 
 // Backward-compat wrapper: PTOParam → Arg with output-address write-back.
 struct PTOParam {
     Arg arg_;
     Tensor* output_ptrs_[PTO2_MAX_OUTPUTS];
-    int output_count_{0};
+    uint32_t output_count_{0};
 
     void add_input(const Tensor& t)  { arg_.add_input(t); }
     void add_inout(const Tensor& t)  { arg_.add_inout(t); }
     void add_scalar(uint64_t v)      { arg_.add_scalar(v); }
     void add_output(Tensor& t) {
-        arg_.add_output(TensorCreateInfo(t.raw_shapes, t.ndims, t.dtype, t.manual_dep));
+        // Use effective raw-shapes to avoid reading uninitialized raw_shapes when is_raw_eq_shapes=true.
+        arg_.add_output(TensorCreateInfo(t.get_raw_shapes(), t.ndims, t.dtype, t.manual_dep));
         output_ptrs_[output_count_++] = &t;
     }
     void _apply_outputs(const TaskOutputTensors& result) {
-        for (int i = 0; i < output_count_; i++) {
-            output_ptrs_[i]->buffer = result.get_ref(i).buffer;
+        if (output_count_ == 0) {
+            return;
+        }
+        const uint32_t n = (result.size() < output_count_) ? result.size() : output_count_;
+        for (uint32_t i = 0; i < n; i++) {
+            output_ptrs_[i]->buffer = result.output_ptr(i)->buffer;
         }
     }
 };
 
 struct PTO2ScopeGuard {
-    explicit PTO2ScopeGuard(PTO2Runtime* rt_) : rt(rt_), active(true) { pto2_rt_scope_begin(rt); }
-    ~PTO2ScopeGuard() { if (active) pto2_rt_scope_end(rt); }
+    explicit PTO2ScopeGuard(PTO2Runtime* rt_) : rt(rt_), active(true), ended(false) { pto2_rt_scope_begin(rt); }
+    ~PTO2ScopeGuard() { close(); }
     PTO2ScopeGuard(const PTO2ScopeGuard&) = delete;
     PTO2ScopeGuard& operator=(const PTO2ScopeGuard&) = delete;
+    void close() {
+        if (!ended) {
+            pto2_rt_scope_end(rt);
+            ended = true;
+        }
+    }
     PTO2Runtime* rt;
     bool active;
+    bool ended;
 };
-#define PTO2_SCOPE(rt) for (PTO2ScopeGuard _pto2_scope_guard((rt)); _pto2_scope_guard.active; _pto2_scope_guard.active = false)
+#define PTO2_SCOPE(rt) \
+    for (PTO2ScopeGuard _pto2_scope_guard((rt)); _pto2_scope_guard.active; \
+         _pto2_scope_guard.active = false, _pto2_scope_guard.close())
 
 // Global test counters
 extern int g_pass;

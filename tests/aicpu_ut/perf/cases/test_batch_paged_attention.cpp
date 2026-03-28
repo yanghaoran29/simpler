@@ -126,8 +126,8 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t bt_addr = reinterpret_cast<uint64_t>(host_block_table);
     uint64_t cl_addr = reinterpret_cast<uint64_t>(host_context_lens);
 
-    uint64_t IN_CORE_BATCH = batch;
-    uint64_t num_chunks    = 1;
+    uint64_t IN_CORE_BATCH = 16;
+    uint64_t num_chunks    = (batch + IN_CORE_BATCH - 1) / IN_CORE_BATCH;
 
     int total_tasks = 0;
 

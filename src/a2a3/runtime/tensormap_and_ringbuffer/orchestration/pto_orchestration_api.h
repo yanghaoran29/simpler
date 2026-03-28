@@ -23,6 +23,7 @@
 
 // Type headers needed by orchestration
 #include "tensor.h"             // Tensor, TensorCreateInfo
+#include "tensor_factory.h"     // make_tensor_external/make_tensor
 #include "pto_types.h"          // Arg, TaskOutputTensors, TensorArgType
 #include "pto_submit_types.h"   // MixedKernels, INVALID_KERNEL_ID, subtask slots
 #include "task_arg.h"           // TaskArg, TaskArgKind
@@ -30,24 +31,6 @@
 // =============================================================================
 // Tensor Factory Helpers
 // =============================================================================
-
-/**
- * Create a Tensor for pre-allocated external memory.
- */
-inline Tensor make_tensor_external(void* addr,
-    const uint32_t shapes[],
-    uint32_t ndims,
-    DataType dtype = DataType::FLOAT32,
-    bool manual_dep = false,
-    int32_t version = 0) {
-    static uint32_t zero_offsets[RUNTIME_MAX_TENSOR_DIMS] = {};
-    uint64_t total = 1;
-    for (uint32_t i = 0; i < ndims; i++) {
-        total *= shapes[i];
-    }
-    return Tensor(addr, total * get_element_size(dtype), shapes, shapes, zero_offsets, ndims, dtype, version,
-                  /*is_all_offset_zero=*/true, /*is_raw_eq_shapes=*/true, manual_dep);
-}
 
 // Convert TaskArg to Tensor (needs make_tensor_external above)
 static_assert(TASK_ARG_MAX_DIMS == RUNTIME_MAX_TENSOR_DIMS, "TaskArg and runtime max dims must match");

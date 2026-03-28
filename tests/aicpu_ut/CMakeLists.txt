@@ -48,6 +48,7 @@ option(PTO2_SCHED_PROFILING "Enable scheduler profiling" OFF)
 option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" OFF)
 option(PTO2_TENSORMAP_PROFILING "Enable tensormap lookup profiling" OFF)
 option(PTO2_TRACE_SUBMIT_ARGS_ENABLE "Enable pto2_submit_mixed_task argument tracing" OFF)
+option(AICPU_UT_DISABLE_PRINTF "Compile out printf in UT sources" OFF)
 # When ON: test_orchestrator_scheduler.cpp emits orr x17/x18 around build_graph() for QEMU insn_count markers.
 option(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE "Emit build_graph insn-count markers (orr x17/x18) in scheduler driver" OFF)
 # When ON: aicpu_executor.cpp emits orr x23/x24 per scheduler loop iteration for QEMU insn_count (see count_scheduler_loop_markers.sh).
@@ -109,6 +110,9 @@ if(PTO2_TENSORMAP_PROFILING)
 endif()
 if(PTO2_TRACE_SUBMIT_ARGS_ENABLE)
     list(APPEND COMMON_COMPILE_DEFS PTO2_TRACE_SUBMIT_ARGS_ENABLE=1)
+endif()
+if(AICPU_UT_DISABLE_PRINTF)
+    list(APPEND COMMON_COMPILE_DEFS AICPU_UT_DISABLE_PRINTF=1)
 endif()
 
 # ─── Optimization level ───────────────────────────────────────────────────────

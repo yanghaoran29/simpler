@@ -47,6 +47,10 @@ static std::atomic<uint64_t> s_sim_dispatch_cycles{0};
 #include "aicpu/device_time.h"
 #include "pto_runtime2_types.h"
 static std::atomic<int64_t> s_sim_tasks_dispatched[PTO2_NUM_WORKER_TYPES] = {};
+static std::atomic<uint64_t> s_sim_task_latency_count{0};
+static std::atomic<uint64_t> s_sim_task_latency_sum_cycles{0};
+static std::atomic<uint64_t> s_sim_task_latency_min_cycles{UINT64_MAX};
+static std::atomic<uint64_t> s_sim_task_latency_max_cycles{0};
 #endif
 
 #if PTO2_ORCH_PROFILING
@@ -60,6 +64,10 @@ extern "C" void pto2_sim_reset_run_prof(void) {
 #endif
 #if PTO2_PROFILING
     for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) s_sim_tasks_dispatched[i].store(0, std::memory_order_relaxed);
+    s_sim_task_latency_count.store(0, std::memory_order_relaxed);
+    s_sim_task_latency_sum_cycles.store(0, std::memory_order_relaxed);
+    s_sim_task_latency_min_cycles.store(UINT64_MAX, std::memory_order_relaxed);
+    s_sim_task_latency_max_cycles.store(0, std::memory_order_relaxed);
 #endif
 }
 
@@ -107,6 +115,25 @@ int aicpu_sim_run_pto2(PTO2Runtime* pto2_rt, int num_sched_threads) {
         });
     }
     for (auto& t : threads) t.join();
+
+#if PTO2_PROFILING
+    {
+        const uint64_t count = s_sim_task_latency_count.load(std::memory_order_relaxed);
+        if (count > 0) {
+            const uint64_t min_cyc = s_sim_task_latency_min_cycles.load(std::memory_order_relaxed);
+            const uint64_t max_cyc = s_sim_task_latency_max_cycles.load(std::memory_order_relaxed);
+            const uint64_t sum_cyc = s_sim_task_latency_sum_cycles.load(std::memory_order_relaxed);
+            const double avg_us = cycles_to_us(sum_cyc) / static_cast<double>(count);
+            DEV_ALWAYS("AICore task latency (finish-dispatch, us): min=%.2f, max=%.2f, avg=%.2f, count=%llu",
+                cycles_to_us(min_cyc),
+                cycles_to_us(max_cyc),
+                avg_us,
+                static_cast<unsigned long long>(count));
+        } else {
+            DEV_ALWAYS("AICore task latency (finish-dispatch, us): no data");
+        }
+    }
+#endif
 
     aicpu_executor_sim_shutdown_aicore(&runtime);
     return 0;
@@ -224,6 +251,25 @@ int aicpu_sim_run_pto2_concurrent(
     orch_thread.join();
     for (auto& t : sched_threads) t.join();
 
+#if PTO2_PROFILING
+    {
+        const uint64_t count = s_sim_task_latency_count.load(std::memory_order_relaxed);
+        if (count > 0) {
+            const uint64_t min_cyc = s_sim_task_latency_min_cycles.load(std::memory_order_relaxed);
+            const uint64_t max_cyc = s_sim_task_latency_max_cycles.load(std::memory_order_relaxed);
+            const uint64_t sum_cyc = s_sim_task_latency_sum_cycles.load(std::memory_order_relaxed);
+            const double avg_us = cycles_to_us(sum_cyc) / static_cast<double>(count);
+            DEV_ALWAYS("AICore task latency (finish-dispatch, us): min=%.2f, max=%.2f, avg=%.2f, count=%llu",
+                cycles_to_us(min_cyc),
+                cycles_to_us(max_cyc),
+                avg_us,
+                static_cast<unsigned long long>(count));
+        } else {
+            DEV_ALWAYS("AICore task latency (finish-dispatch, us): no data");
+        }
+    }
+#endif
+
     aicpu_executor_sim_shutdown_aicore(&runtime);
     return 0;
 }
@@ -268,5 +314,22 @@ void pto2_sim_record_dispatch(int wt_idx) {
 void pto2_sim_get_dispatch_counts(int64_t* out, int n) {
     for (int i = 0; i < n && i < PTO2_NUM_WORKER_TYPES; i++)
         out[i] = s_sim_tasks_dispatched[i].load(std::memory_order_relaxed);
+}
+
+void pto2_sim_record_task_latency_cycles(uint64_t latency_cycles) {
+    s_sim_task_latency_count.fetch_add(1, std::memory_order_relaxed);
+    s_sim_task_latency_sum_cycles.fetch_add(latency_cycles, std::memory_order_relaxed);
+
+    uint64_t old_min = s_sim_task_latency_min_cycles.load(std::memory_order_relaxed);
+    while (latency_cycles < old_min &&
+           !s_sim_task_latency_min_cycles.compare_exchange_weak(
+               old_min, latency_cycles, std::memory_order_relaxed)) {
+    }
+
+    uint64_t old_max = s_sim_task_latency_max_cycles.load(std::memory_order_relaxed);
+    while (latency_cycles > old_max &&
+           !s_sim_task_latency_max_cycles.compare_exchange_weak(
+               old_max, latency_cycles, std::memory_order_relaxed)) {
+    }
 }
 #endif

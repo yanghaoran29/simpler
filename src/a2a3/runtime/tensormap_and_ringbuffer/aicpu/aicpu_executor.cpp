@@ -25,6 +25,7 @@
 
 #if defined(PTO2_SIM_AICORE_UT)
 #include "pto_scheduler.h"
+extern "C" void pto2_sim_aicore_start_poller(void);
 #if PTO2_SCHED_PROFILING
 void aicpu_sim_set_saved_sched_prof(int thread_idx, const PTO2SchedProfilingData* data);
 void aicpu_sim_get_saved_sched_prof(int thread_idx, PTO2SchedProfilingData* out);
@@ -34,6 +35,7 @@ void pto2_sim_accumulate_cycles(uint64_t complete_cycle, uint64_t dispatch_cycle
 #endif
 #if PTO2_PROFILING
 void pto2_sim_record_dispatch(int wt_idx);
+void pto2_sim_record_task_latency_cycles(uint64_t latency_cycles);
 #endif
 #endif
 
@@ -464,6 +466,13 @@ struct AicpuExecutor {
                 }
                 tracker.change_core_state(bit_pos);
 #if PTO2_PROFILING
+#if defined(PTO2_SIM_AICORE_UT)
+                uint64_t finish_ts_for_latency = get_sys_cnt_aicpu();
+                if (core_exec_state.dispatch_timestamp > 0 &&
+                    finish_ts_for_latency >= core_exec_state.dispatch_timestamp) {
+                    pto2_sim_record_task_latency_cycles(finish_ts_for_latency - core_exec_state.dispatch_timestamp);
+                }
+#endif
                 if (profiling_enabled) {
 #if PTO2_SCHED_PROFILING
                     uint64_t t_perf_start = get_sys_cnt_aicpu();
@@ -601,8 +610,9 @@ struct AicpuExecutor {
         core_exec_state.executing_subslot = subslot;
         core_exec_state.executing_slot_state = &slot_state;
 #if PTO2_PROFILING
+        // Keep dispatch timestamp for latency stats even when runtime profiling sink is off.
+        core_exec_state.dispatch_timestamp = get_sys_cnt_aicpu();
         if (profiling_enabled) {
-            core_exec_state.dispatch_timestamp = get_sys_cnt_aicpu();
             if (core_exec_state.dispatch_count >= PLATFORM_PROF_BUFFER_SIZE) {
                 perf_aicpu_switch_buffer(runtime, core_id, thread_idx);
                 core_exec_state.dispatch_count = 0;
@@ -1200,7 +1210,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
         // tail overhead (time from AICore done to AICPU recording finish).
 
         // Phase 1: Check running cores for completion, process and move to idle
-        PTO2_SPECIAL_INSTRUCTION(17, PTO2_SPECIAL_INS_PLAIN);
+        // Keep scheduler phase markers away from build_graph markers (x17/x18).
+        PTO2_SPECIAL_INSTRUCTION(25, PTO2_SPECIAL_INS_PLAIN);
         int32_t completed_this_turn = 0;
 
         // Check AIC running cores
@@ -1271,10 +1282,10 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
         }
 #endif
-        PTO2_SPECIAL_INSTRUCTION(18, PTO2_SPECIAL_INS_PLAIN);
+        PTO2_SPECIAL_INSTRUCTION(26, PTO2_SPECIAL_INS_PLAIN);
 
         bool try_pushed = false;
-        PTO2_SPECIAL_INSTRUCTION(19, PTO2_SPECIAL_INS_PLAIN);
+        PTO2_SPECIAL_INSTRUCTION(27, PTO2_SPECIAL_INS_PLAIN);
         const PTO2ResourceShape* dispatch_order = get_dispatch_order(thread_idx);
         for (int32_t si = 0; si < PTO2_NUM_RESOURCE_SHAPES; si++) {
             PTO2ResourceShape shape = dispatch_order[si];
@@ -1427,7 +1438,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
         }
 #endif
-        PTO2_SPECIAL_INSTRUCTION(20, PTO2_SPECIAL_INS_PLAIN);
+        PTO2_SPECIAL_INSTRUCTION(28, PTO2_SPECIAL_INS_PLAIN);
 
 #if !PTO2_PROFILING
         (void)try_completed;
@@ -1559,14 +1570,14 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                 SPIN_WAIT_HINT();
             }
 #if PTO2_PROFILING
-            PTO2_SPECIAL_INSTRUCTION(21, PTO2_SPECIAL_INS_PLAIN);
+            PTO2_SPECIAL_INSTRUCTION(29, PTO2_SPECIAL_INS_PLAIN);
             CYCLE_COUNT_LAP(sched_idle_cycle);
             if (profiling_enabled) {
                 perf_aicpu_record_phase(thread_idx, AicpuPhaseId::SCHED_IDLE_WAIT,
                                         _t0_phase, _t1, sched_loop_count, 0);
                 _t0_phase = _t1;
             }
-            PTO2_SPECIAL_INSTRUCTION(22, PTO2_SPECIAL_INS_PLAIN);
+            PTO2_SPECIAL_INSTRUCTION(30, PTO2_SPECIAL_INS_PLAIN);
 #endif
         }
     }
@@ -2455,7 +2466,12 @@ void aicpu_sim_set_rt(PTO2Runtime* r) {
 }
 
 int aicpu_executor_sim_init(Runtime* r) {
-    return g_aicpu_executor.init(r);
+    int rc = g_aicpu_executor.init(r);
+    if (rc == 0) {
+        // Start the simulated AICore poller together with Scheduler/Orchestrator init path.
+        pto2_sim_aicore_start_poller();
+    }
+    return rc;
 }
 
 void aicpu_executor_sim_setup_after_host_orch(int32_t total_task_count) {

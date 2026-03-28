@@ -25,7 +25,8 @@
 #   ./run_tests.sh --opt-level 0                   # compile with -O0 (debug, no optimization)
 #   AICPU_UT_PROFILE_CALLSTACK=ON ./run_tests.sh   # keep sibling-call opts off for better perf stacks
 #   ./run_tests.sh --profiling 0                    # 不开启 profiling（默认）
-#   ./run_tests.sh --profiling 1                    # 仅开启 PTO2_PROFILING（基础 profiling，不含 Sched/Orch 明细）
+#   ./run_tests.sh --profiling 1                    # 仅开启 PTO2_PROFILING；默认仅跑 test_batch_paged_attention[0]
+#   ./run_tests.sh --profiling 1 --aicore-task-duration-ns 50000  # 设置 sim AICore 每任务时长(ns)
 #   ./run_tests.sh --profiling 2                    # 完整 profiling（Sched+Orch 明细）；stdout 经 format_profiling_output 整理
 #   ./run_tests.sh --profiling 2 --swimlane        # 完整 profiling + 将 swimlane JSON 转为 Perfetto + Mermaid
 #   ./run_tests.sh --no-check                        # skip P1/P2 invariant checks (AICPU_UT_NO_CHECK=1)
@@ -136,6 +137,7 @@ AICPU_UT_LATENCY_NUM_CHAINS=""       # set by --chain-num N (override num_chains
 AICPU_UT_LATENCY_CHAIN_LENGTH=""     # set by --chain-length L (override chain_length for test_latency, max 256)
 AICPU_UT_NO_EARLY_RETURN=""     # set by --no-early-return: drain before break/return so completed==consumed
 AICPU_UT_NO_CHECK=""            # set by --no-check: skip P1/P2 invariant checks in test binaries
+AICPU_UT_SIM_AICORE_TASK_DURATION_NS=""  # set by --aicore-task-duration-ns N
 GEN_SWIMLANE=false              # set by --swimlane: convert perf_swimlane_*.json after run
 COUNT_SUBMIT_TASK_INSNS=0       # set by --count-submit-task-instructions
 COUNT_SCHEDULER_LOOP_INSNS=0    # set by --count-scheduler-submit-task-instructions
@@ -282,6 +284,14 @@ while [[ $# -gt 0 ]]; do
             AICPU_UT_NO_EARLY_RETURN=1; shift ;;
         --no-check)
             AICPU_UT_NO_CHECK=1; shift ;;
+        --aicore-task-duration-ns)
+            if [[ -z "${2:-}" ]]; then
+                echo "--aicore-task-duration-ns requires a numeric argument (nanoseconds)." >&2; exit 1
+            fi
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "--aicore-task-duration-ns must be a non-negative integer (nanoseconds)." >&2; exit 1
+            fi
+            AICPU_UT_SIM_AICORE_TASK_DURATION_NS="$2"; shift 2 ;;
         --swimlane)
             GEN_SWIMLANE=true; shift ;;
         --count-submit-task-instructions)
@@ -426,7 +436,7 @@ if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ]; then
     esac
     test_arg="${FILTER_TEST:-test_batch_paged_attention}"
     idx_arg="${FILTER_IDX:-0}"
-    "$tool_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg"
+    AICPU_UT_DISABLE_PRINTF=1 "$tool_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg"
     rc=$?
     if [ $rc -ne 0 ]; then
         exit $rc
@@ -435,7 +445,7 @@ if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ]; then
     # Best-effort: also collect instruction type statistics and emit a full markdown report.
     insn_script="${SCRIPT_DIR}/tools/analysis/count_insn_types.sh"
     if [ -x "$insn_script" ]; then
-        "$insn_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg" || true
+        AICPU_UT_DISABLE_PRINTF=1 "$insn_script" --test "$test_arg" --idx "$idx_arg" --thread-mode "$mode_arg" || true
     fi
 
     log_dir="${SCRIPT_DIR}/outputs/log"
@@ -597,6 +607,12 @@ else
     AICPU_UT_QUIET=1   # profiling off: only output pass/fail summary
 fi
 
+# profiling 1 默认收敛到 batch_paged_attention 的 idx=0，便于稳定对比。
+if [ "$PROFILING_MODE" = "1" ] && [ -z "$FILTER_TEST" ] && $RUN_PERF; then
+    DEFAULT_PERF_TESTS=(test_batch_paged_attention)
+    RUN_ALL_INDICES=false
+fi
+
 # profiling 1: re-exec through format_profiling_output.py for unified formatting.
 # profiling 2: raw output, no reformatting.
 if [ "$PROFILING_MODE" = "1" ] && [ -z "${AICPU_UT_FORMATTED:-}" ]; then
@@ -696,6 +712,68 @@ run_test() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_TESTS+=("$label")
     fi
+}
+
+print_aicore_task_runtime_stats() {
+    local outputs_dir="${PROJECT_ROOT}/outputs"
+    local latest_json=""
+    if [ -d "$outputs_dir" ]; then
+        latest_json="$(ls -t "${outputs_dir}"/perf_swimlane_*.json 2>/dev/null | head -1 || true)"
+    fi
+    if [ -z "$latest_json" ] || [ ! -f "$latest_json" ]; then
+        quiet_echo "  AICore task runtime stats: no perf_swimlane_*.json found."
+        return 0
+    fi
+    python3 - "$latest_json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception as e:
+    print(f"  AICore task runtime stats: failed to read {path}: {e}")
+    sys.exit(0)
+
+tasks = data.get("tasks") or []
+durations = []
+latencies = []
+for task in tasks:
+    duration = task.get("duration_us")
+    if isinstance(duration, (int, float)):
+        durations.append(float(duration))
+    else:
+        start = task.get("start_time_us")
+        end = task.get("end_time_us")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            durations.append(float(end) - float(start))
+
+    dispatch = task.get("dispatch_time_us")
+    finish = task.get("finish_time_us")
+    if isinstance(dispatch, (int, float)) and isinstance(finish, (int, float)) and finish >= dispatch:
+        latencies.append(float(finish) - float(dispatch))
+
+if not durations and not latencies:
+    print("  AICore task runtime stats: no duration/latency data.")
+    sys.exit(0)
+
+if durations:
+    avg = sum(durations) / len(durations)
+    print("  AICore task runtime (us):")
+    print(f"    min={min(durations):.3f}, max={max(durations):.3f}, avg={avg:.3f}, count={len(durations)}")
+else:
+    print("  AICore task runtime (us): no duration data.")
+
+if latencies:
+    avg_lat = sum(latencies) / len(latencies)
+    print("  AICore task latency (finish-dispatch, us):")
+    print(f"    min={min(latencies):.2f}, max={max(latencies):.2f}, avg={avg_lat:.2f}, count={len(latencies)}")
+else:
+    print("  AICore task latency (finish-dispatch, us): no latency data.")
+
+print(f"    source={path}")
+PY
 }
 
 # Map script test name + THREAD_MODE to actual binary.
@@ -848,6 +926,7 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
     -DPTO2_TRACE_SUBMIT_ARGS_ENABLE="${PTO2_TRACE_SUBMIT_ARGS_ENABLE:-0}" \
     -DPTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE="${PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE:-0}" \
     -DPTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE="${PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE:-0}" \
+    -DAICPU_UT_DISABLE_PRINTF="${AICPU_UT_DISABLE_PRINTF:-0}" \
     -DAICPU_UT_LATENCY_NUM_CHAINS="${AICPU_UT_LATENCY_NUM_CHAINS:-}" \
     -DAICPU_UT_LATENCY_CHAIN_LENGTH="${AICPU_UT_LATENCY_CHAIN_LENGTH:-}" \
     $( [ -n "${AICPU_UT_THROUGHPUT_LAYERS:-}" ]       && echo "-DAICPU_UT_THROUGHPUT_LAYERS=$AICPU_UT_THROUGHPUT_LAYERS" ) \
@@ -931,6 +1010,9 @@ if [ -n "${AICPU_UT_LATENCY_CHAIN_LENGTH:-}" ]; then
 fi
 if [ -n "${AICPU_UT_NO_CHECK:-}" ]; then
     export AICPU_UT_NO_CHECK
+fi
+if [ -n "${AICPU_UT_SIM_AICORE_TASK_DURATION_NS:-}" ]; then
+    export AICPU_UT_SIM_AICORE_TASK_DURATION_NS
 fi
 if $RUN_PERF && [ -z "${AICPU_UT_QUIET:-}" ]; then
     mkdir -p "$PROJECT_ROOT/outputs"
