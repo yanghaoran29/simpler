@@ -126,15 +126,16 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t bt_addr = reinterpret_cast<uint64_t>(host_block_table);
     uint64_t cl_addr = reinterpret_cast<uint64_t>(host_context_lens);
 
-    uint64_t IN_CORE_BATCH = 16;
-    uint64_t num_chunks    = (batch + IN_CORE_BATCH - 1) / IN_CORE_BATCH;
+    uint64_t IN_CORE_BATCH = batch;
+    uint64_t num_chunks    = 1;
 
     int total_tasks = 0;
 
     for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
         uint64_t q_offset = q_idx * q_tile;
 
-        for (uint64_t batch_start = 0; batch_start < batch; batch_start += IN_CORE_BATCH) {
+        for (uint64_t chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
+            uint64_t batch_start = chunk_idx * IN_CORE_BATCH;
             uint64_t chunk_bc = batch - batch_start;
             if (chunk_bc > IN_CORE_BATCH) chunk_bc = IN_CORE_BATCH;
 
@@ -153,73 +154,75 @@ void build_graph(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 total_tasks++;
 
                 for (uint64_t bn = 0; bn < max_bn; bn++) {
-                    uint32_t sij_shapes[2]    = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(block_size)};
-                    uint32_t vec_shapes[1]    = {static_cast<uint32_t>(chunk_bc * q_tile)};
-                    uint32_t oi_new_shapes[2] = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(head_dim)};
+                    PTO2_SCOPE(rt) {
+                        uint32_t sij_shapes[2]    = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(block_size)};
+                        uint32_t vec_shapes[1]    = {static_cast<uint32_t>(chunk_bc * q_tile)};
+                        uint32_t oi_new_shapes[2] = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(head_dim)};
 
-                    Tensor sij_b    = make_tensor(sij_shapes,    2, DataType::FLOAT32);
-                    Tensor pij_b    = make_tensor(sij_shapes,    2, data_type);
-                    Tensor mij_b    = make_tensor(vec_shapes,    1, DataType::FLOAT32);
-                    Tensor lij_b    = make_tensor(vec_shapes,    1, DataType::FLOAT32);
-                    Tensor oi_new_b = make_tensor(oi_new_shapes, 2, DataType::FLOAT32);
+                        Tensor sij_b    = make_tensor(sij_shapes,    2, DataType::FLOAT32);
+                        Tensor pij_b    = make_tensor(sij_shapes,    2, data_type);
+                        Tensor mij_b    = make_tensor(vec_shapes,    1, DataType::FLOAT32);
+                        Tensor lij_b    = make_tensor(vec_shapes,    1, DataType::FLOAT32);
+                        Tensor oi_new_b = make_tensor(oi_new_shapes, 2, DataType::FLOAT32);
 
-                    PTOParam params_qk;
-                    params_qk.add_input(query);
-                    params_qk.add_input(key_cache);
-                    params_qk.add_output(sij_b);
-                    params_qk.add_scalar(bt_addr);
-                    params_qk.add_scalar(chunk_bc);
-                    params_qk.add_scalar(bn);
-                    params_qk.add_scalar(q_offset);
-                    params_qk.add_scalar(block_num);
-                    params_qk.add_scalar(num_heads);
-                    params_qk.add_scalar(batch_start);
-                    pto2_rt_submit_aic_task(rt, FUNC_QK_MATMUL, params_qk);
-                    total_tasks++;
+                        PTOParam params_qk;
+                        params_qk.add_input(query);
+                        params_qk.add_input(key_cache);
+                        params_qk.add_output(sij_b);
+                        params_qk.add_scalar(bt_addr);
+                        params_qk.add_scalar(chunk_bc);
+                        params_qk.add_scalar(bn);
+                        params_qk.add_scalar(q_offset);
+                        params_qk.add_scalar(block_num);
+                        params_qk.add_scalar(num_heads);
+                        params_qk.add_scalar(batch_start);
+                        pto2_rt_submit_aic_task(rt, FUNC_QK_MATMUL, params_qk);
+                        total_tasks++;
 
-                    PTOParam params_sf;
-                    params_sf.add_input(sij_b);
-                    params_sf.add_output(pij_b);
-                    params_sf.add_output(mij_b);
-                    params_sf.add_output(lij_b);
-                    params_sf.add_scalar(float_to_u64(scale_value));
-                    params_sf.add_scalar(cl_addr);
-                    params_sf.add_scalar(chunk_bc);
-                    params_sf.add_scalar(bn);
-                    params_sf.add_scalar(batch_start);
-                    pto2_rt_submit_aiv_task(rt, FUNC_SOFTMAX_PREPARE, params_sf);
-                    total_tasks++;
+                        PTOParam params_sf;
+                        params_sf.add_input(sij_b);
+                        params_sf.add_output(pij_b);
+                        params_sf.add_output(mij_b);
+                        params_sf.add_output(lij_b);
+                        params_sf.add_scalar(float_to_u64(scale_value));
+                        params_sf.add_scalar(cl_addr);
+                        params_sf.add_scalar(chunk_bc);
+                        params_sf.add_scalar(bn);
+                        params_sf.add_scalar(batch_start);
+                        pto2_rt_submit_aiv_task(rt, FUNC_SOFTMAX_PREPARE, params_sf);
+                        total_tasks++;
 
-                    PTOParam params_pv;
-                    params_pv.add_input(pij_b);
-                    params_pv.add_input(value_cache);
-                    params_pv.add_output(oi_new_b);
-                    params_pv.add_scalar(bt_addr);
-                    params_pv.add_scalar(chunk_bc);
-                    params_pv.add_scalar(bn);
-                    params_pv.add_scalar(block_num);
-                    params_pv.add_scalar(batch_start);
-                    pto2_rt_submit_aic_task(rt, FUNC_PV_MATMUL, params_pv);
-                    total_tasks++;
+                        PTOParam params_pv;
+                        params_pv.add_input(pij_b);
+                        params_pv.add_input(value_cache);
+                        params_pv.add_output(oi_new_b);
+                        params_pv.add_scalar(bt_addr);
+                        params_pv.add_scalar(chunk_bc);
+                        params_pv.add_scalar(bn);
+                        params_pv.add_scalar(block_num);
+                        params_pv.add_scalar(batch_start);
+                        pto2_rt_submit_aic_task(rt, FUNC_PV_MATMUL, params_pv);
+                        total_tasks++;
 
-                    uint64_t is_first = (bn == 0) ? 1 : 0;
-                    uint64_t is_last  = (bn == max_bn - 1) ? 1 : 0;
-                    PTOParam params_up;
-                    params_up.add_input(mij_b);
-                    params_up.add_input(lij_b);
-                    params_up.add_input(oi_new_b);
-                    params_up.add_inout(mi_batch);
-                    params_up.add_inout(li_batch);
-                    params_up.add_output(oi_batch);
-                    params_up.add_output(out);
-                    params_up.add_scalar(is_first);
-                    params_up.add_scalar(is_last);
-                    params_up.add_scalar(chunk_bc);
-                    params_up.add_scalar(q_offset);
-                    params_up.add_scalar(num_heads);
-                    params_up.add_scalar(batch_start);
-                    pto2_rt_submit_aiv_task(rt, FUNC_ONLINE_UPDATE, params_up);
-                    total_tasks++;
+                        uint64_t is_first = (bn == 0) ? 1 : 0;
+                        uint64_t is_last  = (bn == max_bn - 1) ? 1 : 0;
+                        PTOParam params_up;
+                        params_up.add_input(mij_b);
+                        params_up.add_input(lij_b);
+                        params_up.add_input(oi_new_b);
+                        params_up.add_inout(mi_batch);
+                        params_up.add_inout(li_batch);
+                        params_up.add_inout(oi_batch);
+                        params_up.add_inout(out);
+                        params_up.add_scalar(is_first);
+                        params_up.add_scalar(is_last);
+                        params_up.add_scalar(chunk_bc);
+                        params_up.add_scalar(q_offset);
+                        params_up.add_scalar(num_heads);
+                        params_up.add_scalar(batch_start);
+                        pto2_rt_submit_aiv_task(rt, FUNC_ONLINE_UPDATE, params_up);
+                        total_tasks++;
+                    }
                 }
             }
         }

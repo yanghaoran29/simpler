@@ -10,6 +10,9 @@ inline constexpr uint64_t PTO2_SIM_REG_ADDR_MAX = 0x10000ULL;
 inline constexpr uint32_t PTO2_SIM_MSGQ_TASK_DONE_TAG = 0x5444u;
 
 extern "C" uint64_t pto2_sim_read_cond_reg(int32_t core_id);
+/** Simulated AICore task duration in nanoseconds (steady_clock). 0 = instant FIN, no poller thread. */
+extern "C" void pto2_sim_aicore_set_task_duration_ns(uint64_t ns);
+extern "C" uint64_t pto2_sim_aicore_get_task_duration_ns(void);
 extern "C" void pto2_sim_aicore_on_task_received(int32_t core_id, int32_t task_id);
 extern "C" void pto2_sim_aicore_set_idle(int32_t core_id);
 extern "C" void pto2_sim_set_current_core(int32_t core_id, bool is_sim);

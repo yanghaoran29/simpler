@@ -51,21 +51,29 @@ void pto2_sim_record_dispatch(int wt_idx);
 #include "common/core_type.h"
 
 // Instruction-count / QEMU marker NOPs: `orr xR,xR,xR` (distinct R) as recognizable signatures.
-// PTO2_SPECIAL_INSTRUCTION(reg_index, with_memory_barrier):
-//   reg_index — GPR 编号 R，展开为 xR；
-//   with_memory_barrier — PTO2_SPECIAL_INS_PLAIN / PTO2_SPECIAL_INS_MEMORY（或字面 0 / 1）。
+// PTO2_SPECIAL_INSTRUCTION(reg_index, with_memory_barrier[, enable_flag]):
+//   reg_index           — GPR 编号 R，展开为 xR；
+//   with_memory_barrier — PTO2_SPECIAL_INS_PLAIN / PTO2_SPECIAL_INS_MEMORY（或字面 0 / 1）；
+//   enable_flag（可选）— 条件标志宏，缺省时无条件展开；为 0 时整个调用展开为空操作。
 #define PTO2_SPECIAL_INS_PLAIN   0
 #define PTO2_SPECIAL_INS_MEMORY  1
+#ifndef PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE
+#define PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE 0
+#endif
 #if defined(__aarch64__)
 #define _PTO2_MARKER_ORR_SELF_ASM(n) "orr x" #n ", x" #n ", x" #n
 #define _PTO2_SI_CAT(a, b)           a##b
 #define _PTO2_SI_DISPATCH(reg, m)    _PTO2_SI_CAT(_PTO2_SI_DO_, m)(reg)
 #define _PTO2_SI_DO_0(reg)           __asm__ __volatile__(_PTO2_MARKER_ORR_SELF_ASM(reg))
 #define _PTO2_SI_DO_1(reg)           __asm__ __volatile__(_PTO2_MARKER_ORR_SELF_ASM(reg) ::: "memory")
-#define PTO2_SPECIAL_INSTRUCTION(reg_index, with_memory_barrier) \
-    _PTO2_SI_DISPATCH(reg_index, with_memory_barrier)
+// 2-arg: unconditionally emit; 3-arg: emit only when enable_flag is non-zero.
+#define _PTO2_SI_2(reg, m)           _PTO2_SI_DISPATCH(reg, m)
+#define _PTO2_SI_3(reg, m, flag)     do { if (flag) { _PTO2_SI_DISPATCH(reg, m); } } while(0)
+#define _PTO2_SI_SEL(_1, _2, _3, NAME, ...) NAME
+#define PTO2_SPECIAL_INSTRUCTION(...) \
+    _PTO2_SI_SEL(__VA_ARGS__, _PTO2_SI_3, _PTO2_SI_2, ~)(__VA_ARGS__)
 #else
-#define PTO2_SPECIAL_INSTRUCTION(reg_index, with_memory_barrier) ((void)0)
+#define PTO2_SPECIAL_INSTRUCTION(...) ((void)0)
 #endif
 
 #if PTO2_PROFILING
@@ -1742,6 +1750,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
     return cur_thread_completed;
 }
 
+#if !defined(PTO2_SIM_AICORE_UT)
 int32_t AicpuExecutor::run(Runtime* runtime) {
     int32_t thread_idx = thread_idx_++;
     DEV_INFO("Thread %d: Start", thread_idx);
@@ -2232,6 +2241,7 @@ int32_t AicpuExecutor::run(Runtime* runtime) {
 
     return 0;
 }
+#endif  // !PTO2_SIM_AICORE_UT
 
 void AicpuExecutor::deinit(Runtime* runtime) {
     // 1. Invalidate AICPU cache for Runtime address range.
@@ -2389,6 +2399,7 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int32_t thread_idx,
  * @param runtime Pointer to Runtime structure
  * @return 0 on success, non-zero on error
  */
+#if !defined(PTO2_SIM_AICORE_UT)
 extern "C" int32_t aicpu_execute(Runtime* runtime) {
     if (runtime == nullptr) {
         DEV_ERROR("%s", "Invalid argument: null Runtime pointer");
@@ -2424,6 +2435,7 @@ extern "C" int32_t aicpu_execute(Runtime* runtime) {
     DEV_INFO("%s", "aicpu_execute: Kernel execution completed successfully");
     return 0;
 }
+#endif  // !PTO2_SIM_AICORE_UT
 
 #if defined(PTO2_SIM_AICORE_UT)
 void AicpuExecutor::setup_after_host_orch(int32_t total_task_count) {

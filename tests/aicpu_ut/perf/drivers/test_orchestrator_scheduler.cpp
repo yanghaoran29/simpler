@@ -15,6 +15,27 @@
 #include <cstdlib>
 #include <functional>
 
+// Instruction-count marker macros (mirrors aicpu_executor.cpp).
+#define PTO2_SPECIAL_INS_PLAIN   0
+#define PTO2_SPECIAL_INS_MEMORY  1
+#ifndef PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE
+#define PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE 0
+#endif
+#if defined(__aarch64__)
+#define _PTO2_MARKER_ORR_SELF_ASM(n) "orr x" #n ", x" #n ", x" #n
+#define _PTO2_SI_CAT(a, b)           a##b
+#define _PTO2_SI_DISPATCH(reg, m)    _PTO2_SI_CAT(_PTO2_SI_DO_, m)(reg)
+#define _PTO2_SI_DO_0(reg)           __asm__ __volatile__(_PTO2_MARKER_ORR_SELF_ASM(reg))
+#define _PTO2_SI_DO_1(reg)           __asm__ __volatile__(_PTO2_MARKER_ORR_SELF_ASM(reg) ::: "memory")
+#define _PTO2_SI_2(reg, m)           _PTO2_SI_DISPATCH(reg, m)
+#define _PTO2_SI_3(reg, m, flag)     do { if (flag) { _PTO2_SI_DISPATCH(reg, m); } } while(0)
+#define _PTO2_SI_SEL(_1, _2, _3, NAME, ...) NAME
+#define PTO2_SPECIAL_INSTRUCTION(...) \
+    _PTO2_SI_SEL(__VA_ARGS__, _PTO2_SI_3, _PTO2_SI_2, ~)(__VA_ARGS__)
+#else
+#define PTO2_SPECIAL_INSTRUCTION(...) ((void)0)
+#endif
+
 int g_pass = 0;
 int g_fail = 0;
 
@@ -44,14 +65,9 @@ int main() {
     if (aicpu_sim_run_pto2_concurrent(rt, num_sched, [&ctx, &orch_actual_cpu](PTO2Runtime* r) {
             bind_to_cpu(ORCH_CPU);
             orch_actual_cpu = current_cpu();
-#if defined(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE) && PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE
-            /* QEMU insn_count: start (orr x17) enc 0xaa110231 — distinct from submit_mixed_task markers */
-            __asm__ volatile("orr x17, x17, x17" ::: "memory");
-#endif
+            PTO2_SPECIAL_INSTRUCTION(17, PTO2_SPECIAL_INS_MEMORY, PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE); /* QEMU insn_count: start (orr x17) enc 0xaa110231 — distinct from submit_mixed_task markers */
             build_graph(r, ctx.args, 10);
-#if defined(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE) && PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE
-            __asm__ volatile("orr x18, x18, x18" ::: "memory");
-#endif
+            PTO2_SPECIAL_INSTRUCTION(18, PTO2_SPECIAL_INS_MEMORY, PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE);
         }) != 0) {
 #if PTO2_PROFILING
         printf("  [ERROR] aicpu_sim_run_pto2_concurrent failed\n");

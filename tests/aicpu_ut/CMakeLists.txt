@@ -65,6 +65,7 @@ set(COMMON_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/common)
 set(FUNC_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/functional)
 set(PERF_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/perf)
 set(PLATFORM_AICPU_DIR ${ROOT_DIR}/src/a2a3/platform/src/aicpu)
+set(SIM_DIR            ${ROOT_DIR}/src/a2a3/sim)
 
 # ─── Common include directories ───────────────────────────────────────────────
 set(COMMON_INCLUDES
@@ -75,6 +76,7 @@ set(COMMON_INCLUDES
     ${COMMON_DIR}
     ${AICPU_DIR}
     ${PLATFORM_AICPU_DIR}
+    ${SIM_DIR}
     ${ROOT_DIR}/src/a2a3/platform/sim/aicpu
 )
 
@@ -182,9 +184,9 @@ set(RUNTIME_SRCS
     ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/device_time.cpp
     ${RUNTIME_DIR}/runtime.cpp
     ${AICPU_DIR}/aicpu_executor.cpp
-    ${PLATFORM_AICPU_DIR}/sim_aicore.cpp
-    ${AICPU_DIR}/msgq_cpu_sim.cpp
-    ${AICPU_DIR}/hscb_cpu_sim.cpp
+    ${SIM_DIR}/sim_aicore.cpp
+    ${SIM_DIR}/msgq_cpu_sim.cpp
+    ${SIM_DIR}/hscb_cpu_sim.cpp
     ${PLATFORM_AICPU_DIR}/platform_regs.cpp
     ${PLATFORM_AICPU_DIR}/performance_collector_aicpu.cpp
     ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/cache_ops.cpp
