@@ -238,6 +238,11 @@ private:
     char device_orch_func_name_[RUNTIME_MAX_ORCH_SYMBOL_NAME];
     char device_orch_config_name_[RUNTIME_MAX_ORCH_SYMBOL_NAME];
 
+#if defined(PTO2_SIM_AICORE_UT)
+    // Orch on host but deferred (concurrent sim): init must not set orchestrator_done_ until orch thread finishes.
+    bool orch_deferred_on_host_{false};
+#endif
+
 public:
     /**
      * Constructor - zero-initialize all arrays
@@ -295,6 +300,11 @@ public:
      * binaries are not freed by validate_runtime_impl across runs.
      */
     void replay_function_bin_addr(int func_id, uint64_t addr);
+
+#if defined(PTO2_SIM_AICORE_UT)
+    bool get_orch_deferred_on_host() const { return orch_deferred_on_host_; }
+    void set_orch_deferred_on_host(bool v) { orch_deferred_on_host_ = v; }
+#endif
 
     int get_registered_kernel_count() const;
     int get_registered_kernel_func_id(int index) const;

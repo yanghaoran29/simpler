@@ -31,6 +31,13 @@
 #include "aicpu/pmu_collector_aicpu.h"
 #include "aicpu/tensor_dump_aicpu.h"
 
+#if defined(PTO2_SIM_AICORE_UT) && PTO2_PROFILING
+// Defined in tests/aicpu_ut/common/sim_run_pto2.cpp; collect per-dispatch and
+// per-task-latency stats for the UT profiling checks.
+void pto2_sim_record_dispatch(int wt_idx);
+void pto2_sim_record_task_latency_cycles(uint64_t latency_cycles);
+#endif
+
 #ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
@@ -110,6 +117,17 @@ void SchedulerContext::build_payload(
     PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
     const AsyncCtx &async_ctx, int32_t block_idx
 ) {
+#if defined(PTO2_SIM_AICORE_UT)
+    // The AICore simulator never executes real kernels (completion is signalled
+    // via the COND register), so the dispatch payload is never consumed and the
+    // kernel's function_bin_addr is unmapped in UT. Skip building it.
+    (void)dispatch_payload;
+    (void)slot_state;
+    (void)subslot;
+    (void)async_ctx;
+    (void)block_idx;
+    return;
+#else
     int32_t slot_idx = static_cast<int32_t>(subslot);
     uint64_t callable_addr = get_function_bin_addr(slot_state.task->kernel_id[slot_idx]);
     const CoreCallable *callable = reinterpret_cast<const CoreCallable *>(callable_addr);
@@ -127,6 +145,7 @@ void SchedulerContext::build_payload(
     dispatch_payload.local_context.async_ctx = async_ctx;
     dispatch_payload.args[PAYLOAD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dispatch_payload.local_context);
     dispatch_payload.args[PAYLOAD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dispatch_payload.global_context);
+#endif
 }
 
 void SchedulerContext::dispatch_subtask_to_core(
@@ -240,6 +259,12 @@ void SchedulerContext::dispatch_block(
     } else {
         dispatch_subtask_to_core(thread_idx, core_offset, slot_state, PTO2SubtaskSlot::AIV0, to_pending, block_idx);
     }
+#if defined(PTO2_SIM_AICORE_UT) && PTO2_PROFILING
+    // One record per block dispatch (the P1 UT check counts logical_block_num per
+    // task, independent of how many subtasks a MIX block fans out to). Worker-type
+    // index is only used for the summed total, so AIC=0 / everything-else=1 suffices.
+    pto2_sim_record_dispatch(shape == PTO2ResourceShape::AIC ? 0 : 1);
+#endif
 #if PTO2_PROFILING
     sched_l2_perf_[thread_idx].phase_dispatch_count += __builtin_popcount(slot_state.active_mask.core_mask());
 #endif

@@ -67,19 +67,23 @@
 #endif
 
 #ifndef PTO2_TENSORMAP_PROFILING
+#define PTO2_TENSORMAP_PROFILING 1
+#endif
+
+#if !PTO2_PROFILING
+// Allow test targets to compile with PTO2_PROFILING=0 without having to
+// explicitly override every derived profiling macro from build flags.
+#undef PTO2_ORCH_PROFILING
+#define PTO2_ORCH_PROFILING 0
+#undef PTO2_SCHED_PROFILING
+#define PTO2_SCHED_PROFILING 0
+#undef PTO2_TENSORMAP_PROFILING
 #define PTO2_TENSORMAP_PROFILING 0
 #endif
 
-#if PTO2_ORCH_PROFILING && !PTO2_PROFILING
-#error "PTO2_ORCH_PROFILING requires PTO2_PROFILING=1"
-#endif
-
-#if PTO2_SCHED_PROFILING && !PTO2_PROFILING
-#error "PTO2_SCHED_PROFILING requires PTO2_PROFILING=1"
-#endif
-
 #if PTO2_TENSORMAP_PROFILING && !PTO2_ORCH_PROFILING
-#error "PTO2_TENSORMAP_PROFILING requires PTO2_ORCH_PROFILING=1"
+#undef PTO2_TENSORMAP_PROFILING
+#define PTO2_TENSORMAP_PROFILING 0
 #endif
 
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
@@ -119,7 +123,14 @@
 #define PTO2_READY_QUEUE_SIZE 65536  // Per-shape queue size
 
 // Wiring queue
+#if defined(PTO2_SIM_AICORE_UT)
+// UT orch-only / sched-prof-only drivers build the whole task graph with no
+// scheduler draining the wiring queue concurrently, so it must hold every
+// submitted task. Sized above the largest default UT case (latency=4096).
+#define PTO2_WRIRING_QUEUE_SIZE 16384
+#else
 #define PTO2_WRIRING_QUEUE_SIZE 1024  // Per-shape queue size
+#endif
 
 // Fanin storage
 #define PTO2_FANIN_INLINE_CAP 64

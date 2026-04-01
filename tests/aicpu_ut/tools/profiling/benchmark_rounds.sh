@@ -23,7 +23,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SEARCH_DIR="$SCRIPT_DIR"
+while [[ "$SEARCH_DIR" != "/" && ! -f "$SEARCH_DIR/pyproject.toml" ]]; do
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+done
+PROJECT_ROOT="$SEARCH_DIR"
 
 # ---------------------------------------------------------------------------
 # Examples to benchmark and their case lists, per runtime.

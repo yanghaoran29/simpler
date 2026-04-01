@@ -18,6 +18,7 @@
  */
 
 #include "pto_orchestrator.h"
+#include "pto2_markers.h"
 
 #include <assert.h>
 #include <inttypes.h>
@@ -468,7 +469,45 @@ static TaskOutputTensors submit_task_common(
     int32_t aiv1_kernel_id
 ) {
     CYCLE_COUNT_START();
+    // Whole submit range marker (legacy pair used by existing instruction-count tooling).
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(3, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
+    struct Pto2SubmitMarkerScope {
+        ~Pto2SubmitMarkerScope()
+        {
+            PTO2_SPECIAL_INSTRUCTION_PLAIN(4, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
+        }
+    } marker_scope;
+
+#if defined(PTO2_TRACE_SUBMIT_ARGS_ENABLE) && PTO2_TRACE_SUBMIT_ARGS_ENABLE
+    {
+        int input_count = 0;
+        int output_count = 0;
+        int inout_count = 0;
+        for (int i = 0; i < args.tensor_count(); i++) {
+            TensorArgType ptype = args.tag(i);
+            if (ptype == TensorArgType::INPUT) {
+                input_count++;
+            } else if (ptype == TensorArgType::OUTPUT) {
+                output_count++;
+            } else if (ptype == TensorArgType::INOUT) {
+                inout_count++;
+            }
+        }
+        printf("[submit-args] mixed=(aic=%d,aiv0=%d,aiv1=%d) tensors=%d scalars=%d input=%d output=%d inout=%d\n",
+               aic_kernel_id,
+               aiv0_kernel_id,
+               aiv1_kernel_id,
+               args.tensor_count(),
+               args.scalar_count(),
+               input_count,
+               output_count,
+               inout_count);
+    }
+#endif
+
     TaskOutputTensors result;
+    // === STEP 1: Unified alloc — task slot + packed output buffer ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(5, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     PTO2OutputLayout layout = calculate_output_layout(args);
     PTO2PreparedTask prepared;
     if (!prepare_task(orch, args, layout.total_output_size, active_mask, &prepared)) {
@@ -517,6 +556,7 @@ static TaskOutputTensors submit_task_common(
 
     PTO2FaninBuilder fanin_builder(orch->rings[ring_id].fanin_pool);
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(6, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 
 #if PTO2_PROFILING
@@ -527,13 +567,16 @@ static TaskOutputTensors submit_task_common(
 #endif
 
     // === STEP 2: Sync TensorMap validity and optional cleanup ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(7, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     // Read current last_task_alive from shared memory for this ring
     int32_t sm_last_task_alive = fc.last_task_alive.load(std::memory_order_acquire);
 
     orch->tensor_map.sync_tensormap(task_id, sm_last_task_alive);
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(8, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP(g_orch_sync_cycle);
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(9, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     for (uint32_t i = 0; i < args.explicit_dep_count(); i++) {
         PTO2TaskId dep_task_id = args.explicit_dep(i);
         if (!dep_task_id.is_valid()) {
@@ -570,14 +613,18 @@ static TaskOutputTensors submit_task_common(
         return result;
     }
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(10, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP(g_orch_lookup_cycle);
 
     // === STEP 4: Register outputs/inouts in TensorMap (must be separate from lookup) ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(11, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     register_task_outputs(dep_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(12, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP(g_orch_insert_cycle);
 
     // === STEP 5: Batch-write to GM (single cache line burst) ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(13, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     // Deferred from allocation phase to avoid scattered GM writes that get
     // evicted by TensorMap lookup/insert cache pressure.
     __builtin_prefetch(&task, 1, 1);
@@ -616,12 +663,14 @@ static TaskOutputTensors submit_task_common(
     }
 #endif
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(14, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP(g_orch_args_cycle);
 #if PTO2_ORCH_PROFILING
     g_orch_args_atomic_count += 2;  // fanout_lock.store + fanout_count.store
 #endif
 
     // === STEP 6: push to wiring queue ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(1, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     // Deferred wiring: orchestrator only stores dependency metadata and increments
     // fanout_count. The actual fanout_head wiring (lock + dep_pool + early_finished)
     // is handled asynchronously by scheduler thread 0 via the wiring queue.
@@ -630,6 +679,7 @@ static TaskOutputTensors submit_task_common(
         SPIN_WAIT_HINT();
     }
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(2, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP(g_orch_fanin_cycle);
     CYCLE_COUNT_ORCH_SUBMIT_RECORD(task_id.raw);
 

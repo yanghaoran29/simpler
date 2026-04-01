@@ -42,6 +42,21 @@ void unified_log_info_v(const char *func, int v, const char *fmt, ...);
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
 // Severity-only macros
+#if defined(AICPU_UT_DISABLE_ALL_LOG) && AICPU_UT_DISABLE_ALL_LOG
+#define LOG_ERROR(...)   ((void)0)
+#define LOG_WARN(...)    ((void)0)
+#define LOG_DEBUG(...)   ((void)0)
+#define LOG_INFO_V0(...) ((void)0)
+#define LOG_INFO_V1(...) ((void)0)
+#define LOG_INFO_V2(...) ((void)0)
+#define LOG_INFO_V3(...) ((void)0)
+#define LOG_INFO_V4(...) ((void)0)
+#define LOG_INFO_V5(...) ((void)0)
+#define LOG_INFO_V6(...) ((void)0)
+#define LOG_INFO_V7(...) ((void)0)
+#define LOG_INFO_V8(...) ((void)0)
+#define LOG_INFO_V9(...) ((void)0)
+#else
 #define LOG_ERROR(fmt, ...) unified_log_error(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...) unified_log_warn(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) unified_log_debug(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
@@ -57,5 +72,6 @@ void unified_log_info_v(const char *func, int v, const char *fmt, ...);
 #define LOG_INFO_V7(fmt, ...) unified_log_info_v(__FUNCTION__, 7, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_INFO_V8(fmt, ...) unified_log_info_v(__FUNCTION__, 8, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_INFO_V9(fmt, ...) unified_log_info_v(__FUNCTION__, 9, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
+#endif
 
 #endif  // PLATFORM_UNIFIED_LOG_H_

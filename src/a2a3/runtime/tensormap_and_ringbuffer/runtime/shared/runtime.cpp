@@ -55,6 +55,10 @@ Runtime::Runtime() {
     device_orch_func_name_[0] = '\0';
     device_orch_config_name_[0] = '\0';
 
+#if defined(PTO2_SIM_AICORE_UT)
+    orch_deferred_on_host_ = false;
+#endif
+
     // Initialize kernel binary tracking
     registered_kernel_count_ = 0;
 
