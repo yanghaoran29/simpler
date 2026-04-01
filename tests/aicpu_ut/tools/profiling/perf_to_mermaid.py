@@ -21,6 +21,14 @@ from datetime import datetime
 import importlib.util
 
 
+def _project_root() -> Path:
+    cur = Path(__file__).resolve()
+    for p in cur.parents:
+        if (p / "examples").is_dir() and (p / "tests").is_dir():
+            return p
+    return cur.parent
+
+
 def read_perf_data(filepath):
     """Read performance data from JSON file.
 
@@ -215,7 +223,7 @@ def main():
 
     # If no input file specified, find the latest .json file in outputs/ directory
     if args.input is None:
-        outputs_dir = Path(__file__).parent.parent / "outputs"
+        outputs_dir = _project_root() / "outputs"
         json_files = list(outputs_dir.glob("perf_swimlane_*.json"))
 
         if not json_files:
@@ -276,7 +284,7 @@ def main():
                 timestamp_part = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             # Generate output filename and save to outputs/ directory
-            outputs_dir = Path(__file__).parent.parent / "outputs"
+            outputs_dir = _project_root() / "outputs"
             outputs_dir.mkdir(exist_ok=True)  # Ensure outputs directory exists
             output_path = outputs_dir / f"mermaid_diagram_{timestamp_part}.md"
 

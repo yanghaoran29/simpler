@@ -6,131 +6,30 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-
-BasedOnStyle: LLVM
-Language: Cpp
-
-# --- Indentation ---
+BasedOnStyle: Google
 IndentWidth: 4
-TabWidth: 4
-UseTab: Never
-ContinuationIndentWidth: 4
-IndentCaseLabels: false
-IndentPPDirectives: AfterHash
-NamespaceIndentation: None
+DerivePointerAlignment: false
+PointerAlignment: Left
 
-# --- Column limit ---
+# Max line width before auto-wrapping
 ColumnLimit: 120
 
-# --- Pointer & reference ---
-DerivePointerAlignment: false
-PointerAlignment: Right
-ReferenceAlignment: Right
+# Continuation indent for wrapped lines (function args, etc.)
+ContinuationIndentWidth: 4
 
-# --- Braces ---
-BreakBeforeBraces: Custom
-BraceWrapping:
-  AfterCaseLabel: false
-  AfterClass: false
-  AfterControlStatement: Never
-  AfterEnum: false
-  AfterFunction: false
-  AfterNamespace: false
-  AfterStruct: false
-  AfterUnion: false
-  AfterExternBlock: false
-  BeforeCatch: false
-  BeforeElse: false
-  BeforeLambdaBody: false
-  BeforeWhile: false
-  IndentBraces: false
-  SplitEmptyFunction: false
-  SplitEmptyRecord: false
-  SplitEmptyNamespace: false
+# Alignment after open bracket: DontAlign avoids aligning to bracket
+# Options: Align, DontAlign, AlwaysBreak, BlockIndent
+AlignAfterOpenBracket: DontAlign
 
-# --- Parameter packing & alignment ---
-AlignAfterOpenBracket: BlockIndent
-BinPackParameters: true
-BinPackArguments: true
+# Allow all declaration parameters on the next line
 AllowAllParametersOfDeclarationOnNextLine: true
+
+# Allow all call arguments on the next line
 AllowAllArgumentsOnNextLine: true
 
-# --- Short statements ---
-AllowShortBlocksOnASingleLine: Empty
-AllowShortFunctionsOnASingleLine: All
-AllowShortIfStatementsOnASingleLine: AllIfsAndElse
-AllowShortLambdasOnASingleLine: Empty
-AllowShortLoopsOnASingleLine: false
-AllowShortEnumsOnASingleLine: true
-AllowShortCaseLabelsOnASingleLine: false
+# One parameter per line when wrapping is needed
+BinPackParameters: false
+BinPackArguments: false
 
-# --- Alignment ---
-AlignConsecutiveAssignments: false
-AlignConsecutiveDeclarations: false
-AlignConsecutiveMacros: false
-AlignTrailingComments: true
-AlignEscapedNewlines: Left
-AlignOperands: Align
-
-# --- Constructor initializers ---
-BreakConstructorInitializers: AfterColon
-PackConstructorInitializers: Never
-
-# --- Inheritance ---
-BreakInheritanceList: AfterComma
-
-# --- Template ---
-AlwaysBreakTemplateDeclarations: Yes
-
-# --- Binary & ternary operators ---
-BreakBeforeBinaryOperators: None
-BreakBeforeTernaryOperators: false
-
-# --- Includes ---
-SortIncludes: Never
-IncludeBlocks: Regroup
-IncludeCategories:
-  - Regex: '^<.*>'
-    Priority: 3
-  - Regex: '^".*"'
-    Priority: 1
-
-# --- Namespace ---
-FixNamespaceComments: true
-CompactNamespaces: false
-
-# --- Spaces ---
-SpaceBeforeParens: ControlStatements
-SpaceAfterCStyleCast: false
-SpaceAfterLogicalNot: false
-SpaceAfterTemplateKeyword: true
-SpaceBeforeAssignmentOperators: true
-SpaceBeforeCpp11BracedList: false
-SpaceBeforeCtorInitializerColon: true
-SpaceBeforeInheritanceColon: true
-SpaceBeforeRangeBasedForLoopColon: true
-SpaceInEmptyBlock: false
-SpacesBeforeTrailingComments: 2
-SpacesInAngles: Never
-SpacesInCStyleCastParentheses: false
-SpacesInConditionalStatement: false
-SpacesInContainerLiterals: false
-SpacesInParentheses: false
-SpacesInSquareBrackets: false
-
-# --- Empty lines ---
-MaxEmptyLinesToKeep: 1
-KeepEmptyLinesAtTheStartOfBlocks: false
-EmptyLineAfterAccessModifier: Never
-EmptyLineBeforeAccessModifier: LogicalBlock
-
-# --- Access modifier ---
-AccessModifierOffset: -4
-
-# --- Other ---
-Cpp11BracedListStyle: true
-BreakStringLiterals: true
-ReflowComments: true
-SortUsingDeclarations: true
-InsertBraces: false
-AlwaysBreakAfterReturnType: None
+# Access modifier offset: 1-space indent (matches Google cpplint expectation)
+AccessModifierOffset: -3

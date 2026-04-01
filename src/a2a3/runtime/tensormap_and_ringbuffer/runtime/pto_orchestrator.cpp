@@ -18,6 +18,7 @@
  */
 
 #include "pto_orchestrator.h"
+#include "pto2_markers.h"
 
 #include <assert.h>
 #include <inttypes.h>
@@ -31,6 +32,40 @@
 #include "pto_tensormap.h"
 #include "pto_types.h"
 #include "tensor.h"
+
+static int32_t pto2_alloc_debug_limit() {
+    static int32_t cached = -2;  // -2: uninitialized
+    if (cached != -2) {
+        return cached;
+    }
+    const char* s = getenv("AICPU_UT_PTO2_ALLOC_DEBUG");
+    if (!s || !*s) {
+        cached = 0;
+        return cached;
+    }
+    char* end = nullptr;
+    long v = strtol(s, &end, 10);
+    if (end == s || v <= 0) {
+        cached = 0;
+    } else if (v > 1000000) {
+        cached = 1000000;
+    } else {
+        cached = static_cast<int32_t>(v);
+    }
+    return cached;
+}
+
+static bool pto2_alloc_debug_take_ticket() {
+    static int32_t remaining = -1;  // -1: uninitialized
+    if (remaining < 0) {
+        remaining = pto2_alloc_debug_limit();
+    }
+    if (remaining <= 0) {
+        return false;
+    }
+    remaining--;
+    return true;
+}
 
 // =============================================================================
 // Orchestrator Profiling (compile-time toggle)
@@ -304,6 +339,14 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 TaskOutputTensors pto2_submit_mixed_task(
     PTO2OrchestratorState* orch, const MixedKernels& mixed_kernels, const Arg& args) {
     CYCLE_COUNT_START();
+    // Whole submit range marker (legacy pair used by existing tooling).
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(3, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
+    struct Pto2SubmitMarkerScope {
+        ~Pto2SubmitMarkerScope()
+        {
+            PTO2_SPECIAL_INSTRUCTION_PLAIN(4, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
+        }
+    } marker_scope;
 
     TaskOutputTensors result;
 
@@ -325,6 +368,33 @@ TaskOutputTensors pto2_submit_mixed_task(
         orch->fatal = true;
         return result;
     }
+
+#if defined(PTO2_TRACE_SUBMIT_ARGS_ENABLE) && PTO2_TRACE_SUBMIT_ARGS_ENABLE
+    {
+        int input_count = 0;
+        int output_count = 0;
+        int inout_count = 0;
+        for (int i = 0; i < args.tensor_count(); i++) {
+            TensorArgType ptype = args.tag(i);
+            if (ptype == TensorArgType::INPUT) {
+                input_count++;
+            } else if (ptype == TensorArgType::OUTPUT) {
+                output_count++;
+            } else if (ptype == TensorArgType::INOUT) {
+                inout_count++;
+            }
+        }
+        printf("[submit-args] mixed=(aic=%d,aiv0=%d,aiv1=%d) tensors=%d scalars=%d input=%d output=%d inout=%d\n",
+               mixed_kernels.aic_kernel_id,
+               mixed_kernels.aiv0_kernel_id,
+               mixed_kernels.aiv1_kernel_id,
+               args.tensor_count(),
+               args.scalar_count(),
+               input_count,
+               output_count,
+               inout_count);
+    }
+#endif
 
     // Determine which ring this task belongs to
     uint8_t ring_id = orch->current_ring_id();
@@ -395,15 +465,37 @@ TaskOutputTensors pto2_submit_mixed_task(
     uint64_t offsets[MAX_TENSOR_ARGS] = {};
     uint64_t buffer_sizes[MAX_TENSOR_ARGS] = {};
     int32_t total_output_size = 0;
+    bool alloc_debug = pto2_alloc_debug_take_ticket();
+    int32_t output_idx_for_debug = 0;
     for (int i = 0; i < args.tensor_count(); i++) {
         if (args.tag(i) == TensorArgType::OUTPUT) {
             offsets[i] = total_output_size;
             buffer_sizes[i] = PTO2_ALIGN_UP(args.tensor(i).create_info->buffer_size_bytes(), PTO2_PACKED_OUTPUT_ALIGN);
             total_output_size += buffer_sizes[i];
+            if (alloc_debug) {
+                const TensorCreateInfo* ci = args.tensor(i).create_info;
+                LOG_WARN("[AllocDebug] output[%d] arg_idx=%d dtype=%d ndims=%u raw=%" PRIu64
+                         " aligned=%" PRIu64 " shapes=[%u,%u,%u,%u,%u]",
+                         output_idx_for_debug, i, static_cast<int32_t>(ci->dtype), ci->ndims,
+                         ci->buffer_size_bytes(), buffer_sizes[i],
+                         ci->ndims > 0 ? ci->raw_shapes[0] : 0,
+                         ci->ndims > 1 ? ci->raw_shapes[1] : 0,
+                         ci->ndims > 2 ? ci->raw_shapes[2] : 0,
+                         ci->ndims > 3 ? ci->raw_shapes[3] : 0,
+                         ci->ndims > 4 ? ci->raw_shapes[4] : 0);
+            }
+            output_idx_for_debug++;
         }
+    }
+    if (alloc_debug) {
+        LOG_WARN("[AllocDebug] ring=%u active_mask=0x%x kernels(aic=%d,aiv0=%d,aiv1=%d) tensors=%d scalars=%d total_output=%d",
+                 ring_id, static_cast<unsigned>(active_mask),
+                 normalized.aic_kernel_id, normalized.aiv0_kernel_id, normalized.aiv1_kernel_id,
+                 args.tensor_count(), args.scalar_count(), total_output_size);
     }
 
     // === STEP 1: Unified alloc — task slot + packed output buffer (blocks until available) ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(5, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     PTO2TaskAllocResult alloc_result = allocator.alloc(total_output_size);
     if (alloc_result.failed()) {
         orch->fatal = true;
@@ -457,6 +549,7 @@ TaskOutputTensors pto2_submit_mixed_task(
     PTO2TaskSlotState* fanin_states[PTO2_MAX_INPUTS];
     int32_t fanin_count = 0;
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(6, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP_RECORD(g_orch_alloc_cycle, AicpuPhaseId::ORCH_ALLOC, task_id.raw);
 
 #if PTO2_PROFILING
@@ -467,6 +560,7 @@ TaskOutputTensors pto2_submit_mixed_task(
 #endif
 
     // === STEP 2: Sync TensorMap validity and optional cleanup ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(7, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     // Read current last_task_alive from shared memory for this ring
     int32_t sm_last_task_alive = fc.last_task_alive.load(std::memory_order_acquire);
 
@@ -476,9 +570,11 @@ TaskOutputTensors pto2_submit_mixed_task(
         orch->rings[ring_id].dep_pool.reclaim(*sched, ring_id, sm_last_task_alive);
     }
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(8, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP_RECORD(g_orch_sync_cycle, AicpuPhaseId::ORCH_SYNC, task_id.raw);
 
     // === STEP 3: Lookup inputs + materialize runtime-created outputs ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(9, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     for (int i = 0; i < args.tensor_count(); i++) {
         TensorArgType ptype = args.tag(i);
         if (ptype == TensorArgType::OUTPUT) {
@@ -526,9 +622,11 @@ TaskOutputTensors pto2_submit_mixed_task(
         }
     }
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(10, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP_RECORD(g_orch_lookup_cycle, AicpuPhaseId::ORCH_LOOKUP, task_id.raw);
 
     // === STEP 4: Register outputs/inouts in TensorMap (must be separate from lookup) ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(11, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     {
         for (int i = 0; i < args.tensor_count(); i++) {
             TensorArgType ptype = args.tag(i);
@@ -540,9 +638,11 @@ TaskOutputTensors pto2_submit_mixed_task(
         }
     }
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(12, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP_RECORD(g_orch_insert_cycle, AicpuPhaseId::ORCH_INSERT, task_id.raw);
 
     // === STEP 5: Batch-write to GM (single cache line burst) ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(13, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     // Deferred from allocation phase to avoid scattered GM writes that get
     // evicted by TensorMap lookup/insert cache pressure.
     __builtin_prefetch(&task, 1, 1);
@@ -573,12 +673,14 @@ TaskOutputTensors pto2_submit_mixed_task(
         }
     }
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(14, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP_RECORD(g_orch_args_cycle, AicpuPhaseId::ORCH_PARAMS, task_id.raw);
 #if PTO2_ORCH_PROFILING
     g_orch_args_atomic_count += 2;  // fanout_lock.store + fanout_count.store
 #endif
 
     // === STEP 6: Finalize fanin list ===
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(1, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     // First build the fanin list
     if (sched) {
         auto& rs = sched->ring_sched_states[ring_id];
@@ -642,6 +744,7 @@ TaskOutputTensors pto2_submit_mixed_task(
 #endif
     }
 
+    PTO2_SPECIAL_INSTRUCTION_PLAIN(2, PTO2_INSTR_COUNT_ORCHESTRATOR_ENABLE);
     CYCLE_COUNT_LAP_RECORD(g_orch_fanin_cycle, AicpuPhaseId::ORCH_FANIN, task_id.raw);
 
 #if PTO2_PROFILING
