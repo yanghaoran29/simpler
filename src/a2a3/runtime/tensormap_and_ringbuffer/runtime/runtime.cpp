@@ -53,6 +53,10 @@ Runtime::Runtime() {
     // Initialize device orchestration SO binary
     device_orch_so_size_ = 0;
 
+#if defined(PTO2_SIM_AICORE_UT)
+    orch_deferred_on_host_ = false;
+#endif
+
     // Initialize kernel binary tracking
     registered_kernel_count_ = 0;
 
