@@ -106,6 +106,13 @@ public:
     // Called by the orchestrator thread in device-orch mode.
     void wait_pto2_init_complete() const;
 
+#if defined(PTO2_SIM_AICORE_UT)
+    // UT-only: latch the post-orchestration task count and flip orchestrator_done_
+    // so scheduler threads reach the normal completion exit. Used by the sim driver
+    // in place of on_orchestration_done() (no core transition in UT).
+    void sim_setup_after_host_orch(int32_t total_tasks);
+#endif
+
 private:
     // =========================================================================
     // State

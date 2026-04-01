@@ -57,6 +57,11 @@
 // Scheduler context class
 #include "scheduler/scheduler_context.h"
 
+#if defined(PTO2_SIM_AICORE_UT)
+// AICore simulator entry points (UT only). Drives the scheduler without real cores.
+#include "sim_aicore.h"
+#endif
+
 // Device orchestration function signature (loaded via dlopen).
 // The executor binds the current thread's PTO2Runtime into orchestration TLS
 // before calling the user entry.
@@ -147,6 +152,21 @@ struct AicpuExecutor {
     int32_t init(Runtime *runtime);
     int32_t run(Runtime *runtime);
     void deinit(Runtime *runtime);
+
+#if defined(PTO2_SIM_AICORE_UT)
+    // UT sim driver hooks: drive SchedulerContext directly (sched_ctx_ is private),
+    // bypassing run()'s real-AICore orchestration loop.
+    int32_t sim_init(Runtime *r) { return init(r); }
+    void sim_set_rt(PTO2Runtime *r) { sched_ctx_.bind_runtime(r); }
+    void sim_setup_after_host_orch(int32_t total) { sched_ctx_.sim_setup_after_host_orch(total); }
+    int32_t sim_resolve_and_dispatch(Runtime *r, int32_t thread_idx) {
+        return sched_ctx_.resolve_and_dispatch(r, thread_idx);
+    }
+    int32_t sim_shutdown(Runtime *r) {
+        (void)r;
+        return sched_ctx_.shutdown(0);
+    }
+#endif
 
     ~AicpuExecutor() {
         // Process-wide teardown (the single static instance dies here). Every
@@ -825,3 +845,42 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
     LOG_INFO_V0("%s", "aicpu_execute: Kernel execution completed successfully");
     return 0;
 }
+
+#if defined(PTO2_SIM_AICORE_UT)
+// =============================================================================
+// AICore-simulation UT entry points (declared in sim_aicore.h, called from
+// tests/aicpu_ut/common/sim_run_pto2.cpp). These drive the scheduler directly
+// without real AICore threads; the AICore simulator is reached through the
+// platform_regs.cpp read_reg/write_reg sim hooks.
+// =============================================================================
+extern "C" {
+
+void aicpu_sim_set_rt(PTO2Runtime *r) {
+    rt = r;
+    g_aicpu_executor.sim_set_rt(r);
+}
+
+int aicpu_executor_sim_init(Runtime *r) {
+    int rc = static_cast<int>(g_aicpu_executor.sim_init(r));
+    if (rc == 0) {
+        // Start the simulated-AICore poller alongside scheduler init (only spawns
+        // a thread when task duration > 0; instant-FIN mode needs no poller).
+        pto2_sim_aicore_start_poller();
+    }
+    return rc;
+}
+
+void aicpu_executor_sim_setup_after_host_orch(int32_t total_task_count) {
+    g_aicpu_executor.sim_setup_after_host_orch(total_task_count);
+}
+
+int aicpu_executor_sim_run_resolve_and_dispatch_pto2(Runtime *r, int thread_idx) {
+    return static_cast<int>(g_aicpu_executor.sim_resolve_and_dispatch(r, thread_idx));
+}
+
+int aicpu_executor_sim_shutdown_aicore(Runtime *r) {
+    return static_cast<int>(g_aicpu_executor.sim_shutdown(r));
+}
+
+}  // extern "C"
+#endif  // PTO2_SIM_AICORE_UT

@@ -21,18 +21,44 @@
 #include "host/l2_perf_collector.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cinttypes>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
-#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+
 #include "common/memory_barrier.h"
 #include "common/unified_log.h"
+
+namespace {
+// Portable recursive mkdir (replaces std::filesystem::create_directories,
+// which has no matching static libstdc++ archive on some aarch64 toolchains).
+// Returns 0 on success or if the path already exists; -errno on failure.
+int mkdir_recursive(const std::string &path) {
+    size_t pos = 0;
+    while (pos < path.size()) {
+        size_t slash = path.find('/', pos);
+        if (slash == std::string::npos) {
+            slash = path.size();
+        }
+        std::string prefix = path.substr(0, slash);
+        if (!prefix.empty() && prefix != "/") {
+            if (::mkdir(prefix.c_str(), 0755) != 0 && errno != EEXIST) {
+                return -errno;
+            }
+        }
+        pos = slash + 1;
+    }
+    return 0;
+}
+}  // namespace
 
 // =============================================================================
 // L2PerfCollector Implementation
@@ -541,10 +567,10 @@ int L2PerfCollector::export_swimlane_json() {
     // Step 2: Create output directory (recursively — parent `outputs/` may not
     // yet exist on a clean checkout / standalone run). `output_prefix_` was
     // captured at initialize() time.
-    std::error_code ec;
-    std::filesystem::create_directories(output_prefix_, ec);
-    if (ec) {
-        LOG_ERROR("Error: Failed to create output directory %s: %s", output_prefix_.c_str(), ec.message().c_str());
+    int mkrc = mkdir_recursive(output_prefix_);
+    if (mkrc != 0) {
+        LOG_ERROR(
+            "Error: Failed to create output directory %s: %s", output_prefix_.c_str(), std::strerror(-mkrc));
         return -1;
     }
 

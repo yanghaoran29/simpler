@@ -119,7 +119,14 @@
 #define PTO2_READY_QUEUE_SIZE 65536  // Per-shape queue size
 
 // Wiring queue
+#if defined(PTO2_SIM_AICORE_UT)
+// UT orch-only / sched-prof-only drivers build the whole task graph with no
+// scheduler draining the wiring queue concurrently, so it must hold every
+// submitted task. Sized above the largest default UT case (latency=4096).
+#define PTO2_WRIRING_QUEUE_SIZE 16384
+#else
 #define PTO2_WRIRING_QUEUE_SIZE 1024  // Per-shape queue size
+#endif
 
 // Fanin storage
 #define PTO2_FANIN_INLINE_CAP 64

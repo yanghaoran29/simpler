@@ -30,6 +30,9 @@
 #include "aicpu/platform_regs.h"
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
+#if defined(PTO2_SIM_AICORE_UT)
+#include "sim_aicore.h"
+#endif
 
 static uint64_t g_platform_regs = 0;
 static uint64_t g_platform_pmu_reg_addrs = 0;
@@ -43,6 +46,12 @@ void set_platform_pmu_reg_addrs(uint64_t pmu_regs) { g_platform_pmu_reg_addrs = 
 uint64_t get_platform_pmu_reg_addrs() { return g_platform_pmu_reg_addrs; }
 
 uint64_t read_reg(uint64_t reg_base_addr, RegId reg) {
+#if defined(PTO2_SIM_AICORE_UT)
+    if (reg_base_addr < PTO2_SIM_REG_ADDR_MAX && reg == RegId::COND) {
+        // Sim cores use a 1-based reg base (see handshake synthesis); recover core_id.
+        return pto2_sim_read_cond_reg(static_cast<int32_t>(reg_base_addr) - 1);
+    }
+#endif
     volatile uint32_t *ptr = reinterpret_cast<volatile uint32_t *>(reg_base_addr + reg_offset(reg));
 
     __sync_synchronize();
@@ -56,6 +65,20 @@ uint64_t read_reg(uint64_t reg_base_addr, RegId reg) {
 }
 
 void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value) {
+#if defined(PTO2_SIM_AICORE_UT)
+    if (reg_base_addr < PTO2_SIM_REG_ADDR_MAX && reg == RegId::DATA_MAIN_BASE) {
+        int32_t core_id = static_cast<int32_t>(reg_base_addr) - 1;  // 1-based sim reg base
+        // Scheduler writes the per-core monotonic reg_task_id (range [0, AICORE_EXIT_SIGNAL))
+        // for a dispatch, or a sentinel (AICPU_IDLE_TASK_ID / AICORE_EXIT_SIGNAL) for idle/exit.
+        // The sim core echoes the task id back in COND, so pass it through unchanged.
+        if (value == AICPU_IDLE_TASK_ID || value == AICORE_EXIT_SIGNAL)
+            pto2_sim_aicore_set_idle(core_id);
+        else {
+            pto2_sim_aicore_on_task_received(core_id, static_cast<int32_t>(value));
+        }
+        return;
+    }
+#endif
     volatile uint32_t *ptr = reinterpret_cast<volatile uint32_t *>(reg_base_addr + reg_offset(reg));
 
     __sync_synchronize();
@@ -67,6 +90,10 @@ void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value) {
 }
 
 void platform_init_aicore_regs(uint64_t reg_addr) {
+#if defined(PTO2_SIM_AICORE_UT)
+    if (reg_addr < PTO2_SIM_REG_ADDR_MAX)
+        return;  // sim core: no hardware init
+#endif
     // Both a2a3 and a2a3sim require fast path control to be enabled before use
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_OPEN);
 
@@ -75,6 +102,10 @@ void platform_init_aicore_regs(uint64_t reg_addr) {
 }
 
 int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
+#if defined(PTO2_SIM_AICORE_UT)
+    if (reg_addr < PTO2_SIM_REG_ADDR_MAX)
+        return 0;  // sim core: no hardware deinit
+#endif
     // Send exit signal to AICore
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
 

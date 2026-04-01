@@ -26,6 +26,10 @@
 #include "runtime.h"
 #include "spin_hint.h"
 
+#if defined(PTO2_SIM_AICORE_UT)
+#include "sim_aicore.h"
+#endif
+
 // =============================================================================
 // Cold-path helpers for the main dispatch loop (noinline to reduce hot-loop icache)
 // =============================================================================
@@ -547,6 +551,55 @@ int32_t SchedulerContext::handshake_all_cores(Runtime *runtime) {
         return -1;
     }
 
+#if defined(PTO2_SIM_AICORE_UT)
+    // UT: no real AICore threads to handshake with. Synthesize core discovery:
+    // group cores into clusters of (1 AIC + 2 AIV) and use reg_addr == core_id so
+    // platform read_reg/write_reg route to the AICore simulator (platform_regs.cpp).
+    //
+    // Contiguous core-type layout: the first num_clusters ids [0, num_clusters)
+    // are AIC, the rest [num_clusters, cores_total_num_) are AIV (2 per cluster).
+    // The cluster grouping (1 AIC + 2 AIV) is preserved for MIX dispatch — only the
+    // physical core ids feeding set_cluster change, so a 72-core run yields AIC
+    // 0..23 and AIV 24..71.
+    {
+        (void)all_handshakes;
+        aic_count_ = 0;
+        aiv_count_ = 0;
+        const int32_t num_clusters = cores_total_num_ / 3;
+        for (int32_t c = 0; c < num_clusters; c++) {
+            const int32_t aic_id = c;
+            const int32_t aiv0_id = num_clusters + 2 * c;
+            const int32_t aiv1_id = num_clusters + 2 * c + 1;
+            const int32_t ids[3] = {aic_id, aiv0_id, aiv1_id};
+            for (int32_t k = 0; k < 3; k++) {
+                const int32_t i = ids[k];
+                // 1-based reg base: reg_addr 0 is the "uninitialized" sentinel in
+                // shutdown(), so encode core i as (i+1). platform_regs.cpp sim hooks
+                // recover core_id as (reg_base_addr - 1).
+                core_exec_states_[i].reg_addr = static_cast<uint64_t>(i + 1);
+                pto2_sim_aicore_set_idle(i);
+                // Completion reads core type from the handshake (hank[core_id].core_type)
+                // — the real path gets it from the AICore handshake; the sim must set it
+                // here, else every per-task perf record is mislabelled AIC.
+                all_handshakes[i].core_type = (k == 0) ? CoreType::AIC : CoreType::AIV;
+#if PTO2_PROFILING
+                physical_core_ids_[i] = static_cast<uint32_t>(i);
+#else
+                core_exec_states_[i].worker_id = i;
+                core_exec_states_[i].physical_core_id = static_cast<uint32_t>(i);
+                core_exec_states_[i].core_type = (k == 0) ? CoreType::AIC : CoreType::AIV;
+#endif
+            }
+            aic_worker_ids_[aic_count_++] = aic_id;
+            aiv_worker_ids_[2 * c] = aiv0_id;
+            aiv_worker_ids_[2 * c + 1] = aiv1_id;
+            aiv_count_ += 2;
+        }
+        LOG_INFO_V0("[sim] Core discovery (synthetic): %d AIC, %d AIV", aic_count_, aiv_count_);
+        return 0;
+    }
+#endif
+
     aic_count_ = 0;
     aiv_count_ = 0;
 
@@ -922,6 +975,14 @@ void SchedulerContext::wait_pto2_init_complete() const {
         SPIN_WAIT_HINT();
     }
 }
+
+#if defined(PTO2_SIM_AICORE_UT)
+void SchedulerContext::sim_setup_after_host_orch(int32_t total_tasks) {
+    total_tasks_ = total_tasks;
+    orchestrator_done_ = true;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+#endif
 
 void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
     rt_ = rt;
