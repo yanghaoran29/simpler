@@ -44,6 +44,8 @@ void perf_aicpu_init_profiling(Runtime* runtime);
  * @param finish_time           AICPU timestamp when task completion was observed
  * @param fanout                Pre-extracted successor task ID array (nullptr if none)
  * @param fanout_count          Number of entries in fanout array (0 if none)
+ * @param fanin_count           PTO2 static fanin degree (0 if N/A e.g. host_build_graph)
+ * @param fanin_refcount        PTO2 fanin_refcount snapshot at completion (0 if N/A)
  */
 int perf_aicpu_complete_record(PerfBuffer* perf_buf,
                                 uint32_t expected_reg_task_id,
@@ -53,7 +55,9 @@ int perf_aicpu_complete_record(PerfBuffer* perf_buf,
                                 uint64_t dispatch_time,
                                 uint64_t finish_time,
                                 const uint64_t* fanout,
-                                int32_t fanout_count);
+                                int32_t fanout_count,
+                                int32_t fanin_count,
+                                int32_t fanin_refcount);
 
 /**
  * Switch performance buffer when current buffer is full

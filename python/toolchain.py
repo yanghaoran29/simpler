@@ -10,9 +10,32 @@
 from __future__ import annotations
 
 import os
+import shutil
 from enum import IntEnum
 
 import env_manager
+
+
+def _cmake_host_compiler_from_env(env_name: str, default: str) -> tuple[str, str]:
+    """Split CC/CXX into a CMake-friendly compiler path and optional extra flags.
+
+    Conda and some distros set CC/CXX to a command line like
+    ``gcc -pthread -B /path/to/compiler_compat``. CMake requires
+    ``CMAKE_*_COMPILER`` to name a single executable; extra tokens must be
+    passed via ``CMAKE_*_FLAGS_INIT``.
+    """
+    raw = (os.environ.get(env_name) or default).strip() or default
+    parts = raw.split()
+    exe = parts[0]
+    extra = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    if os.path.isabs(exe) and os.path.isfile(exe):
+        exe_path = exe
+    else:
+        resolved = shutil.which(exe)
+        exe_path = resolved if resolved else exe
+
+    return exe_path, extra
 
 
 # Must match compile_strategy.h
@@ -142,12 +165,17 @@ class Gxx15Toolchain(Toolchain):
 
     def get_cmake_args(self) -> list[str]:
         # Respect CC/CXX environment variables (e.g., CXX=g++-15 on macOS CI)
-        cc = os.environ.get("CC", "gcc")
-        cxx = os.environ.get("CXX", "g++")
-        return [
+        cc, cc_extra = _cmake_host_compiler_from_env("CC", "gcc")
+        cxx, cxx_extra = _cmake_host_compiler_from_env("CXX", "g++")
+        args = [
             f"-DCMAKE_C_COMPILER={cc}",
             f"-DCMAKE_CXX_COMPILER={cxx}",
         ]
+        if cc_extra:
+            args.append(f"-DCMAKE_C_FLAGS_INIT={cc_extra}")
+        if cxx_extra:
+            args.append(f"-DCMAKE_CXX_FLAGS_INIT={cxx_extra}")
+        return args
 
 
 class GxxToolchain(Toolchain):
@@ -162,12 +190,16 @@ class GxxToolchain(Toolchain):
 
     def get_cmake_args(self) -> list[str]:
         # Respect CC/CXX environment variables (e.g., CXX=g++-15 on macOS CI)
-        cc = os.environ.get("CC", "gcc")
-        cxx = os.environ.get("CXX", "g++")
+        cc, cc_extra = _cmake_host_compiler_from_env("CC", "gcc")
+        cxx, cxx_extra = _cmake_host_compiler_from_env("CXX", "g++")
         args = [
             f"-DCMAKE_C_COMPILER={cc}",
             f"-DCMAKE_CXX_COMPILER={cxx}",
         ]
+        if cc_extra:
+            args.append(f"-DCMAKE_C_FLAGS_INIT={cc_extra}")
+        if cxx_extra:
+            args.append(f"-DCMAKE_CXX_FLAGS_INIT={cxx_extra}")
         if self.ascend_home_path:
             args.append(f"-DASCEND_HOME_PATH={self.ascend_home_path}")
         return args

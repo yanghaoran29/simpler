@@ -89,11 +89,19 @@ void dev_log_always(const char* func, const char* fmt, ...);
 // Convenience Macros
 // =============================================================================
 
+#if defined(AICPU_UT_DISABLE_ALL_LOG) && AICPU_UT_DISABLE_ALL_LOG
+#define DEV_DEBUG(...)  ((void)0)
+#define DEV_INFO(...)   ((void)0)
+#define DEV_WARN(...)   ((void)0)
+#define DEV_ERROR(...)  ((void)0)
+#define DEV_ALWAYS(...) ((void)0)
+#else
 #define DEV_DEBUG(fmt, args...) D_DEV_LOGD(TILE_FWK_DEVICE_MACHINE, fmt, ##args)
 #define DEV_INFO(fmt, args...)  D_DEV_LOGI(TILE_FWK_DEVICE_MACHINE, fmt, ##args)
 #define DEV_WARN(fmt, args...)  D_DEV_LOGW(TILE_FWK_DEVICE_MACHINE, fmt, ##args)
 #define DEV_ERROR(fmt, args...) D_DEV_LOGE(TILE_FWK_DEVICE_MACHINE, fmt, ##args)
 #define DEV_ALWAYS(fmt, args...) dev_log_always(__FUNCTION__, fmt, ##args)
+#endif
 
 // =============================================================================
 // Platform-Specific Assertion

@@ -30,6 +30,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdlib>
 
 #include "common/core_type.h"
 #include "pto_ring_buffer.h"
@@ -559,7 +560,9 @@ struct PTO2SchedulerState {
             // Route by active_mask: AIC-containing tasks → buf[0], AIV-only → buf[1]
             PTO2ResourceShape shape = pto2_active_mask_to_shape(slot_state.active_mask);
             if (!local_bufs || !local_bufs[static_cast<int32_t>(shape)].try_push(&slot_state)) {
-                ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
+                if (!ready_queues[static_cast<int32_t>(shape)].push(&slot_state)) {
+                    std::abort();
+                }
             }
             return true;
         }
@@ -582,7 +585,9 @@ struct PTO2SchedulerState {
                 // Local-first: try per-CoreType thread-local buffer before global queue
                 PTO2ResourceShape shape = pto2_active_mask_to_shape(slot_state.active_mask);
                 if (!local_bufs || !local_bufs[static_cast<int32_t>(shape)].try_push(&slot_state)) {
-                    ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+                    if (!ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait)) {
+                        std::abort();
+                    }
                 }
                 return true;
             }

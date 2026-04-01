@@ -135,13 +135,44 @@ int perf_aicpu_complete_record(PerfBuffer* perf_buf,
     uint64_t dispatch_time,
     uint64_t finish_time,
     const uint64_t* fanout,
-    int32_t fanout_count) {
+    int32_t fanout_count,
+    int32_t fanin_count,
+    int32_t fanin_refcount) {
     rmb();
     uint32_t count = perf_buf->count;
     if (count >= PLATFORM_PROF_BUFFER_SIZE) return -1;
 
     PerfRecord* record = &perf_buf->records[count];
-    if (static_cast<uint32_t>(record->task_id) != expected_reg_task_id) return -1;
+    uint32_t observed_reg_task_id = static_cast<uint32_t>(record->task_id);
+    if (observed_reg_task_id != expected_reg_task_id) {
+        // Recovery path: AICore may transiently observe a stale perf_buf->count and
+        // write into the previous slot. If previous slot token matches, copy timing
+        // payload forward so Host-side array remains contiguous.
+        if (count > 0) {
+            PerfRecord* prev = &perf_buf->records[count - 1];
+            uint32_t prev_observed = static_cast<uint32_t>(prev->task_id);
+            if (prev_observed == expected_reg_task_id) {
+                record->start_time = prev->start_time;
+                record->end_time = prev->end_time;
+                record->task_id = prev->task_id;
+                wmb();
+                observed_reg_task_id = expected_reg_task_id;
+            } else {
+                LOG_ERROR("perf record token mismatch: expected=%u observed=%u prev=%u count=%u",
+                    expected_reg_task_id,
+                    observed_reg_task_id,
+                    prev_observed,
+                    count);
+                return -1;
+            }
+        } else {
+            LOG_ERROR("perf record token mismatch at first slot: expected=%u observed=%u count=%u",
+                expected_reg_task_id,
+                observed_reg_task_id,
+                count);
+            return -1;
+        }
+    }
 
     record->task_id = task_id;
     record->func_id = func_id;
@@ -158,6 +189,9 @@ int perf_aicpu_complete_record(PerfBuffer* perf_buf,
     } else {
         record->fanout_count = 0;
     }
+
+    record->fanin_count = fanin_count;
+    record->fanin_refcount = fanin_refcount;
 
     perf_buf->count = count + 1;
     wmb();

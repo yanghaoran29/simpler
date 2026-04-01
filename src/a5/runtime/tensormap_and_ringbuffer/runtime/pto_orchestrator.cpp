@@ -717,7 +717,7 @@ PTO2OrchProfilingData pto2_orchestrator_get_profiling() {
     PTO2OrchProfilingData d;
     d.sync_cycle = g_orch_sync_cycle;
     d.alloc_cycle = g_orch_alloc_cycle;
-    d.params_cycle = g_orch_params_cycle;
+    d.args_cycle = g_orch_params_cycle;
     d.lookup_cycle = g_orch_lookup_cycle;
     d.insert_cycle = g_orch_insert_cycle;
     d.fanin_cycle = g_orch_fanin_cycle;
@@ -726,7 +726,7 @@ PTO2OrchProfilingData pto2_orchestrator_get_profiling() {
     d.alloc_wait_cycle = g_orch_alloc_wait_cycle;
     d.fanin_wait_cycle = g_orch_fanin_wait_cycle;
     d.alloc_atomic_count = g_orch_alloc_atomic_count;
-    d.params_atomic_count = g_orch_params_atomic_count;
+    d.args_atomic_count = g_orch_params_atomic_count;
     d.fanin_atomic_count = g_orch_fanin_atomic_count;
     d.finalize_atomic_count = g_orch_finalize_atomic_count;
     d.scope_end_atomic_count = g_orch_scope_end_atomic_count;
