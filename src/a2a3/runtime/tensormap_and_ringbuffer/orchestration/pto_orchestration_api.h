@@ -40,7 +40,7 @@
 // =============================================================================
 // Tensor Factory Helpers
 // =============================================================================
-
+#ifndef PTO_RUNTIME2_H
 /**
  * Create a Tensor for pre-allocated external memory.
  */
@@ -75,6 +75,17 @@ inline Tensor from_tensor_arg(const ContinuousTensor& t, bool manual_dep = false
     return make_tensor_external(
         reinterpret_cast<void*>(static_cast<uintptr_t>(t.data)), t.shapes, t.ndims, t.dtype, manual_dep, version);
 }
+#endif  // !PTO_RUNTIME2_H
+
+#ifdef PTO_RUNTIME2_H
+// Host / in-process UT: use tensor_factory.h's make_tensor_external (via test_common.h).
+static_assert(
+    CONTINUOUS_TENSOR_MAX_DIMS == RUNTIME_MAX_TENSOR_DIMS, "ContinuousTensor and runtime max dims must match");
+inline Tensor from_tensor_arg(const ContinuousTensor& t, bool manual_dep = false, int32_t version = 0) {
+    return make_tensor_external(
+        reinterpret_cast<void*>(static_cast<uintptr_t>(t.data)), t.shapes, t.ndims, t.dtype, manual_dep, version);
+}
+#endif
 
 // =============================================================================
 // Ops Table and Opaque Runtime
@@ -84,8 +95,13 @@ inline Tensor from_tensor_arg(const ContinuousTensor& t, bool manual_dep = false
  * Forward declaration — the orchestration sees PTO2Runtime as a partial
  * struct whose first field is the ops pointer.  The full definition
  * lives in pto_runtime2.h (used only by runtime .cpp files).
+ *
+ * When pto_runtime2.h is included first (e.g. host UT that links orchestration
+ * in-process), skip the partial typedef/struct below to avoid redefinition.
  */
+#ifndef PTO_RUNTIME2_H
 typedef struct PTO2Runtime PTO2Runtime;
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,6 +121,7 @@ void pto2_framework_bind_runtime(PTO2Runtime* rt);
 }
 #endif
 
+#ifndef PTO_RUNTIME2_H
 /**
  * Function-pointer table for runtime operations.
  * Populated by the runtime; called by orchestration through inline wrappers.
@@ -140,6 +157,7 @@ typedef struct PTO2RuntimeOps {
 struct PTO2Runtime {
     const PTO2RuntimeOps* ops;
 };
+#endif  // !PTO_RUNTIME2_H
 
 // =============================================================================
 // Inline Convenience Wrappers (call through ops table)
@@ -195,12 +213,14 @@ static inline bool pto2_rt_is_fatal() {
 // =============================================================================
 // Logging Macros for Orchestration (call through ops table)
 // =============================================================================
-
+// Skip when full runtime headers already defined LOG_* (e.g. unified_log.h).
+#ifndef PTO_RUNTIME2_H
 #define LOG_ERROR(fmt, ...) pto2_current_runtime()->ops->log_error(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...) pto2_current_runtime()->ops->log_warn(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...) pto2_current_runtime()->ops->log_info(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) pto2_current_runtime()->ops->log_debug(__FUNCTION__, fmt, ##__VA_ARGS__)
 #define LOG_ALWAYS(fmt, ...) pto2_current_runtime()->ops->log_always(__FUNCTION__, fmt, ##__VA_ARGS__)
+#endif
 
 // =============================================================================
 // Cross-Layer Data Access
@@ -261,7 +281,7 @@ static inline void set_tensor_data(const Tensor& tensor, uint32_t ndims, const u
 // =============================================================================
 // C++ Scope Guards and Macros
 // =============================================================================
-
+#ifndef PTO_RUNTIME2_H
 /**
  * RAII Scope Guard (calls through ops table)
  */
@@ -286,6 +306,24 @@ private:  // NOLINT(whitespace/indent)
  *   }
  */
 #define PTO2_SCOPE() if (PTO2_SCOPE_GUARD(); true)
+#else
+// Host UT: test_common.h defines PTO2_SCOPE(rt) for direct runtime; generated
+// orchestration uses PTO2_SCOPE() with TLS + ops table — override here.
+#undef PTO2_SCOPE
+#undef PTO2_SCOPE_GUARD
+class PTO2OrchestrationScopeGuard {
+public:  // NOLINT(whitespace/indent)
+    PTO2OrchestrationScopeGuard() : rt_(pto2_current_runtime()) { rt_->ops->scope_begin(rt_); }
+    ~PTO2OrchestrationScopeGuard() { rt_->ops->scope_end(rt_); }
+
+private:  // NOLINT(whitespace/indent)
+    PTO2Runtime* rt_;
+};
+#define _PTO2_ORCH_SCOPEGUARD_CAT_IMPL(x, y) x##y
+#define _PTO2_ORCH_SCOPEGUARD_CAT(x, y) _PTO2_ORCH_SCOPEGUARD_CAT_IMPL(x, y)
+#define PTO2_SCOPE_GUARD() [[maybe_unused]] PTO2OrchestrationScopeGuard _PTO2_ORCH_SCOPEGUARD_CAT(_orch_scope_, __COUNTER__)
+#define PTO2_SCOPE() if (PTO2_SCOPE_GUARD(); true)
+#endif  // !PTO_RUNTIME2_H
 
 // =============================================================================
 // Orchestration Config

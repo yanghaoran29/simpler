@@ -395,20 +395,18 @@ struct PTO2TensorMap {
         for (int32_t local_id = old_last_task_alive; local_id < new_last_task_alive; local_id++) {
             int32_t task_slot = local_id & (task_window_sizes[ring_id] - 1);
             PTO2TensorMapEntry* cur_entry = task_entry_heads[ring_id][task_slot];
+            PTO2TaskId retired_task_id =
+                pto2_make_task_id(static_cast<uint8_t>(ring_id), static_cast<uint32_t>(local_id));
 
             while (cur_entry != nullptr) {
                 PTO2TensorMapEntry* next_entry = cur_entry->next_in_task;  // Save before clearing
-                // Only remove if this entry belongs to the retiring task
-                // (slot may have been reused by a newer task)
-                debug_assert(cur_entry->producer_task_id ==
-                             pto2_make_task_id(static_cast<uint8_t>(ring_id),
-                                               static_cast<uint32_t>(local_id)));
-                free_entry(*cur_entry);
+                // Slot can be reused by newer tasks before cleanup runs. Remove only entries
+                // for the retiring task id; keep other entries linked in the slot chain.
+                if (cur_entry->producer_task_id == retired_task_id) {
+                    remove_entry(*cur_entry);
+                }
                 cur_entry = next_entry;
             }
-
-            // Clear task's entry head (slot will be reused by local_id + task_window_sizes[ring_id])
-            task_entry_heads[ring_id][task_slot] = nullptr;
         }
     }
 

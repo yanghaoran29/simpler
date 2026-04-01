@@ -1,16 +1,18 @@
 /**
  * @file platform_regs.cpp
- * @brief AICPU register interface - shared implementation
+ * @brief AICPU register interface — set/get, init/deinit, core count
  *
- * Contains platform-agnostic functions shared across all platforms.
- * Platform-specific read_reg/write_reg are in:
- *   sim/aicpu/inner_platform_regs.cpp    -- sparse_reg_ptr mapping for simulation
- *   onboard/aicpu/inner_platform_regs.cpp -- direct MMIO offset for hardware
+ * read_reg/write_reg are provided by:
+ *   sim/aicpu/inner_platform_regs.cpp    (aicpu_ut / a5sim)
+ *   onboard/aicpu/inner_platform_regs.cpp (device)
  */
 
 #include <cstdint>
 #include "aicpu/platform_regs.h"
 #include "common/platform_config.h"
+#if defined(PTO2_SIM_AICORE_UT)
+#include "sim_aicore.h"
+#endif
 
 static uint64_t g_platform_regs = 0;
 
@@ -23,19 +25,23 @@ uint64_t get_platform_regs() {
 }
 
 void platform_init_aicore_regs(uint64_t reg_addr) {
-    // Initialize task dispatch register to idle state
+#if defined(PTO2_SIM_AICORE_UT)
+    if (reg_addr < PTO2_SIM_REG_ADDR_MAX)
+        return;
+#endif
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
 }
 
 void platform_deinit_aicore_regs(uint64_t reg_addr) {
-    // Send exit signal to AICore
+#if defined(PTO2_SIM_AICORE_UT)
+    if (reg_addr < PTO2_SIM_REG_ADDR_MAX)
+        return;
+#endif
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
 
-    // Wait for AICore to acknowledge exit by writing AICORE_EXITED_VALUE to COND
     while (read_reg(reg_addr, RegId::COND) != AICORE_EXITED_VALUE) {
     }
 
-    // Initialize task dispatch register to idle state
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
 }
 

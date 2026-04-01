@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #ifdef __linux__
 #include <sys/mman.h>
 #endif
@@ -43,6 +44,9 @@
 // Register-based communication
 #include "aicpu/platform_regs.h"
 #include "common/platform_config.h"
+#if defined(PTO2_SIM_AICORE_UT)
+#include "sim_aicore.h"
+#endif
 
 // Core type definitions
 #include "common/core_type.h"
@@ -580,9 +584,25 @@ struct AicpuExecutor {
         CoreExecState& core_exec_state = core_exec_states_[core_id];
         PTO2DispatchPayload& payload = s_pto2_payload_per_core[core_id];
         int32_t slot_idx = static_cast<int32_t>(subslot);
-        uint64_t callable_addr = get_function_bin_addr(slot_state.task->kernel_id[slot_idx]);
+        int32_t kernel_id = slot_state.task->kernel_id[slot_idx];
+#if defined(PTO2_SIM_AICORE_UT)
+        // aicpu_ut: stack Runtime is never fed by init_runtime_impl → func_id_to_addr[] stays 0.
+        // Do not reinterpret_cast(0) as CoreCallable* (SIGSEGV in resolved_addr()). Simulation
+        // completion is driven by write_reg → sim_aicore; leave function_bin_addr 0 so device
+        // execute_task fast-path skips (see aicore_executor.cpp).
+        uint64_t callable_addr =
+            (kernel_id >= 0 && kernel_id < RUNTIME_MAX_FUNC_ID) ? get_function_bin_addr(kernel_id) : 0;
+        if (callable_addr == 0) {
+            payload.function_bin_addr = 0;
+        } else {
+            const CoreCallable* callable = reinterpret_cast<const CoreCallable*>(callable_addr);
+            payload.function_bin_addr = callable->resolved_addr();
+        }
+#else
+        uint64_t callable_addr = get_function_bin_addr(kernel_id);
         const CoreCallable* callable = reinterpret_cast<const CoreCallable*>(callable_addr);
         payload.function_bin_addr = callable->resolved_addr();
+#endif
         payload.args = slot_state.payload->dispatch_args;
         core_exec_state.executing_subslot = subslot;
         core_exec_state.executing_slot_state = &slot_state;
@@ -652,6 +672,67 @@ int32_t AicpuExecutor::handshake_all_cores(Runtime* runtime) {
     // Get platform physical cores count for validation
     uint32_t max_physical_cores_count = platform_get_physical_cores_count();
 
+#if defined(PTO2_SIM_AICORE_UT)
+    // aicpu_ut: 无真实 AICore 线程，握手字段无人填写；合成握手并把 reg_addr 设为 core_id（<PTO2_SIM_REG_ADDR_MAX），
+    // 与 a5 inner_platform_regs + sim_aicore 的仿真路径一致（write_reg/read_reg 走 pto2_sim_*）。
+    {
+        static uint64_t s_sim_ut_reg_table[RUNTIME_MAX_WORKER];
+        static std::once_flag s_sim_ut_reg_once;
+        std::call_once(s_sim_ut_reg_once, [] {
+            for (int j = 0; j < RUNTIME_MAX_WORKER; j++) {
+                s_sim_ut_reg_table[j] = static_cast<uint64_t>(j);
+            }
+        });
+        set_platform_regs(reinterpret_cast<uint64_t>(s_sim_ut_reg_table));
+        regs_ = get_platform_regs();
+
+        bool handshake_failed = false;
+        for (int32_t i = 0; i < cores_total_num_; i++) {
+            Handshake* hank = &all_handshakes[i];
+            hank->physical_core_id = static_cast<uint32_t>(i);
+            if (hank->physical_core_id >= max_physical_cores_count) {
+                DEV_ERROR("Sim UT: core %d invalid physical_core_id=%u (platform max=%u)",
+                    i,
+                    hank->physical_core_id,
+                    max_physical_cores_count);
+                handshake_failed = true;
+                continue;
+            }
+            hank->aicore_regs_ready = 1;
+            uint64_t* regs = reinterpret_cast<uint64_t*>(regs_);
+            uint64_t reg_addr = regs[hank->physical_core_id];
+            platform_init_aicore_regs(reg_addr);
+            if (reg_addr < PTO2_SIM_REG_ADDR_MAX) {
+                pto2_sim_aicore_set_idle(static_cast<int32_t>(reg_addr));
+            }
+            hank->aicpu_regs_ready = 1;
+            hank->core_type = (i % 3 == 0) ? CoreType::AIC : CoreType::AIV;
+            OUT_OF_ORDER_STORE_BARRIER();
+            hank->aicore_done = static_cast<uint32_t>(i) + 1u;
+
+            CoreType type = hank->core_type;
+            core_exec_states_[i].reg_addr = reg_addr;
+            core_exec_states_[i].worker_id = i;
+            core_exec_states_[i].physical_core_id = hank->physical_core_id;
+            core_exec_states_[i].core_type = type;
+
+            if (type == CoreType::AIC) {
+                aic_worker_ids_[aic_count_++] = i;
+                DEV_INFO("Core %d: AIC, physical_id=%u, reg_addr=0x%lx (sim UT)", i, hank->physical_core_id, reg_addr);
+            } else {
+                aiv_worker_ids_[aiv_count_++] = i;
+                DEV_INFO("Core %d: AIV, physical_id=%u, reg_addr=0x%lx (sim UT)", i, hank->physical_core_id, reg_addr);
+            }
+        }
+
+        if (handshake_failed) {
+            emergency_shutdown(runtime);
+            return -1;
+        }
+        DEV_INFO("Core discovery complete (sim UT): %d AIC, %d AIV", aic_count_, aiv_count_);
+        return 0;
+    }
+#else
     // Step 2: Wait for all cores to respond, collect core type and register addresses
     bool handshake_failed = false;
     for (int32_t i = 0; i < cores_total_num_; i++) {
@@ -706,6 +787,7 @@ int32_t AicpuExecutor::handshake_all_cores(Runtime* runtime) {
 
     DEV_INFO("Core discovery complete: %d AIC, %d AIV", aic_count_, aiv_count_);
     return 0;
+#endif
 }
 
 /**
@@ -925,7 +1007,15 @@ int32_t AicpuExecutor::init(Runtime* runtime) {
     // Host orchestration: graph already built, no wait needed. Device orch: Thread 3 will set this.
     bool orch_on_host = runtime->get_orch_built_on_host();
     DEV_INFO("Init: orch_built_on_host=%d", orch_on_host ? 1 : 0);
+#if defined(PTO2_SIM_AICORE_UT)
+    if (orch_on_host && runtime->get_orch_deferred_on_host()) {
+        orchestrator_done_ = false;
+    } else {
+        orchestrator_done_ = orch_on_host;
+    }
+#else
     orchestrator_done_ = orch_on_host;
+#endif
 
     // Initial ready tasks will be populated via scheduler ready queues
 
@@ -954,11 +1044,16 @@ int32_t AicpuExecutor::shutdown_aicore(
     for (int32_t i = 0; i < core_num; i++) {
         int32_t core_id = cur_thread_cores[i];
         uint64_t reg_addr = core_exec_states_[core_id].reg_addr;
+#if defined(PTO2_SIM_AICORE_UT)
+        // Sim: reg_addr is the core index (0..N-1), encoded as a small integer < PTO2_SIM_REG_ADDR_MAX.
+        platform_deinit_aicore_regs(reg_addr);
+#else
         if (reg_addr != 0) {
             platform_deinit_aicore_regs(reg_addr);
         } else {
             DEV_ERROR("Thread %d: Core %d has invalid register address", thread_idx, core_id);
         }
+#endif
     }
     DEV_INFO("Thread %d: Shutdown complete", thread_idx);
     return 0;
@@ -2415,3 +2510,67 @@ extern "C" int32_t aicpu_execute(Runtime* runtime) {
     DEV_INFO("%s", "aicpu_execute: Kernel execution completed successfully");
     return 0;
 }
+
+#if defined(PTO2_SIM_AICORE_UT)
+#include "sim_aicore.h"
+
+extern "C" {
+
+int aicpu_executor_sim_init(struct Runtime* runtime) {
+    if (runtime == nullptr) {
+        return -1;
+    }
+    g_aicpu_executor.regs_ = get_platform_regs();
+    int32_t rc = g_aicpu_executor.init(runtime);
+    if (rc != 0) {
+        return rc;
+    }
+    while (!g_aicpu_executor.init_done_.load(std::memory_order_acquire)) {
+        if (g_aicpu_executor.init_failed_.load(std::memory_order_acquire)) {
+            return -1;
+        }
+        SPIN_WAIT_HINT();
+    }
+    return 0;
+}
+
+void aicpu_sim_set_rt(struct PTO2Runtime* pto2_rt) {
+    rt = pto2_rt;
+}
+
+void aicpu_executor_sim_setup_after_host_orch(int32_t total_task_count) {
+    g_aicpu_executor.total_tasks_ = total_task_count > 0 ? total_task_count : 0;
+    // Concurrent sim: schedulers must wait until host orch has populated SM / task count.
+    g_aicpu_executor.orchestrator_done_ = true;
+    std::atomic_thread_fence(std::memory_order_release);
+}
+
+int aicpu_executor_sim_run_resolve_and_dispatch_pto2(struct Runtime* runtime, int thread_idx) {
+    if (runtime == nullptr) {
+        return -1;
+    }
+    return g_aicpu_executor.resolve_and_dispatch_pto2(runtime, thread_idx);
+}
+
+int aicpu_executor_sim_shutdown_aicore(struct Runtime* runtime) {
+    if (runtime == nullptr) {
+        return -1;
+    }
+    int32_t rc = 0;
+    for (int32_t t = 0; t < g_aicpu_executor.sched_thread_num_; t++) {
+        int32_t n = g_aicpu_executor.core_count_per_thread_[t];
+        const int32_t* cores = g_aicpu_executor.core_assignments_[t];
+        if (n > 0 && cores != nullptr) {
+            int32_t trc = g_aicpu_executor.shutdown_aicore(runtime, t, cores, n);
+            if (trc != 0) {
+                rc = trc;
+            }
+        }
+    }
+    g_aicpu_executor.deinit(runtime);
+    return rc;
+}
+
+}  // extern "C"
+
+#endif  // PTO2_SIM_AICORE_UT

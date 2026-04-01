@@ -31,6 +31,15 @@ except ImportError:
     from tools.sched_overhead_analysis import parse_scheduler_threads, run_analysis as run_sched_overhead_analysis
 
 
+def _project_root() -> Path:
+    """Repo root when script lives under tests/aicpu_ut/tools/profiling/."""
+    cur = Path(__file__).resolve()
+    for p in cur.parents:
+        if (p / "examples").is_dir() and (p / "tests").is_dir():
+            return p
+    return cur.parent
+
+
 def normalize_pto2_task_id_int(v):
     """Unsigned 64-bit PTO2 task id (matches host JSON / device ``task_id.raw``).
 
@@ -1013,7 +1022,7 @@ Examples:
 
     # If no input file specified, find the latest .json file in outputs/ directory
     if args.input is None:
-        outputs_dir = Path(__file__).parent.parent / "outputs"
+        outputs_dir = _project_root() / "outputs"
         json_files = list(outputs_dir.glob("perf_swimlane_*.json"))
 
         if not json_files:
@@ -1083,7 +1092,7 @@ Examples:
                 timestamp_part = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             # Generate output filename and save to outputs/ directory
-            outputs_dir = Path(__file__).parent.parent / "outputs"
+            outputs_dir = _project_root() / "outputs"
             outputs_dir.mkdir(exist_ok=True)  # Ensure outputs directory exists
             output_path = outputs_dir / f"merged_swimlane_{timestamp_part}.json"
 

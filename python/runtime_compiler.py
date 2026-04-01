@@ -21,6 +21,14 @@ from toolchain import Aarch64GxxToolchain, CCECToolchain, GxxToolchain, Toolchai
 logger = logging.getLogger(__name__)
 
 
+def _extract_cmake_define(args: list[str], key: str) -> Optional[str]:
+    prefix = f"-D{key}="
+    for a in args:
+        if a.startswith(prefix):
+            return a[len(prefix) :]
+    return None
+
+
 class BuildTarget:
     """CMake build target: composes a Toolchain with a source directory and output name.
 
@@ -324,12 +332,58 @@ class RuntimeCompiler:
         if build_dir is None:
             raise ValueError("build_dir must be set")
 
+        # If compiler path changed for an existing cache, wipe CMake cache first.
+        # Otherwise CMake may re-run configure internally and lose command-line
+        # -D vars (e.g. CUSTOM_INCLUDE_DIRS / CUSTOM_SOURCE_DIRS).
+        expected_cc = _extract_cmake_define(cmake_args, "CMAKE_C_COMPILER")
+        expected_cxx = _extract_cmake_define(cmake_args, "CMAKE_CXX_COMPILER")
+        cache_file = Path(build_dir) / "CMakeCache.txt"
+        if cache_file.is_file() and (expected_cc or expected_cxx):
+            cache_text = cache_file.read_text(encoding="utf-8", errors="replace")
+            old_cc = None
+            old_cxx = None
+            for line in cache_text.splitlines():
+                if line.startswith("CMAKE_C_COMPILER:FILEPATH="):
+                    old_cc = line.split("=", 1)[1].strip()
+                elif line.startswith("CMAKE_CXX_COMPILER:FILEPATH="):
+                    old_cxx = line.split("=", 1)[1].strip()
+            compiler_changed = (
+                (expected_cc and old_cc and os.path.realpath(expected_cc) != os.path.realpath(old_cc))
+                or (expected_cxx and old_cxx and os.path.realpath(expected_cxx) != os.path.realpath(old_cxx))
+            )
+            if compiler_changed:
+                logger.warning(
+                    f"[{platform}] Detected compiler change (cache: cc={old_cc}, cxx={old_cxx}; "
+                    f"expected: cc={expected_cc}, cxx={expected_cxx}), clearing CMake cache."
+                )
+                cmake_files = Path(build_dir) / "CMakeFiles"
+                if cmake_files.is_dir():
+                    shutil.rmtree(cmake_files)
+                if cache_file.exists():
+                    cache_file.unlink()
+
         cmake_cmd = [
             "cmake",
             cmake_source_dir,
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         ] + cmake_args
-        self._run_build_step(cmake_cmd, build_dir, platform, "CMake configuration")
+        cmake_result = subprocess.run(cmake_cmd, cwd=build_dir, check=False, capture_output=True, text=True)
+        if cmake_result.returncode != 0:
+            cache_reset_hint = "You have changed variables that require your cache to be deleted."
+            cmake_stderr = cmake_result.stderr or ""
+            if cache_reset_hint in cmake_stderr:
+                logger.warning(f"[{platform}] CMake requested cache reset, retrying with clean cache.")
+                cmake_files = Path(build_dir) / "CMakeFiles"
+                cache_file = Path(build_dir) / "CMakeCache.txt"
+                if cmake_files.is_dir():
+                    shutil.rmtree(cmake_files)
+                if cache_file.exists():
+                    cache_file.unlink()
+                cmake_result = subprocess.run(cmake_cmd, cwd=build_dir, check=False, capture_output=True, text=True)
+
+        if cmake_result.returncode != 0:
+            self._log_failed_build_output(platform, "CMake configuration", cmake_result)
+            raise RuntimeError(f"CMake configuration failed for {platform} with exit code {cmake_result.returncode}")
 
         build_cmd = [
             "cmake",

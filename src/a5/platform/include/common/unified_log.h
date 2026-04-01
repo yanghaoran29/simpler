@@ -31,11 +31,19 @@ void unified_log_always(const char* func, const char* fmt, ...);
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
 // Convenience macros (automatically capture function name)
+#if defined(AICPU_UT_DISABLE_ALL_LOG) && AICPU_UT_DISABLE_ALL_LOG
+#define LOG_ERROR(...)  ((void)0)
+#define LOG_WARN(...)   ((void)0)
+#define LOG_INFO(...)   ((void)0)
+#define LOG_DEBUG(...)  ((void)0)
+#define LOG_ALWAYS(...) ((void)0)
+#else
 #define LOG_ERROR(fmt, ...) unified_log_error(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...)  unified_log_warn(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...)  unified_log_info(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) unified_log_debug(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
 #define LOG_ALWAYS(fmt, ...) unified_log_always(__FUNCTION__, "[%s:%d] " fmt, __FILENAME__, __LINE__, ##__VA_ARGS__)
+#endif
 
 #endif  // PLATFORM_UNIFIED_LOG_H_
 
