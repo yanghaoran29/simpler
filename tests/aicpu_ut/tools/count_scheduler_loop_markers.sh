@@ -117,6 +117,12 @@ case "${TEST_NAME}" in
             orch) BIN="${BIN_DIR}/test_latency_orch_only_${TEST_IDX}" ;;
             sched) BIN="${BIN_DIR}/test_latency_sched_prof_only_${TEST_IDX}" ;;
         esac ;;
+    test_spmd_mix)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_spmd_mix_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_spmd_mix_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_spmd_mix_sched_prof_only_${TEST_IDX}" ;;
+        esac ;;
     test_paged_attention)
         BIN="${BIN_DIR}/test_pa_concurrent_${TEST_IDX}"
         ;;
@@ -233,6 +239,35 @@ with open(raw_path, "r", encoding="utf-8", errors="replace") as f:
                 "min": int(m.group(6)),
             }
 
+# Some plugin builds may emit phase_insns rows with sessions=0 for newly added
+# marker pairs even when CSV rows are present. Backfill from CSV to keep summary
+# and markdown reports consistent with raw session data.
+phase_name_by_id = {
+    10: "sched_loop",
+    11: "complete",
+    12: "dispatch",
+    13: "idle",
+    15: "idle_spin",
+    16: "task_dispatch",
+    17: "task_complete",
+    18: "sched_resolve_dispatch",
+    19: "dispatch_block",
+    20: "subtask_complete",
+}
+for pid, name in phase_name_by_id.items():
+    vals = [r["insn_count"] for r in rows if r["phase_id"] == pid]
+    if not vals:
+        continue
+    cur = phase_info.get(name)
+    if cur is None or int(cur.get("sessions", 0)) == 0:
+        phase_info[name] = {
+            "phase_id": pid,
+            "sessions": len(vals),
+            "avg": int(sum(vals) / len(vals)),
+            "max": max(vals),
+            "min": min(vals),
+        }
+
 summary_line = ""
 with open(raw_path, "r", encoding="utf-8", errors="replace") as f:
     for line in f:
@@ -295,9 +330,9 @@ if summary_line:
 STEP_ORDER = ["sched_loop", "complete", "dispatch", "idle"]
 STEP_DESC = {
     "sched_loop": "主循环迭代（外层 x23/x24）",
-    "complete":   "完成检查（x25/x26）",
-    "dispatch":   "任务分发（x27/x28）",
-    "idle":       "空闲等待（x29/x30）",
+    "complete":   "完成检查（x26 向前匹配最近 x25）",
+    "dispatch":   "任务分发（x28 向前匹配最近 x25）",
+    "idle":       "空闲等待（x30 向前匹配最近 x25）",
 }
 if phase_info:
     lines += [
@@ -313,16 +348,18 @@ if phase_info:
             )
     lines.append("")
 
-# Per-task probe summary (task_dispatch x21/x22, task_complete x17/x18)
+# Per-task probe summary (task_dispatch x21/x22, subtask_complete x33/x34, task_complete x17/x18)
 td_info = phase_info.get("task_dispatch")
+st_info = phase_info.get("subtask_complete")
 tc_info = phase_info.get("task_complete")
-if td_info or tc_info:
+if td_info or st_info or tc_info:
     lines += [
         "# 任务下发/回收打点（sessions = 触发次数 = 任务数）",
         f"  {'打点':<16} {'sessions':>8}  {'total_insns':>12}  {'avg':>8}  {'max':>8}  {'min':>8}  说明",
     ]
     for name, info, desc in [
         ("task_dispatch", td_info, "首次下发（next_block_idx==0, x21/x22）"),
+        ("subtask_complete", st_info, "子任务完成（x33/x34）"),
         ("task_complete", tc_info, "任务完成（mixed_complete==true, x17/x18）"),
     ]:
         if info:
@@ -334,10 +371,52 @@ if td_info or tc_info:
         else:
             s = avg = mx = mn = total = 0
         lines.append(f"  {name:<16} {s:>8}  {total:>12}  {avg:>8}  {mx:>8}  {mn:>8}  {desc}")
-    td_s = td_info["sessions"] if td_info else 0
-    tc_s = tc_info["sessions"] if tc_info else 0
-    match = "✓" if td_s == tc_s else "✗ MISMATCH"
-    lines.append(f"  下发 == 回收: {match}")
+    lines.append("")
+
+# x15/x16 whole resolve_and_dispatch_pto2 window summary + per-cpu breakdown
+slot_info = phase_info.get("sched_resolve_dispatch")
+if slot_info:
+    lines += [
+        "# x15/x16 打点（sched_resolve_dispatch）统计",
+        f"  sessions={slot_info['sessions']} total_insns={slot_info['sessions'] * slot_info['avg']} "
+        f"avg={slot_info['avg']} max={slot_info['max']} min={slot_info['min']}",
+        "  说明: resolve_and_dispatch_pto2 函数入口/出口窗口（x15/x16）",
+        "  按 cpu_id：",
+    ]
+    slot_rows = [r for r in rows if r["phase_id"] == slot_info["phase_id"]]
+    slot_by_cpu = defaultdict(list)
+    for r in slot_rows:
+        slot_by_cpu[r["cpu_id"]].append(r["insn_count"])
+    for cid in sorted(slot_by_cpu.keys()):
+        cc = slot_by_cpu[cid]
+        s = sum(cc)
+        lines.append(
+            f"    cpu_id={cid}: sessions={len(cc)} 合计指令={s} "
+            f"min={min(cc)} max={max(cc)} avg={s / len(cc):.2f}"
+        )
+    lines.append("")
+
+# x31/x32 per-block dispatch summary + per-cpu breakdown
+blk_info = phase_info.get("dispatch_block")
+if blk_info:
+    lines += [
+        "# x31/x32 打点（dispatch_block）统计",
+        f"  sessions={blk_info['sessions']} total_insns={blk_info['sessions'] * blk_info['avg']} "
+        f"avg={blk_info['avg']} max={blk_info['max']} min={blk_info['min']}",
+        "  说明: 每次实际 block dispatch（do-while 单次迭代）触发一次",
+        "  按 cpu_id：",
+    ]
+    blk_rows = [r for r in rows if r["phase_id"] == blk_info["phase_id"]]
+    blk_by_cpu = defaultdict(list)
+    for r in blk_rows:
+        blk_by_cpu[r["cpu_id"]].append(r["insn_count"])
+    for cid in sorted(blk_by_cpu.keys()):
+        cc = blk_by_cpu[cid]
+        s = sum(cc)
+        lines.append(
+            f"    cpu_id={cid}: sessions={len(cc)} 合计指令={s} "
+            f"min={min(cc)} max={max(cc)} avg={s / len(cc):.2f}"
+        )
     lines.append("")
 
 lines += [

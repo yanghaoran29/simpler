@@ -664,7 +664,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                                 dispatch_timestamps_[core_id],
                                 finish_ts,
                                 fanout_arr,
-                                prev_task->fanout_count) != 0) {
+                                prev_task->fanout_count,
+                                0,
+                                0) != 0) {
                             DEV_ERROR("Core %d: perf_aicpu_complete_record failed for implicit task %d",
                                 core_id,
                                 prev_running_id);
@@ -686,7 +688,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             dispatch_timestamps_[core_id],
                             finish_ts,
                             fanout_arr,
-                            task->fanout_count) != 0) {
+                            task->fanout_count,
+                            0,
+                            0) != 0) {
                         DEV_ERROR("Core %d: perf_aicpu_complete_record failed for task %d", core_id, completed_task_id);
                     }
                     dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();
@@ -796,7 +800,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                                 dispatch_timestamps_[core_id],
                                 finish_ts,
                                 fanout_arr,
-                                prev_task->fanout_count) != 0) {
+                                prev_task->fanout_count,
+                                0,
+                                0) != 0) {
                             DEV_ERROR("Core %d: perf_aicpu_complete_record failed for implicit task %d",
                                 core_id,
                                 prev_running_id);
@@ -848,7 +854,9 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             dispatch_timestamps_[core_id],
                             finish_ts,
                             fanout_arr,
-                            task->fanout_count) != 0) {
+                            task->fanout_count,
+                            0,
+                            0) != 0) {
                         DEV_ERROR("Core %d: perf_aicpu_complete_record failed for task %d", core_id, completed_task_id);
                     }
                     dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();

@@ -56,7 +56,7 @@ def parse_trace_sessions(path):
     vals = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            m = re.search(r"^session\[(\d+)\]:\s*(\d+)\s*$", line.strip())
+            m = re.search(r"^session\[(\d+)\]:\s*(-?\d+)\s*$", line.strip())
             if m:
                 vals.append(int(m.group(2)))
     return vals

@@ -48,31 +48,40 @@ static int g_sched_phases_mode;
 static int g_insn_trace;
 static char* g_insn_trace_path;
 static FILE* g_insn_trace_fp;
-static uint64_t g_between_markers_insns;
-static uint64_t g_between_markers_sessions;
 typedef struct {
     uint64_t session_id;
     uint32_t phase_id;
     uint32_t cpu_id;
     uint64_t insn_count;
 } MarkerSession;
-static MarkerSession* g_marker_sessions;
-static size_t g_marker_sessions_count;
-static size_t g_marker_sessions_cap;
-/* Marker/session state must be updated atomically w.r.t. concurrent plugin callbacks. */
-static GMutex g_marker_mu;
-static int g_marker_mu_inited;
+typedef struct {
+    uint64_t between_markers_insns;
+    uint64_t between_markers_sessions;
+    MarkerSession* sessions;
+    size_t sessions_count;
+    size_t sessions_cap;
+} VcpuMarkerState;
+static VcpuMarkerState g_vcpu_marker_state[MAX_VCPU];
 static int64_t g_active_marker_session_stack[MAX_VCPU][MAX_MARKER_STACK];
 static uint32_t g_active_marker_phase_stack[MAX_VCPU][MAX_MARKER_STACK];
 static uint32_t g_active_marker_depth[MAX_VCPU];
+/* Scheduler step backward-match state:
+ * on x26/x28/x30, use nearest previous x25 on the same vCPU. */
+static uint64_t g_sched_since_x25[MAX_VCPU];
+static uint8_t g_sched_have_x25[MAX_VCPU];
+typedef struct {
+    uint64_t cnt;
+    uint64_t sum;
+    uint64_t max;
+    uint64_t min;
+} PhaseAgg;
+/* per-vCPU aggregated sessions for complete/dispatch/idle backward-match */
+static PhaseAgg g_sched_backmatch_agg[MAX_VCPU][3];
 
 typedef struct {
     char* mnemonic;
     uint64_t count;
 } InsnTypeStat;
-static InsnTypeStat* g_insn_type_stats;
-static size_t g_insn_type_stats_count;
-static size_t g_insn_type_stats_cap;
 typedef struct {
     uint64_t vaddr;
     uint64_t total;
@@ -84,10 +93,16 @@ typedef struct {
     uint64_t load;
     uint64_t store;
 } MemAddrStat;
-static GHashTable* g_mem_addr_table;
-static uint64_t g_mem_total;
-static uint64_t g_mem_load_total;
-static uint64_t g_mem_store_total;
+typedef struct {
+    InsnTypeStat* insn_type_stats;
+    size_t insn_type_stats_count;
+    size_t insn_type_stats_cap;
+    GHashTable* mem_addr_table;
+    uint64_t mem_total;
+    uint64_t mem_load_total;
+    uint64_t mem_store_total;
+} VcpuStatsState;
+static VcpuStatsState g_vcpu_stats_state[MAX_VCPU];
 
 typedef struct {
     uint32_t phase_id;
@@ -110,25 +125,59 @@ static const MarkerPair g_marker_pairs_phases[] = {
     {6, 0xaa010021u, 0xaa020042u, "fanin"},
 };
 
-/* Scheduler loop phases: outer loop (x23/x24) + per-step sub-phases (x25-x30).
+/* Scheduler loop phases: outer loop (x23/x24) + per-step sub-phases.
  * Encodings for orr xN, xN, xN (AArch64): 0xaa<N>0<hi2><lo8>
  *   x25=0xaa190339 x26=0xaa1a035a x27=0xaa1b037b x28=0xaa1c039c
  *   x29=0xaa1d03bd x30=0xaa1e03de
+ * Step accounting policy (backward matching):
+ *   complete: when hitting x26, count from nearest previous x25 on same vCPU
+ *   dispatch: when hitting x28, count from nearest previous x25 on same vCPU
+ *   idle:     when hitting x30, count from nearest previous x25 on same vCPU
  * Optional spin window:
  *   idle_spin: x19/x20
+ * Whole scheduler resolve+dispatch function window:
+ *   sched_resolve_dispatch: x15/x16 (resolve_and_dispatch_pto2 entry/exit)
+ * Per-block dispatch-body probe:
+ *   dispatch_block: x31/x32 under marker-id mapping
+ *                   (31 -> and x1,x1,x1 ; 32 -> and x2,x2,x2)
  * Per-task probes (sessions == task count):
  *   task_dispatch: x21/x22 (fires once per task first-dispatch, next_block_idx==0)
+ *   subtask_complete: x33/x34 under marker-id mapping
+ *                     (33 -> and x3,x3,x3 ; 34 -> and x4,x4,x4)
  *   task_complete: x17/x18 (fires once per task full-completion, mixed_complete==true)
  * Activated by sched_phases=1 plugin argument. */
 static const MarkerPair g_marker_pairs_sched_phases[] = {
     {10, 0xaa1702f7u, 0xaa180318u, "sched_loop"},
     {11, 0xaa190339u, 0xaa1a035au, "complete"},
-    {12, 0xaa1b037bu, 0xaa1c039cu, "dispatch"},
-    {13, 0xaa1d03bdu, 0xaa1e03deu, "idle"},
+    {12, 0xaa190339u, 0xaa1c039cu, "dispatch"},
+    {13, 0xaa190339u, 0xaa1e03deu, "idle"},
     {15, 0xaa130273u, 0xaa140294u, "idle_spin"},
+    {18, 0xaa0f01efu, 0xaa100210u, "sched_resolve_dispatch"},
+    {19, 0x8a010021u, 0x8a020042u, "dispatch_block"},
     {16, 0xaa1502b5u, 0xaa1602d6u, "task_dispatch"},
+    {20, 0x8a030063u, 0x8a040084u, "subtask_complete"},
     {17, 0xaa110231u, 0xaa120252u, "task_complete"},
 };
+
+/* AArch64 marker encodings used by scheduler step backward matching. */
+#define ENC_ORR_X25_SELF 0xaa190339u
+#define ENC_ORR_X26_SELF 0xaa1a035au
+#define ENC_ORR_X23_SELF 0xaa1702f7u
+#define ENC_ORR_X24_SELF 0xaa180318u
+#define ENC_ORR_X19_SELF 0xaa130273u
+#define ENC_ORR_X20_SELF 0xaa140294u
+#define ENC_ORR_X15_SELF 0xaa0f01efu
+#define ENC_ORR_X16_SELF 0xaa100210u
+#define ENC_ORR_X17_SELF 0xaa110231u
+#define ENC_ORR_X18_SELF 0xaa120252u
+#define ENC_ORR_X21_SELF 0xaa1502b5u
+#define ENC_ORR_X22_SELF 0xaa1602d6u
+#define ENC_ORR_X28_SELF 0xaa1c039cu
+#define ENC_ORR_X30_SELF 0xaa1e03deu
+#define ENC_AND_X1_SELF 0x8a010021u
+#define ENC_AND_X2_SELF 0x8a020042u
+#define ENC_AND_X3_SELF 0x8a030063u
+#define ENC_AND_X4_SELF 0x8a040084u
 
 static const MarkerPair* g_marker_pairs = g_marker_pairs_default;
 static size_t g_marker_pair_count = sizeof(g_marker_pairs_default) / sizeof(g_marker_pairs_default[0]);
@@ -155,22 +204,98 @@ static TNode* g_root_accum;
 
 static int marker_append_session(uint32_t cpu_id, uint32_t phase_id)
 {
-    if (g_marker_sessions_count == g_marker_sessions_cap) {
-        size_t new_cap = (g_marker_sessions_cap == 0) ? 1024 : (g_marker_sessions_cap * 2);
-        MarkerSession* ns = realloc(g_marker_sessions, new_cap * sizeof(MarkerSession));
+    if (cpu_id >= MAX_VCPU) {
+        cpu_id = 0;
+    }
+    VcpuMarkerState* st = &g_vcpu_marker_state[cpu_id];
+    if (st->sessions_count == st->sessions_cap) {
+        size_t new_cap = (st->sessions_cap == 0) ? 1024 : (st->sessions_cap * 2);
+        MarkerSession* ns = realloc(st->sessions, new_cap * sizeof(MarkerSession));
         if (!ns) {
             return -1;
         }
-        g_marker_sessions = ns;
-        g_marker_sessions_cap = new_cap;
+        st->sessions = ns;
+        st->sessions_cap = new_cap;
     }
-    size_t idx = g_marker_sessions_count++;
-    g_marker_sessions[idx].session_id = g_between_markers_sessions + 1;
-    g_marker_sessions[idx].phase_id = phase_id;
-    g_marker_sessions[idx].cpu_id = cpu_id;
-    g_marker_sessions[idx].insn_count = 0;
-    g_between_markers_sessions++;
+    size_t idx = st->sessions_count++;
+    st->sessions[idx].session_id = st->between_markers_sessions + 1;
+    st->sessions[idx].phase_id = phase_id;
+    st->sessions[idx].cpu_id = cpu_id;
+    st->sessions[idx].insn_count = 0;
+    st->between_markers_sessions++;
     return (int)idx;
+}
+
+static inline void sched_backmatch_agg_add(unsigned int cpu_index, uint32_t slot, uint64_t insn_count)
+{
+    if (cpu_index >= MAX_VCPU || slot >= 3) {
+        return;
+    }
+    PhaseAgg* a = &g_sched_backmatch_agg[cpu_index][slot];
+    a->cnt++;
+    a->sum += insn_count;
+    if (a->cnt == 1 || insn_count > a->max) {
+        a->max = insn_count;
+    }
+    if (a->cnt == 1 || insn_count < a->min) {
+        a->min = insn_count;
+    }
+    g_vcpu_marker_state[cpu_index].between_markers_sessions++;
+}
+
+static inline void marker_start_phase(unsigned int cpu_index, uint32_t phase_id)
+{
+    uint32_t d = g_active_marker_depth[cpu_index];
+    if (d >= MAX_MARKER_STACK) {
+        return;
+    }
+    int idx = marker_append_session((uint32_t)cpu_index, phase_id);
+    if (idx >= 0) {
+        g_active_marker_session_stack[cpu_index][d] = idx;
+        g_active_marker_phase_stack[cpu_index][d] = phase_id;
+        g_active_marker_depth[cpu_index] = d + 1;
+    }
+}
+
+static inline void marker_end_phase(unsigned int cpu_index, uint32_t phase_id)
+{
+    uint32_t d = g_active_marker_depth[cpu_index];
+    while (d > 0) {
+        uint32_t top = d - 1;
+        if (g_active_marker_phase_stack[cpu_index][top] == phase_id) {
+            g_active_marker_depth[cpu_index] = top;
+            break;
+        }
+        d--;
+    }
+}
+
+static inline int sched_fast_start_phase(uint32_t enc, uint32_t* phase_id)
+{
+    switch (enc) {
+        case ENC_ORR_X23_SELF: *phase_id = 10; return 1;
+        case ENC_ORR_X19_SELF: *phase_id = 15; return 1;
+        case ENC_ORR_X15_SELF: *phase_id = 18; return 1;
+        case ENC_AND_X1_SELF:  *phase_id = 19; return 1;
+        case ENC_ORR_X21_SELF: *phase_id = 16; return 1;
+        case ENC_AND_X3_SELF:  *phase_id = 20; return 1;
+        case ENC_ORR_X17_SELF: *phase_id = 17; return 1;
+        default: return 0;
+    }
+}
+
+static inline int sched_fast_end_phase(uint32_t enc, uint32_t* phase_id)
+{
+    switch (enc) {
+        case ENC_ORR_X24_SELF: *phase_id = 10; return 1;
+        case ENC_ORR_X20_SELF: *phase_id = 15; return 1;
+        case ENC_ORR_X16_SELF: *phase_id = 18; return 1;
+        case ENC_AND_X2_SELF:  *phase_id = 19; return 1;
+        case ENC_ORR_X22_SELF: *phase_id = 16; return 1;
+        case ENC_AND_X4_SELF:  *phase_id = 20; return 1;
+        case ENC_ORR_X18_SELF: *phase_id = 17; return 1;
+        default: return 0;
+    }
 }
 
 static int insn_type_cmp_desc(const void* a, const void* b)
@@ -195,32 +320,41 @@ static int insn_type_cmp_desc(const void* a, const void* b)
     return strcmp(x->mnemonic, y->mnemonic);
 }
 
-static void insn_type_record(const char* mnemonic)
+static void insn_type_record_to(InsnTypeStat** stats, size_t* count, size_t* cap, const char* mnemonic, uint64_t delta)
 {
     if (!mnemonic || !*mnemonic) {
         return;
     }
-    for (size_t i = 0; i < g_insn_type_stats_count; i++) {
-        if (strcmp(g_insn_type_stats[i].mnemonic, mnemonic) == 0) {
-            g_insn_type_stats[i].count++;
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp((*stats)[i].mnemonic, mnemonic) == 0) {
+            (*stats)[i].count += delta;
             return;
         }
     }
-    if (g_insn_type_stats_count == g_insn_type_stats_cap) {
-        size_t new_cap = g_insn_type_stats_cap ? g_insn_type_stats_cap * 2 : 64;
-        InsnTypeStat* ns = realloc(g_insn_type_stats, new_cap * sizeof(InsnTypeStat));
+    if (*count == *cap) {
+        size_t new_cap = *cap ? (*cap * 2) : 64;
+        InsnTypeStat* ns = realloc(*stats, new_cap * sizeof(InsnTypeStat));
         if (!ns) {
             return;
         }
-        g_insn_type_stats = ns;
-        g_insn_type_stats_cap = new_cap;
+        *stats = ns;
+        *cap = new_cap;
     }
-    g_insn_type_stats[g_insn_type_stats_count].mnemonic = strdup(mnemonic);
-    if (!g_insn_type_stats[g_insn_type_stats_count].mnemonic) {
+    (*stats)[*count].mnemonic = strdup(mnemonic);
+    if (!(*stats)[*count].mnemonic) {
         return;
     }
-    g_insn_type_stats[g_insn_type_stats_count].count = 1;
-    g_insn_type_stats_count++;
+    (*stats)[*count].count = delta;
+    (*count)++;
+}
+
+static void insn_type_record(unsigned int cpu_index, const char* mnemonic)
+{
+    if (cpu_index >= MAX_VCPU) {
+        cpu_index = 0;
+    }
+    VcpuStatsState* st = &g_vcpu_stats_state[cpu_index];
+    insn_type_record_to(&st->insn_type_stats, &st->insn_type_stats_count, &st->insn_type_stats_cap, mnemonic, 1);
 }
 
 static int mem_addr_cmp_desc(const void* a, const void* b)
@@ -242,13 +376,17 @@ static int mem_addr_cmp_desc(const void* a, const void* b)
     return 0;
 }
 
-static void mem_addr_record(uint64_t vaddr, bool is_store)
+static void mem_addr_record(unsigned int cpu_index, uint64_t vaddr, bool is_store)
 {
-    if (!g_mem_addr_table) {
-        g_mem_addr_table = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
+    if (cpu_index >= MAX_VCPU) {
+        cpu_index = 0;
+    }
+    VcpuStatsState* st = &g_vcpu_stats_state[cpu_index];
+    if (!st->mem_addr_table) {
+        st->mem_addr_table = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
     }
     uint64_t key_tmp = vaddr;
-    MemAddrStat* stat = (MemAddrStat*)g_hash_table_lookup(g_mem_addr_table, &key_tmp);
+    MemAddrStat* stat = (MemAddrStat*)g_hash_table_lookup(st->mem_addr_table, &key_tmp);
     if (!stat) {
         uint64_t* key = g_new(uint64_t, 1);
         MemAddrStat* val = g_new0(MemAddrStat, 1);
@@ -258,7 +396,7 @@ static void mem_addr_record(uint64_t vaddr, bool is_store)
             return;
         }
         *key = vaddr;
-        g_hash_table_insert(g_mem_addr_table, key, val);
+        g_hash_table_insert(st->mem_addr_table, key, val);
         stat = val;
     }
     stat->total++;
@@ -267,12 +405,104 @@ static void mem_addr_record(uint64_t vaddr, bool is_store)
     } else {
         stat->load++;
     }
-    g_mem_total++;
+    st->mem_total++;
     if (is_store) {
-        g_mem_store_total++;
+        st->mem_store_total++;
     } else {
-        g_mem_load_total++;
+        st->mem_load_total++;
     }
+}
+
+static void build_global_insn_type_stats(InsnTypeStat** out_stats, size_t* out_count, size_t* out_cap)
+{
+    if (!out_stats || !out_count || !out_cap) {
+        return;
+    }
+    *out_stats = NULL;
+    *out_count = 0;
+    *out_cap = 0;
+    for (unsigned int c = 0; c < MAX_VCPU; c++) {
+        VcpuStatsState* st = &g_vcpu_stats_state[c];
+        for (size_t i = 0; i < st->insn_type_stats_count; i++) {
+            const char* m = st->insn_type_stats[i].mnemonic;
+            uint64_t delta = st->insn_type_stats[i].count;
+            insn_type_record_to(out_stats, out_count, out_cap, m, delta);
+        }
+    }
+}
+
+static void free_insn_type_stats_array(InsnTypeStat* stats, size_t count)
+{
+    if (!stats) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(stats[i].mnemonic);
+    }
+    free(stats);
+}
+
+static void mem_addr_accumulate_to(GHashTable* dst, uint64_t vaddr, const MemAddrStat* src)
+{
+    if (!dst || !src) {
+        return;
+    }
+    uint64_t key_tmp = vaddr;
+    MemAddrStat* stat = (MemAddrStat*)g_hash_table_lookup(dst, &key_tmp);
+    if (!stat) {
+        uint64_t* key = g_new(uint64_t, 1);
+        MemAddrStat* val = g_new0(MemAddrStat, 1);
+        if (!key || !val) {
+            g_free(key);
+            g_free(val);
+            return;
+        }
+        *key = vaddr;
+        g_hash_table_insert(dst, key, val);
+        stat = val;
+    }
+    stat->total += src->total;
+    stat->load += src->load;
+    stat->store += src->store;
+}
+
+static GHashTable* build_global_mem_addr_table(uint64_t* out_total, uint64_t* out_load, uint64_t* out_store)
+{
+    GHashTable* dst = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
+    if (!dst) {
+        return NULL;
+    }
+    uint64_t total = 0;
+    uint64_t load = 0;
+    uint64_t store = 0;
+    for (unsigned int c = 0; c < MAX_VCPU; c++) {
+        VcpuStatsState* st = &g_vcpu_stats_state[c];
+        total += st->mem_total;
+        load += st->mem_load_total;
+        store += st->mem_store_total;
+        if (!st->mem_addr_table) {
+            continue;
+        }
+        GHashTableIter iter;
+        gpointer k = NULL;
+        gpointer v = NULL;
+        g_hash_table_iter_init(&iter, st->mem_addr_table);
+        while (g_hash_table_iter_next(&iter, &k, &v)) {
+            uint64_t addr = *(uint64_t*)k;
+            MemAddrStat* src = (MemAddrStat*)v;
+            mem_addr_accumulate_to(dst, addr, src);
+        }
+    }
+    if (out_total) {
+        *out_total = total;
+    }
+    if (out_load) {
+        *out_load = load;
+    }
+    if (out_store) {
+        *out_store = store;
+    }
+    return dst;
 }
 
 /* Guest link-time offset: guest_pc - bias == nm symbol file address (learned at runtime). */
@@ -708,48 +938,76 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
     if (cpu_index >= MAX_VCPU) {
         cpu_index = 0;
     }
-    g_mutex_lock(&g_marker_mu);
-    for (size_t i = 0; i < g_marker_pair_count; i++) {
-        if (enc == g_marker_pairs[i].start_enc) {
-            uint32_t d = g_active_marker_depth[cpu_index];
-            if (d < MAX_MARKER_STACK) {
-                int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
-                if (idx >= 0) {
-                    g_active_marker_session_stack[cpu_index][d] = idx;
-                    g_active_marker_phase_stack[cpu_index][d] = g_marker_pairs[i].phase_id;
-                    g_active_marker_depth[cpu_index] = d + 1;
-                }
-            }
-            g_mutex_unlock(&g_marker_mu);
+    if (g_sched_phases_mode) {
+        if (enc == ENC_ORR_X25_SELF) {
+            g_sched_have_x25[cpu_index] = 1;
+            g_sched_since_x25[cpu_index] = 0;
             return;
         }
-    }
-    for (size_t i = 0; i < g_marker_pair_count; i++) {
-        if (enc == g_marker_pairs[i].end_enc) {
-            uint32_t d = g_active_marker_depth[cpu_index];
-            while (d > 0) {
-                uint32_t top = d - 1;
-                if (g_active_marker_phase_stack[cpu_index][top] == g_marker_pairs[i].phase_id) {
-                    g_active_marker_depth[cpu_index] = top;
-                    break;
-                }
-                d--;
+        if (enc == ENC_ORR_X26_SELF) {
+            if (g_sched_have_x25[cpu_index]) {
+                sched_backmatch_agg_add(cpu_index, 0, g_sched_since_x25[cpu_index]);  /* complete */
             }
-            g_mutex_unlock(&g_marker_mu);
+            return;
+        }
+        if (enc == ENC_ORR_X28_SELF) {
+            if (g_sched_have_x25[cpu_index]) {
+                sched_backmatch_agg_add(cpu_index, 1, g_sched_since_x25[cpu_index]);  /* dispatch */
+            }
+            return;
+        }
+        if (enc == ENC_ORR_X30_SELF) {
+            if (g_sched_have_x25[cpu_index]) {
+                sched_backmatch_agg_add(cpu_index, 2, g_sched_since_x25[cpu_index]);  /* idle */
+            }
+            return;
+        }
+        uint32_t pid = 0;
+        if (sched_fast_start_phase(enc, &pid)) {
+            marker_start_phase(cpu_index, pid);
+            return;
+        }
+        if (sched_fast_end_phase(enc, &pid)) {
+            marker_end_phase(cpu_index, pid);
+            return;
+        }
+    } else {
+        bool handled_start = false;
+        for (size_t i = 0; i < g_marker_pair_count; i++) {
+            if (enc == g_marker_pairs[i].start_enc) {
+                handled_start = true;
+                marker_start_phase(cpu_index, g_marker_pairs[i].phase_id);
+            }
+        }
+        if (handled_start) {
+            return;
+        }
+        bool handled_end = false;
+        for (size_t i = 0; i < g_marker_pair_count; i++) {
+            if (enc == g_marker_pairs[i].end_enc) {
+                handled_end = true;
+                marker_end_phase(cpu_index, g_marker_pairs[i].phase_id);
+            }
+        }
+        if (handled_end) {
             return;
         }
     }
     uint32_t d = g_active_marker_depth[cpu_index];
     if (d > 0) {
+        if (g_sched_phases_mode && g_sched_have_x25[cpu_index]) {
+            g_sched_since_x25[cpu_index]++;
+        }
         for (uint32_t k = 0; k < d; k++) {
             int64_t active_idx = g_active_marker_session_stack[cpu_index][k];
-            if (active_idx >= 0 && (size_t)active_idx < g_marker_sessions_count) {
-                g_marker_sessions[active_idx].insn_count++;
+            VcpuMarkerState* st = &g_vcpu_marker_state[cpu_index];
+            if (active_idx >= 0 && (size_t)active_idx < st->sessions_count) {
+                st->sessions[active_idx].insn_count++;
             }
         }
-        g_between_markers_insns++;
+        g_vcpu_marker_state[cpu_index].between_markers_insns++;
         if (g_insn_types_mode && u && u->sym) {
-            insn_type_record(u->sym);
+            insn_type_record(cpu_index, u->sym);
         }
         if (g_insn_trace_fp && u) {
             const char* dis = (u->disas_full && u->disas_full[0]) ? u->disas_full : "?";
@@ -765,7 +1023,6 @@ static void vcpu_insn_exec_markers(unsigned int cpu_index, void* udata)
             fputc('\n', g_insn_trace_fp);
         }
     }
-    g_mutex_unlock(&g_marker_mu);
 }
 
 static void vcpu_insn_exec_insn_types(unsigned int cpu_index, void* udata)
@@ -775,43 +1032,69 @@ static void vcpu_insn_exec_insn_types(unsigned int cpu_index, void* udata)
     }
     struct insn_ud* ud = (struct insn_ud*)udata;
     uint32_t enc = ud->enc;
-    g_mutex_lock(&g_marker_mu);
-    for (size_t i = 0; i < g_marker_pair_count; i++) {
-        if (enc == g_marker_pairs[i].start_enc) {
-            uint32_t d = g_active_marker_depth[cpu_index];
-            if (d < MAX_MARKER_STACK) {
-                int idx = marker_append_session((uint32_t)cpu_index, g_marker_pairs[i].phase_id);
-                if (idx >= 0) {
-                    g_active_marker_session_stack[cpu_index][d] = idx;
-                    g_active_marker_phase_stack[cpu_index][d] = g_marker_pairs[i].phase_id;
-                    g_active_marker_depth[cpu_index] = d + 1;
-                }
-            }
-            g_mutex_unlock(&g_marker_mu);
+    if (g_sched_phases_mode) {
+        if (enc == ENC_ORR_X25_SELF) {
+            g_sched_have_x25[cpu_index] = 1;
+            g_sched_since_x25[cpu_index] = 0;
             return;
         }
-    }
-    for (size_t i = 0; i < g_marker_pair_count; i++) {
-        if (enc == g_marker_pairs[i].end_enc) {
-            uint32_t d = g_active_marker_depth[cpu_index];
-            while (d > 0) {
-                uint32_t top = d - 1;
-                if (g_active_marker_phase_stack[cpu_index][top] == g_marker_pairs[i].phase_id) {
-                    g_active_marker_depth[cpu_index] = top;
-                    break;
-                }
-                d--;
+        if (enc == ENC_ORR_X26_SELF) {
+            if (g_sched_have_x25[cpu_index]) {
+                sched_backmatch_agg_add(cpu_index, 0, g_sched_since_x25[cpu_index]);  /* complete */
             }
-            g_mutex_unlock(&g_marker_mu);
+            return;
+        }
+        if (enc == ENC_ORR_X28_SELF) {
+            if (g_sched_have_x25[cpu_index]) {
+                sched_backmatch_agg_add(cpu_index, 1, g_sched_since_x25[cpu_index]);  /* dispatch */
+            }
+            return;
+        }
+        if (enc == ENC_ORR_X30_SELF) {
+            if (g_sched_have_x25[cpu_index]) {
+                sched_backmatch_agg_add(cpu_index, 2, g_sched_since_x25[cpu_index]);  /* idle */
+            }
+            return;
+        }
+        uint32_t pid = 0;
+        if (sched_fast_start_phase(enc, &pid)) {
+            marker_start_phase(cpu_index, pid);
+            return;
+        }
+        if (sched_fast_end_phase(enc, &pid)) {
+            marker_end_phase(cpu_index, pid);
+            return;
+        }
+    } else {
+        bool handled_start = false;
+        for (size_t i = 0; i < g_marker_pair_count; i++) {
+            if (enc == g_marker_pairs[i].start_enc) {
+                handled_start = true;
+                marker_start_phase(cpu_index, g_marker_pairs[i].phase_id);
+            }
+        }
+        if (handled_start) {
+            return;
+        }
+        bool handled_end = false;
+        for (size_t i = 0; i < g_marker_pair_count; i++) {
+            if (enc == g_marker_pairs[i].end_enc) {
+                handled_end = true;
+                marker_end_phase(cpu_index, g_marker_pairs[i].phase_id);
+            }
+        }
+        if (handled_end) {
             return;
         }
     }
     uint32_t d = g_active_marker_depth[cpu_index];
     if (d > 0) {
-        g_between_markers_insns++;
-        insn_type_record(ud->sym);
+        if (g_sched_phases_mode && g_sched_have_x25[cpu_index]) {
+            g_sched_since_x25[cpu_index]++;
+        }
+        g_vcpu_marker_state[cpu_index].between_markers_insns++;
+        insn_type_record(cpu_index, ud->sym);
     }
-    g_mutex_unlock(&g_marker_mu);
 }
 
 static void vcpu_mem_cb_insn_types(unsigned int cpu_index,
@@ -823,14 +1106,11 @@ static void vcpu_mem_cb_insn_types(unsigned int cpu_index,
     if (cpu_index >= MAX_VCPU) {
         return;
     }
-    g_mutex_lock(&g_marker_mu);
     if (g_active_marker_depth[cpu_index] == 0) {
-        g_mutex_unlock(&g_marker_mu);
         return;
     }
     bool is_store = qemu_plugin_mem_is_store(info);
-    mem_addr_record(vaddr, is_store);
-    g_mutex_unlock(&g_marker_mu);
+    mem_addr_record(cpu_index, vaddr, is_store);
 }
 
 static void vcpu_insn_exec_hier(unsigned int cpu_index, void* udata)
@@ -1156,8 +1436,12 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
 
     if (g_marker_mode) {
         if (g_insn_types_mode) {
-            if (g_insn_type_stats_count > 1) {
-                qsort(g_insn_type_stats, g_insn_type_stats_count, sizeof(InsnTypeStat), insn_type_cmp_desc);
+            InsnTypeStat* merged_stats = NULL;
+            size_t merged_count = 0;
+            size_t merged_cap = 0;
+            build_global_insn_type_stats(&merged_stats, &merged_count, &merged_cap);
+            if (merged_count > 1) {
+                qsort(merged_stats, merged_count, sizeof(InsnTypeStat), insn_type_cmp_desc);
             }
             if (g_outfile && g_outfile[0]) {
                 FILE* f = fopen(g_outfile, "w");
@@ -1165,23 +1449,25 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
                     fprintf(f, "# marker-window 指令类型统计 (0x%08x→0x%08x, 累计所有会话)\n",
                             g_marker_start_enc, g_marker_end_enc);
                     fprintf(f, "# mnemonic                count\n");
-                    for (size_t i = 0; i < g_insn_type_stats_count; i++) {
+                    for (size_t i = 0; i < merged_count; i++) {
                         fprintf(f, "%-24s %" PRIu64 "\n",
-                                g_insn_type_stats[i].mnemonic ? g_insn_type_stats[i].mnemonic : "unknown",
-                                g_insn_type_stats[i].count);
+                                merged_stats[i].mnemonic ? merged_stats[i].mnemonic : "unknown",
+                                merged_stats[i].count);
                     }
                     if (g_insn_mem_mode) {
-                        size_t uniq = g_mem_addr_table ? g_hash_table_size(g_mem_addr_table) : 0;
+                        uint64_t mem_total = 0, mem_load_total = 0, mem_store_total = 0;
+                        GHashTable* merged_mem = build_global_mem_addr_table(&mem_total, &mem_load_total, &mem_store_total);
+                        size_t uniq = merged_mem ? g_hash_table_size(merged_mem) : 0;
                         MemAddrRow* rows = NULL;
                         if (uniq > 0) {
                             rows = g_new0(MemAddrRow, uniq);
                         }
                         size_t idx = 0;
-                        if (g_mem_addr_table && rows) {
+                        if (merged_mem && rows) {
                             GHashTableIter iter;
                             gpointer k = NULL;
                             gpointer v = NULL;
-                            g_hash_table_iter_init(&iter, g_mem_addr_table);
+                            g_hash_table_iter_init(&iter, merged_mem);
                             while (g_hash_table_iter_next(&iter, &k, &v)) {
                                 uint64_t addr = *(uint64_t*)k;
                                 MemAddrStat* st = (MemAddrStat*)v;
@@ -1197,16 +1483,20 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
                         }
                         fprintf(f, "\n# memory access summary\n");
                         fprintf(f, "# total=%" PRIu64 " load=%" PRIu64 " store=%" PRIu64 " unique_addr=%zu\n",
-                                g_mem_total, g_mem_load_total, g_mem_store_total, uniq);
+                                mem_total, mem_load_total, mem_store_total, uniq);
                         for (size_t i = 0; i < uniq; i++) {
                             fprintf(f, "0x%016" PRIx64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
                                     rows[i].vaddr, rows[i].total, rows[i].load, rows[i].store);
                         }
                         g_free(rows);
+                        if (merged_mem) {
+                            g_hash_table_destroy(merged_mem);
+                        }
                     }
                     fclose(f);
                 }
             }
+            free_insn_type_stats_array(merged_stats, merged_count);
             goto cleanup;
         }
 
@@ -1220,37 +1510,68 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
         uint64_t max_session_insns = 0;
         uint64_t min_session_insns = 0;
         uint64_t avg_session_insns = 0;
-        if (g_marker_sessions_count > 0) {
+        uint64_t total_between_markers_insns = 0;
+        uint64_t total_between_markers_sessions = 0;
+        size_t total_marker_sessions_count = 0;
+        for (unsigned int c = 0; c < MAX_VCPU; c++) {
+            total_between_markers_insns += g_vcpu_marker_state[c].between_markers_insns;
+            total_between_markers_sessions += g_vcpu_marker_state[c].between_markers_sessions;
+            total_marker_sessions_count += g_vcpu_marker_state[c].sessions_count;
+        }
+        if (total_marker_sessions_count > 0) {
             min_session_insns = UINT64_MAX;
-            for (size_t i = 0; i < g_marker_sessions_count; i++) {
-                uint64_t v = g_marker_sessions[i].insn_count;
-                if (v > max_session_insns) {
-                    max_session_insns = v;
-                }
-                if (v < min_session_insns) {
-                    min_session_insns = v;
-                }
-                uint32_t pid = g_marker_sessions[i].phase_id;
-                if (pid < 18) {
-                    phase_sum[pid] += v;
-                    phase_cnt[pid] += 1;
-                    if (v > phase_max[pid]) {
-                        phase_max[pid] = v;
+            for (unsigned int c = 0; c < MAX_VCPU; c++) {
+                VcpuMarkerState* st = &g_vcpu_marker_state[c];
+                for (size_t i = 0; i < st->sessions_count; i++) {
+                    uint64_t v = st->sessions[i].insn_count;
+                    if (v > max_session_insns) {
+                        max_session_insns = v;
                     }
-                    if (v < phase_min[pid]) {
-                        phase_min[pid] = v;
+                    if (v < min_session_insns) {
+                        min_session_insns = v;
+                    }
+                    uint32_t pid = st->sessions[i].phase_id;
+                    if (pid < 18) {
+                        phase_sum[pid] += v;
+                        phase_cnt[pid] += 1;
+                        if (v > phase_max[pid]) {
+                            phase_max[pid] = v;
+                        }
+                        if (v < phase_min[pid]) {
+                            phase_min[pid] = v;
+                        }
                     }
                 }
             }
-            avg_session_insns = g_between_markers_insns / g_marker_sessions_count;
+            avg_session_insns = total_between_markers_insns / total_marker_sessions_count;
+        }
+        /* Merge aggregated backward-match stats (complete/dispatch/idle). */
+        if (g_sched_phases_mode) {
+            for (unsigned int c = 0; c < MAX_VCPU; c++) {
+                for (uint32_t slot = 0; slot < 3; slot++) {
+                    const PhaseAgg* a = &g_sched_backmatch_agg[c][slot];
+                    if (a->cnt == 0) {
+                        continue;
+                    }
+                    uint32_t pid = 11u + slot; /* 11=complete,12=dispatch,13=idle */
+                    phase_sum[pid] += a->sum;
+                    phase_cnt[pid] += a->cnt;
+                    if (a->max > phase_max[pid]) {
+                        phase_max[pid] = a->max;
+                    }
+                    if (a->min < phase_min[pid]) {
+                        phase_min[pid] = a->min;
+                    }
+                }
+            }
         }
         snprintf(line, sizeof line,
             "QEMU_TCG between_markers_insns: %" PRIu64
             " (sessions=%" PRIu64 ", avg_per_session=%" PRIu64
             ", max_session_insns=%" PRIu64 ", min_session_insns=%" PRIu64
             ", start=0x%08x, end=0x%08x, phase_markers=%d)\n",
-            g_between_markers_insns,
-            g_between_markers_sessions,
+            total_between_markers_insns,
+            total_between_markers_sessions,
             avg_session_insns,
             max_session_insns,
             min_session_insns,
@@ -1264,8 +1585,8 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
             " (sessions=%" PRIu64 ", avg_per_session=%" PRIu64
             ", max_session_insns=%" PRIu64 ", min_session_insns=%" PRIu64
             ", start=0x%08x, end=0x%08x, phase_markers=%d)\n",
-            g_between_markers_insns,
-            g_between_markers_sessions,
+            total_between_markers_insns,
+            total_between_markers_sessions,
             avg_session_insns,
             max_session_insns,
             min_session_insns,
@@ -1302,12 +1623,17 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
                         pid, g_marker_pairs[i].phase_name, cnt, avg, pmax, pmin);
                 }
                 fputs("session_id,phase_id,cpu_id,insn_count\n", f);
-                for (size_t i = 0; i < g_marker_sessions_count; i++) {
-                    fprintf(f, "%" PRIu64 ",%u,%u,%" PRIu64 "\n",
-                        g_marker_sessions[i].session_id,
-                        g_marker_sessions[i].phase_id,
-                        g_marker_sessions[i].cpu_id,
-                        g_marker_sessions[i].insn_count);
+                uint64_t global_sid = 0;
+                for (unsigned int c = 0; c < MAX_VCPU; c++) {
+                    VcpuMarkerState* st = &g_vcpu_marker_state[c];
+                    for (size_t i = 0; i < st->sessions_count; i++) {
+                        global_sid++;
+                        fprintf(f, "%" PRIu64 ",%u,%u,%" PRIu64 "\n",
+                            global_sid,
+                            st->sessions[i].phase_id,
+                            st->sessions[i].cpu_id,
+                            st->sessions[i].insn_count);
+                    }
                 }
                 fclose(f);
             }
@@ -1316,8 +1642,12 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
     }
 
     if (g_insn_types_mode) {
-        if (g_insn_type_stats_count > 1) {
-            qsort(g_insn_type_stats, g_insn_type_stats_count, sizeof(InsnTypeStat), insn_type_cmp_desc);
+        InsnTypeStat* merged_stats = NULL;
+        size_t merged_count = 0;
+        size_t merged_cap = 0;
+        build_global_insn_type_stats(&merged_stats, &merged_count, &merged_cap);
+        if (merged_count > 1) {
+            qsort(merged_stats, merged_count, sizeof(InsnTypeStat), insn_type_cmp_desc);
         }
         if (g_outfile && g_outfile[0]) {
             FILE* f = fopen(g_outfile, "w");
@@ -1325,23 +1655,25 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
                 fprintf(f, "# marker-window 指令类型统计 (0x%08x→0x%08x, 累计所有会话)\n",
                         g_marker_start_enc, g_marker_end_enc);
                 fprintf(f, "# mnemonic                count\n");
-                for (size_t i = 0; i < g_insn_type_stats_count; i++) {
+                for (size_t i = 0; i < merged_count; i++) {
                     fprintf(f, "%-24s %" PRIu64 "\n",
-                            g_insn_type_stats[i].mnemonic ? g_insn_type_stats[i].mnemonic : "unknown",
-                            g_insn_type_stats[i].count);
+                            merged_stats[i].mnemonic ? merged_stats[i].mnemonic : "unknown",
+                            merged_stats[i].count);
                 }
                 if (g_insn_mem_mode) {
-                    size_t uniq = g_mem_addr_table ? g_hash_table_size(g_mem_addr_table) : 0;
+                    uint64_t mem_total = 0, mem_load_total = 0, mem_store_total = 0;
+                    GHashTable* merged_mem = build_global_mem_addr_table(&mem_total, &mem_load_total, &mem_store_total);
+                    size_t uniq = merged_mem ? g_hash_table_size(merged_mem) : 0;
                     MemAddrRow* rows = NULL;
                     if (uniq > 0) {
                         rows = g_new0(MemAddrRow, uniq);
                     }
                     size_t idx = 0;
-                    if (g_mem_addr_table && rows) {
+                    if (merged_mem && rows) {
                         GHashTableIter iter;
                         gpointer k = NULL;
                         gpointer v = NULL;
-                        g_hash_table_iter_init(&iter, g_mem_addr_table);
+                        g_hash_table_iter_init(&iter, merged_mem);
                         while (g_hash_table_iter_next(&iter, &k, &v)) {
                             uint64_t addr = *(uint64_t*)k;
                             MemAddrStat* st = (MemAddrStat*)v;
@@ -1357,7 +1689,7 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
                     }
                     fprintf(f, "\n# memory access summary\n");
                     fprintf(f, "# total=%" PRIu64 " load=%" PRIu64 " store=%" PRIu64 " unique_addr=%zu\n",
-                            g_mem_total, g_mem_load_total, g_mem_store_total, uniq);
+                            mem_total, mem_load_total, mem_store_total, uniq);
                     for (size_t i = 0; i < uniq; i++) {
                         fprintf(f, "0x%016" PRIx64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
                                 rows[i].vaddr,
@@ -1366,10 +1698,14 @@ static void plugin_exit(qemu_plugin_id_t id, void* userdata)
                                 rows[i].store);
                     }
                     g_free(rows);
+                    if (merged_mem) {
+                        g_hash_table_destroy(merged_mem);
+                    }
                 }
                 fclose(f);
             }
         }
+        free_insn_type_stats_array(merged_stats, merged_count);
         goto cleanup;
     }
 
@@ -1402,26 +1738,32 @@ cleanup:
     free(g_insn_trace_path);
     g_insn_trace_path = NULL;
     g_insn_trace = 0;
-    if (g_insn_type_stats) {
-        for (size_t i = 0; i < g_insn_type_stats_count; i++) {
-            free(g_insn_type_stats[i].mnemonic);
+    for (unsigned int c = 0; c < MAX_VCPU; c++) {
+        VcpuStatsState* st_stats = &g_vcpu_stats_state[c];
+        if (st_stats->insn_type_stats) {
+            for (size_t i = 0; i < st_stats->insn_type_stats_count; i++) {
+                free(st_stats->insn_type_stats[i].mnemonic);
+            }
+            free(st_stats->insn_type_stats);
         }
-        free(g_insn_type_stats);
-        g_insn_type_stats = NULL;
-        g_insn_type_stats_count = 0;
-        g_insn_type_stats_cap = 0;
+        st_stats->insn_type_stats = NULL;
+        st_stats->insn_type_stats_count = 0;
+        st_stats->insn_type_stats_cap = 0;
+        if (st_stats->mem_addr_table) {
+            g_hash_table_destroy(st_stats->mem_addr_table);
+            st_stats->mem_addr_table = NULL;
+        }
+        st_stats->mem_total = 0;
+        st_stats->mem_load_total = 0;
+        st_stats->mem_store_total = 0;
+
+        free(g_vcpu_marker_state[c].sessions);
+        g_vcpu_marker_state[c].sessions = NULL;
+        g_vcpu_marker_state[c].sessions_count = 0;
+        g_vcpu_marker_state[c].sessions_cap = 0;
+        g_vcpu_marker_state[c].between_markers_insns = 0;
+        g_vcpu_marker_state[c].between_markers_sessions = 0;
     }
-    if (g_mem_addr_table) {
-        g_hash_table_destroy(g_mem_addr_table);
-        g_mem_addr_table = NULL;
-    }
-    g_mem_total = 0;
-    g_mem_load_total = 0;
-    g_mem_store_total = 0;
-    free(g_marker_sessions);
-    g_marker_sessions = NULL;
-    g_marker_sessions_count = 0;
-    g_marker_sessions_cap = 0;
     if (g_syms) {
         for (size_t i = 0; i < g_n_syms; i++) {
             free(g_syms[i].name);
@@ -1545,7 +1887,22 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             g_marker_pairs_default[0].end_enc = g_marker_end_enc;
         }
         for (int c = 0; c < MAX_VCPU; c++) {
+            g_vcpu_stats_state[c].insn_type_stats_count = 0;
+            g_vcpu_stats_state[c].mem_total = 0;
+            g_vcpu_stats_state[c].mem_load_total = 0;
+            g_vcpu_stats_state[c].mem_store_total = 0;
             g_active_marker_depth[c] = 0;
+            g_sched_since_x25[c] = 0;
+            g_sched_have_x25[c] = 0;
+            g_vcpu_marker_state[c].between_markers_insns = 0;
+            g_vcpu_marker_state[c].between_markers_sessions = 0;
+            g_vcpu_marker_state[c].sessions_count = 0;
+            for (int s = 0; s < 3; s++) {
+                g_sched_backmatch_agg[c][s].cnt = 0;
+                g_sched_backmatch_agg[c][s].sum = 0;
+                g_sched_backmatch_agg[c][s].max = 0;
+                g_sched_backmatch_agg[c][s].min = 0;
+            }
             for (int k = 0; k < MAX_MARKER_STACK; k++) {
                 g_active_marker_session_stack[c][k] = -1;
                 g_active_marker_phase_stack[c][k] = 0;
@@ -1570,7 +1927,22 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
             g_marker_pair_count = 1;
         }
         for (int c = 0; c < MAX_VCPU; c++) {
+            g_vcpu_stats_state[c].insn_type_stats_count = 0;
+            g_vcpu_stats_state[c].mem_total = 0;
+            g_vcpu_stats_state[c].mem_load_total = 0;
+            g_vcpu_stats_state[c].mem_store_total = 0;
             g_active_marker_depth[c] = 0;
+            g_sched_since_x25[c] = 0;
+            g_sched_have_x25[c] = 0;
+            g_vcpu_marker_state[c].between_markers_insns = 0;
+            g_vcpu_marker_state[c].between_markers_sessions = 0;
+            g_vcpu_marker_state[c].sessions_count = 0;
+            for (int s = 0; s < 3; s++) {
+                g_sched_backmatch_agg[c][s].cnt = 0;
+                g_sched_backmatch_agg[c][s].sum = 0;
+                g_sched_backmatch_agg[c][s].max = 0;
+                g_sched_backmatch_agg[c][s].min = 0;
+            }
             for (int k = 0; k < MAX_MARKER_STACK; k++) {
                 g_active_marker_session_stack[c][k] = -1;
                 g_active_marker_phase_stack[c][k] = 0;
@@ -1606,10 +1978,6 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(
         }
         setvbuf(g_insn_trace_fp, NULL, _IOLBF, 0);
         fputs("# cpu_id vaddr enc_hex full_disassembly\n", g_insn_trace_fp);
-    }
-    if ((g_marker_mode || g_insn_types_mode) && !g_marker_mu_inited) {
-        g_mutex_init(&g_marker_mu);
-        g_marker_mu_inited = 1;
     }
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
     qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);

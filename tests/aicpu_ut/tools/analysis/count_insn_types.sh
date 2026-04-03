@@ -113,6 +113,13 @@ case "${TEST_NAME}" in
             sched) BIN="${BIN_DIR}/test_latency_sched_prof_only_${TEST_IDX}" ;;
         esac
         ;;
+    test_spmd_mix)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_spmd_mix_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_spmd_mix_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_spmd_mix_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
     test_paged_attention)
         BIN="${BIN_DIR}/test_pa_concurrent_${TEST_IDX}"
         ;;

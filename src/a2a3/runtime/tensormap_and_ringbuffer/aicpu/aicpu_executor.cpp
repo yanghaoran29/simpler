@@ -423,8 +423,12 @@ struct AicpuExecutor {
                 core_exec_state.executing_reg_task_id = AICPU_TASK_INVALID;
                 PTO2TaskSlotState& slot_state = *core_exec_state.executing_slot_state;
 
-                // Completion: increment atomic counter, trigger task-level completion on last subtask
+                // Completion: increment per-subtask completion state.
+                // x33/x34 marker (mapped to and x3/x4) measures subtask-level
+                // completion handling cost; fires once per finished subtask.
+                PTO2_SPECIAL_INSTRUCTION_PLAIN(33, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);  // subtask_complete start
                 bool mixed_complete = rt->scheduler.on_subtask_complete(slot_state);
+                PTO2_SPECIAL_INSTRUCTION_PLAIN(34, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);  // subtask_complete end
                 if (mixed_complete) {
                     PTO2_SPECIAL_INSTRUCTION_PLAIN(17, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);  // task_complete start
 #if PTO2_SCHED_PROFILING
@@ -497,7 +501,9 @@ struct AicpuExecutor {
                             core_exec_state.dispatch_timestamp,
                             finish_ts,
                             fanout_arr,
-                            fanout_n) != 0) {
+                            fanout_n,
+                            slot_state.fanin_count,
+                            slot_state.fanin_refcount.load(std::memory_order_relaxed)) != 0) {
                         DEV_ERROR("Core %d: perf_aicpu_complete_record failed for task 0x%" PRIx64,
                             core_id,
                             static_cast<uint64_t>(slot_state.task->task_id.raw));
@@ -1207,14 +1213,13 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 
     while (true) {
         bool made_progress = false;
-#if PTO2_INSTR_COUNT_SCHEDULER_ENABLE
         PTO2_SPECIAL_INSTRUCTION_PLAIN(23, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
-#endif
 #if PTO2_PROFILING
         CYCLE_COUNT_START();
         sched_loop_count++;
         uint64_t _t0_phase = _t0;
 #endif
+        PTO2_SPECIAL_INSTRUCTION_PLAIN(25, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
         int32_t task_count = 0;
         if (!tracker.has_any_running_cores()) {
             bool orch_done = orchestrator_done_;
@@ -1290,7 +1295,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
 
         // Phase 1: Check running cores for completion, process and move to idle
         // Keep scheduler phase markers away from build_graph markers (x17/x18).
-        PTO2_SPECIAL_INSTRUCTION_PLAIN(25, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
         int32_t completed_this_turn = 0;
 
         // Check AIC running cores
@@ -1384,10 +1388,12 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
         }
 #endif
-        PTO2_SPECIAL_INSTRUCTION_PLAIN(26, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+        if (try_completed) {
+            PTO2_SPECIAL_INSTRUCTION_PLAIN(26, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+            PTO2_SPECIAL_INSTRUCTION_PLAIN(25, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+        }
 
         bool try_pushed = false;
-        PTO2_SPECIAL_INSTRUCTION_PLAIN(27, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
         const PTO2ResourceShape* dispatch_order = get_dispatch_order(thread_idx);
         for (int32_t si = 0; si < PTO2_NUM_RESOURCE_SHAPES; si++) {
             PTO2ResourceShape shape = dispatch_order[si];
@@ -1427,6 +1433,18 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                     // Dispatch as many blocks as possible for this task using available clusters.
                     // For block_num=1 the inner body executes exactly once (no overhead).
                     do {
+                        // Per-block dispatch window (x31/x32): one session per actual
+                        // block dispatch iteration, used to compare block_num=1 vs >1.
+                        PTO2_SPECIAL_INSTRUCTION_PLAIN(31, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+                        // valid_cluster_states is shared across batch[0..got-1]. A prior task can
+                        // exhaust the bitmask; refresh before pop so we never pop_first() on empty
+                        // (returns -1 → invalid core_offset / SIGSEGV). AIV already refreshed below.
+                        if (!valid_cluster_states.has_value()) {
+                            valid_cluster_states = tracker.get_valid_cluster_offset_states(shape);
+                        }
+                        if (!valid_cluster_states.has_value()) {
+                            break;
+                        }
                         auto current_valid_cluster_offset = valid_cluster_states.pop_first();
                         if (shape == PTO2ResourceShape::MIX) {
                             // Full-cluster: all active subtasks share the same block_idx.
@@ -1511,11 +1529,19 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
                             slot_state->next_block_idx - 1,
                             slot_state->block_num,
                             current_valid_cluster_offset);
+                        PTO2_SPECIAL_INSTRUCTION_PLAIN(32, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
                     } while (slot_state->next_block_idx < slot_state->block_num && valid_cluster_states.has_value());
 
                     // Re-enqueue only if blocks remain after exhausting local clusters
                     if (slot_state->next_block_idx < slot_state->block_num) {
-                        rt->scheduler.ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+                        if (!rt->scheduler.ready_queues[static_cast<int32_t>(shape)].push(slot_state)) {
+                            DEV_ERROR(
+                                "Thread %d: FATAL PTO2 ready queue push failed (requeue partial blocks), "
+                                "task_id=%" PRId64,
+                                thread_idx,
+                                static_cast<int64_t>(slot_state->task->task_id.raw));
+                            std::abort();
+                        }
                     }
                     made_progress = true;
 #if PTO2_SCHED_PROFILING
@@ -1558,7 +1584,10 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
         }
 #endif
-        PTO2_SPECIAL_INSTRUCTION_PLAIN(28, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+        if (try_pushed) {
+            PTO2_SPECIAL_INSTRUCTION_PLAIN(28, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+            PTO2_SPECIAL_INSTRUCTION_PLAIN(25, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+        }
 
 #if !PTO2_PROFILING
         (void)try_completed;  // NOLINT(readability/casting)
@@ -1733,6 +1762,8 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int32_t threa
             }
 #endif
             PTO2_SPECIAL_INSTRUCTION_PLAIN(30, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+            PTO2_SPECIAL_INSTRUCTION_PLAIN(25, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
+
         }
         PTO2_SPECIAL_INSTRUCTION_PLAIN(24, PTO2_INSTR_COUNT_SCHEDULER_ENABLE);
     }

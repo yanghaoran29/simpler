@@ -1290,7 +1290,9 @@ int PerformanceCollector::export_swimlane_json(const std::string& output_path) {
             }
         }
         outfile << "],\n";
-        outfile << "      \"fanout_count\": " << record.fanout_count << "\n";
+        outfile << "      \"fanout_count\": " << record.fanout_count << ",\n";
+        outfile << "      \"fanin_count\": " << record.fanin_count << ",\n";
+        outfile << "      \"fanin_refcount\": " << record.fanin_refcount << "\n";
         outfile << "    }";
         if (i < tagged_records.size() - 1) {
             outfile << ",";

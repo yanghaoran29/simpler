@@ -87,12 +87,50 @@ case "${TEST_NAME}" in
             sched) BIN="${BIN_DIR}/test_sched_prof_only_${TEST_IDX}" ;;
         esac
         ;;
+    test_alt)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_alt_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_alt_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_alt_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
+    test_bgemm)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_bgemm_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_bgemm_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_bgemm_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
     test_pau|test_paged_attention_unroll)
         case "${THREAD_MODE}" in
             concurrent) BIN="${BIN_DIR}/test_pau_concurrent_${TEST_IDX}" ;;
             orch) BIN="${BIN_DIR}/test_pau_orch_only_${TEST_IDX}" ;;
             sched) BIN="${BIN_DIR}/test_pau_sched_prof_only_${TEST_IDX}" ;;
         esac
+        ;;
+    test_throughput)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_throughput_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_throughput_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_throughput_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
+    test_latency)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_latency_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_latency_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_latency_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
+    test_spmd_mix)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_spmd_mix_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_spmd_mix_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_spmd_mix_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
+    test_paged_attention)
+        BIN="${BIN_DIR}/test_pa_concurrent_${TEST_IDX}"
         ;;
     *)
         echo "Unsupported test for auto binary mapping: ${TEST_NAME}" >&2

@@ -52,19 +52,22 @@
 #endif
 
 #ifndef PTO2_TENSORMAP_PROFILING
+#define PTO2_TENSORMAP_PROFILING 1
+#endif
+
+#if !PTO2_PROFILING
+// Allow upper-level build flags to toggle only PTO2_PROFILING.
+#undef PTO2_ORCH_PROFILING
+#define PTO2_ORCH_PROFILING 0
+#undef PTO2_SCHED_PROFILING
+#define PTO2_SCHED_PROFILING 0
+#undef PTO2_TENSORMAP_PROFILING
 #define PTO2_TENSORMAP_PROFILING 0
 #endif
 
-#if PTO2_ORCH_PROFILING && !PTO2_PROFILING
-#error "PTO2_ORCH_PROFILING requires PTO2_PROFILING=1"
-#endif
-
-#if PTO2_SCHED_PROFILING && !PTO2_PROFILING
-#error "PTO2_SCHED_PROFILING requires PTO2_PROFILING=1"
-#endif
-
 #if PTO2_TENSORMAP_PROFILING && !PTO2_ORCH_PROFILING
-#error "PTO2_TENSORMAP_PROFILING requires PTO2_ORCH_PROFILING=1"
+#undef PTO2_TENSORMAP_PROFILING
+#define PTO2_TENSORMAP_PROFILING 0
 #endif
 
 // =============================================================================

@@ -44,7 +44,7 @@
 #   ./run_tests.sh --count-orch-and-sched-submit-instructions --test test_batch_paged_attention --idx 0
 #     # 一次命令内顺序完成：先 Scheduler（同 --count-scheduler-submit-task-instructions）再 Orche（同 --count-submit-task-instructions）
 #     # 因 CMake 插桩选项不同会各构建一次；产出 *_scheduler_submit_report_*.md、*_submit_report_*.md，
-#     # 并额外生成合并版 *_orch_sched_submit_report_*.md（涵盖上述两份的全部内容）
+#     # 并额外生成合并版 *_orch_sched_submit_report_*.md：Orche 摘要 → Scheduler 摘要 → 文末「详细数据」（两侧逐任务/会话与附录）
 #   # 亦可显式同时传：--count-scheduler-submit-task-instructions --count-submit-task-instructions（与上一行等价）
 #   ./run_tests.sh --list                          # list all available tests
 #   ./run_tests.sh --self-check                    # internal self-check: validate sub-scripts and key options
@@ -95,7 +95,7 @@ TEST_TYPE["test_throughput"]="perf"              ; TEST_INDICES["test_throughput
 TEST_TYPE["test_latency"]="perf"                ; TEST_INDICES["test_latency"]="0 1"
 TEST_TYPE["test_spmd_basic"]="perf"             ; TEST_INDICES["test_spmd_basic"]="0"
 TEST_TYPE["test_spmd_aiv"]="perf"               ; TEST_INDICES["test_spmd_aiv"]="0"
-TEST_TYPE["test_spmd_mix"]="perf"               ; TEST_INDICES["test_spmd_mix"]="0"
+TEST_TYPE["test_spmd_mix"]="perf"               ; TEST_INDICES["test_spmd_mix"]="0 1 2"
 
 ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention test_alt test_bgemm test_pau test_paged_attention_unroll test_throughput test_latency test_spmd_basic test_spmd_aiv test_spmd_mix)
 
@@ -317,6 +317,9 @@ while [[ $# -gt 0 ]]; do
             COUNT_SCHEDULER_LOOP_INSNS=1; shift ;;
         --count-orch-and-sched-submit-instructions)
             COUNT_SUBMIT_TASK_INSNS=1
+            # For combined report, always emit full guest instruction trace
+            # in submit marker window (x3~x4) for post-analysis.
+            COUNT_SUBMIT_INSN_TRACE=1
             COUNT_SCHEDULER_LOOP_INSNS=1
             shift ;;
         --self-check)
@@ -352,6 +355,9 @@ fi
 # 合并报告：仅当本命令同时包含 Scheduler + Orche 统计时，在 Orche 报告写入后填入 Scheduler 报告路径
 SCHED_MERGE_MD_PATH=""
 if [ "${COUNT_SCHEDULER_LOOP_INSNS:-0}" = 1 ]; then
+    # Instruction-count mode: compile out all log macros to avoid
+    # perturbing dynamic instruction statistics.
+    AICPU_UT_DISABLE_ALL_LOG=1
     sched_tool="${SCRIPT_DIR}/tools/count_scheduler_loop_markers.sh"
     plugin_so="${SCRIPT_DIR}/plugins/libinsn_count.so"
     plugin_dir="${SCRIPT_DIR}/plugins"
@@ -426,6 +432,9 @@ if [ "${COUNT_SCHEDULER_LOOP_INSNS:-0}" = 1 ]; then
 fi
 
 if [ "${COUNT_SUBMIT_TASK_INSNS:-0}" = 1 ]; then
+    # Instruction-count mode: compile out all log macros to avoid
+    # perturbing dynamic instruction statistics.
+    AICPU_UT_DISABLE_ALL_LOG=1
     tool_script="${SCRIPT_DIR}/tools/count_between_markers.sh"
     plugin_so="${SCRIPT_DIR}/plugins/libinsn_count.so"
     plugin_dir="${SCRIPT_DIR}/plugins"
@@ -514,7 +523,7 @@ trace_paths = {
     "others": sys.argv[10],
 }
 
-phase_re = re.compile(r"^\s*(submit_total|alloc|sync|lookup|insert|params|fanin|others)\s*:\s*(\d+)\s*$")
+phase_re = re.compile(r"^\s*(submit_total|alloc|sync|lookup|insert|params|fanin|others)\s*:\s*(-?\d+)\s*$")
 submit_args = []
 values = {k: [] for k in trace_paths}
 
@@ -600,7 +609,7 @@ PY
                 --output "$combined_out" \
                 --test-name "$test_arg" \
                 --report-idx "$idx_arg"; then
-                echo "[run_tests] combined markdown (Scheduler + Orche): $combined_out"
+                echo "[run_tests] combined markdown (Orche + Scheduler + 文末详细数据): $combined_out"
             else
                 echo "[run_tests] warn: combined markdown merge failed" >&2
             fi
@@ -986,6 +995,7 @@ cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
     -DPTO2_TRACE_SUBMIT_ARGS_ENABLE="${PTO2_TRACE_SUBMIT_ARGS_ENABLE:-0}" \
     -DPTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE="${PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE:-0}" \
     -DPTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE="${PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE:-0}" \
+    -DAICPU_UT_DISABLE_ALL_LOG="${AICPU_UT_DISABLE_ALL_LOG:-0}" \
     -DAICPU_UT_DISABLE_PRINTF="${AICPU_UT_DISABLE_PRINTF:-0}" \
     -DAICPU_UT_LATENCY_NUM_CHAINS="${AICPU_UT_LATENCY_NUM_CHAINS:-}" \
     -DAICPU_UT_LATENCY_CHAIN_LENGTH="${AICPU_UT_LATENCY_CHAIN_LENGTH:-}" \

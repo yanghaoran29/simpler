@@ -266,14 +266,30 @@ void run_sched_checks(PTO2Runtime* rt, int num_sched) {
         for (int ri = 0; ri < PTO2_MAX_RING_DEPTH; ri++)
             submitted += rt->sm_handle->header->rings[ri].fc.current_task_index.load(std::memory_order_acquire);
 
-    // P1: total dispatched == submitted
+    // P1: total dispatched == sum(task.block_num)
+    // For non-SPMD tasks, block_num defaults to 1, so this degenerates to
+    // the legacy invariant total_dispatched == submitted.
+    int64_t expected_dispatched = 0;
+    for (int ri = 0; ri < PTO2_MAX_RING_DEPTH; ri++) {
+        if (!rt->sm_handle || !rt->sm_handle->header) {
+            continue;
+        }
+        int32_t current =
+            rt->sm_handle->header->rings[ri].fc.current_task_index.load(std::memory_order_acquire);
+        for (int32_t local_id = 0; local_id < current; local_id++) {
+            const PTO2TaskSlotState& slot = rt->scheduler.ring_sched_states[ri].get_slot_state_by_task_id(local_id);
+            int16_t bn = slot.block_num;
+            expected_dispatched += (bn > 0) ? bn : 1;
+        }
+    }
+
     pto2_sim_get_dispatch_counts(g_sched_prof_data.tasks_dispatched, PTO2_NUM_WORKER_TYPES);
     int64_t total_dispatched = 0;
     for (int wt = 0; wt < PTO2_NUM_WORKER_TYPES; wt++)
         total_dispatched += g_sched_prof_data.tasks_dispatched[wt];
-    if (total_dispatched != (int64_t)submitted) {
-        printf("  FAIL (P1): total_dispatched (%lld) != submitted (%d)\n",
-               (long long)total_dispatched, submitted);
+    if (total_dispatched != expected_dispatched) {
+        printf("  FAIL (P1): total_dispatched (%lld) != expected_dispatched (%lld, submitted=%d)\n",
+               (long long)total_dispatched, (long long)expected_dispatched, submitted);
         g_fail++;
     } else {
         g_pass++;

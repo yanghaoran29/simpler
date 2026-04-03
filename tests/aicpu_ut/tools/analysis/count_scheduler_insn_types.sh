@@ -50,12 +50,45 @@ case "${TEST_NAME}" in
             orch) BIN="${BIN_DIR}/test_orch_only_${TEST_IDX}" ;;
             sched) BIN="${BIN_DIR}/test_sched_prof_only_${TEST_IDX}" ;;
         esac ;;
+    test_alt)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_alt_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_alt_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_alt_sched_prof_only_${TEST_IDX}" ;;
+        esac ;;
+    test_bgemm)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_bgemm_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_bgemm_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_bgemm_sched_prof_only_${TEST_IDX}" ;;
+        esac ;;
     test_pau|test_paged_attention_unroll)
         case "${THREAD_MODE}" in
             concurrent) BIN="${BIN_DIR}/test_pau_concurrent_${TEST_IDX}" ;;
             orch) BIN="${BIN_DIR}/test_pau_orch_only_${TEST_IDX}" ;;
             sched) BIN="${BIN_DIR}/test_pau_sched_prof_only_${TEST_IDX}" ;;
         esac ;;
+    test_throughput)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_throughput_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_throughput_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_throughput_sched_prof_only_${TEST_IDX}" ;;
+        esac ;;
+    test_latency)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_latency_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_latency_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_latency_sched_prof_only_${TEST_IDX}" ;;
+        esac ;;
+    test_spmd_mix)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_spmd_mix_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_spmd_mix_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_spmd_mix_sched_prof_only_${TEST_IDX}" ;;
+        esac ;;
+    test_paged_attention)
+        BIN="${BIN_DIR}/test_pa_concurrent_${TEST_IDX}"
+        ;;
     *)
         echo "Unsupported test: ${TEST_NAME}" >&2
         exit 1
@@ -72,10 +105,10 @@ mkdir -p "${LOG_DIR}"
 TS="$(date +%Y%m%d_%H%M%S)"
 OUTFILE="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_scheduler_insn_types_${TS}.txt"
 
-echo "[sched-insn-types] QEMU+plugin (markers x23/x24, insn_types+mem, no marker_phases): ${BIN}"
+echo "[sched-insn-types] QEMU+plugin (markers x23/x24, no insn_types, no marker_phases): ${BIN}"
 set +e
 _qlog="$(mktemp)"
-"${QEMU_BIN}" -plugin "file=${PLUGIN_SO},outfile=${OUTFILE},markers=1,insn_types=1,insn_mem=1,marker_start=${MARKER_LOOP_START},marker_end=${MARKER_LOOP_END}" "${BIN}" >"${_qlog}" 2>&1
+"${QEMU_BIN}" -plugin "file=${PLUGIN_SO},outfile=${OUTFILE},markers=1,marker_start=${MARKER_LOOP_START},marker_end=${MARKER_LOOP_END}" "${BIN}" >"${_qlog}" 2>&1
 _rc=$?
 set -e
 if [[ ${_rc} -ne 0 ]] || [[ ! -s "${OUTFILE}" ]]; then

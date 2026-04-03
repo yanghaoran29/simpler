@@ -186,6 +186,34 @@ def main() -> None:
     phase_info.update(step_table)
     between_markers_total = parse_between_markers_total(pre)
 
+    # Backfill phase stats from CSV rows when preamble phase_insns are missing
+    # or incorrectly report sessions=0 for valid marker pairs.
+    phase_name_by_id = {
+        10: "sched_loop",
+        11: "complete",
+        12: "dispatch",
+        13: "idle",
+        15: "idle_spin",
+        16: "task_dispatch",
+        17: "task_complete",
+        18: "sched_resolve_dispatch",
+        19: "dispatch_block",
+        20: "subtask_complete",
+    }
+    for pid, name in phase_name_by_id.items():
+        vals = [r[3] for r in csv_rows if int(r[1]) == pid]
+        if not vals:
+            continue
+        cur = phase_info.get(name)
+        if cur is None or int(cur.get("sessions", 0)) == 0:
+            phase_info[name] = {
+                "phase_id": pid,
+                "sessions": len(vals),
+                "avg": int(sum(vals) / len(vals)),
+                "max": max(vals),
+                "min": min(vals),
+            }
+
     rdp2_inv = parse_rdp2_invoke_from_preamble(pre)
     out = args.output
     with out.open("w", encoding="utf-8") as f:
@@ -229,18 +257,22 @@ def main() -> None:
 
         f.write("## 1.5) 任务下发/回收计数（QEMU 插件 sessions 统计）\n\n")
         td_info = phase_info.get("task_dispatch")
+        st_info = phase_info.get("subtask_complete")
         tc_info = phase_info.get("task_complete")
-        if td_info or tc_info:
-            td_sessions = td_info["sessions"] if td_info else 0
-            tc_sessions = tc_info["sessions"] if tc_info else 0
-            match_sym = "✓" if td_sessions == tc_sessions else "✗ MISMATCH"
+        if td_info or st_info or tc_info:
             f.write(
-                "打点位置：`next_block_idx==0`（x21/x22，首次下发）和 `mixed_complete==true`（x17/x18，任务完成）。"
+                "打点位置：`next_block_idx==0`（x21/x22，首次下发）、"
+                "`on_subtask_complete`（x33/x34，子任务完成）和 "
+                "`mixed_complete==true`（x17/x18，任务完成）。"
                 "`sessions` 为标记对触发次数，各列合计应等于总任务数。\n\n"
             )
             f.write("| 统计项 | sessions（触发次数） | 总指令数 | 平均指令数 | 最大指令数 | 最小指令数 |\n")
             f.write("| --- | ---: | ---: | ---: | ---: | ---: |\n")
-            for label, info in [("task_dispatch (x21/x22)", td_info), ("task_complete (x17/x18)", tc_info)]:
+            for label, info in [
+                ("task_dispatch (x21/x22)", td_info),
+                ("subtask_complete (x33/x34)", st_info),
+                ("task_complete (x17/x18)", tc_info),
+            ]:
                 if info:
                     s = info["sessions"]
                     avg = info["avg"]
@@ -250,11 +282,83 @@ def main() -> None:
                 else:
                     s = avg = mx = mn = total = 0
                 f.write(f"| {label} | `{s}` | `{total}` | `{avg}` | `{mx}` | `{mn}` |\n")
-            f.write(f"\n下发 == 回收: {match_sym}\n\n")
+            f.write("\n")
         else:
             f.write(
-                "- 未在插件输出中解析到 `task_dispatch` / `task_complete` 阶段；"
+                "- 未在插件输出中解析到 `task_dispatch` / `subtask_complete` / `task_complete` 阶段；"
                 "请确认已用 `PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE=1` 构建并重新编译插件。\n\n"
+            )
+
+        f.write("## 1.6) x15/x16 打点（sched_resolve_dispatch）按线程统计\n\n")
+        slot_info = phase_info.get("sched_resolve_dispatch")
+        if slot_info:
+            s = int(slot_info["sessions"])
+            avg = int(slot_info["avg"])
+            mx = int(slot_info["max"])
+            mn = int(slot_info["min"])
+            total = s * avg
+            f.write(
+                "打点位置：`resolve_and_dispatch_pto2` 函数入口/出口窗口（`x15/x16`）。\n\n"
+            )
+            f.write("| 统计项 | sessions | 总指令数 | 平均指令数 | 最大指令数 | 最小指令数 |\n")
+            f.write("| --- | ---: | ---: | ---: | ---: | ---: |\n")
+            f.write(f"| sched_resolve_dispatch (x15/x16) | `{s}` | `{total}` | `{avg}` | `{mx}` | `{mn}` |\n\n")
+
+            slot_phase_id = int(slot_info.get("phase_id", -1))
+            slot_rows = [r for r in csv_rows if int(r[1]) == slot_phase_id]
+            by_cpu_slot: dict[int, list[int]] = {}
+            for _sid, _ph, cpu, insn in slot_rows:
+                by_cpu_slot.setdefault(cpu, []).append(insn)
+            if by_cpu_slot:
+                f.write("| cpu_id | sessions | 合计指令 | 最小 | 最大 | 平均 |\n")
+                f.write("| ---: | ---: | ---: | ---: | ---: | ---: |\n")
+                for cid in sorted(by_cpu_slot.keys()):
+                    cc = by_cpu_slot[cid]
+                    ssum = sum(cc)
+                    f.write(
+                        f"| {cid} | {len(cc)} | {ssum} | {min(cc)} | {max(cc)} | {ssum / len(cc):.2f} |\n"
+                    )
+                f.write("\n")
+        else:
+            f.write(
+                "- 未在插件输出中解析到 `sched_resolve_dispatch` 阶段；"
+                "请确认已使用包含 x15/x16 打点的二进制与插件重新运行。\n\n"
+            )
+
+        f.write("## 1.7) x31/x32 打点（dispatch_block）按线程统计\n\n")
+        blk_info = phase_info.get("dispatch_block")
+        if blk_info:
+            s = int(blk_info["sessions"])
+            avg = int(blk_info["avg"])
+            mx = int(blk_info["max"])
+            mn = int(blk_info["min"])
+            total = s * avg
+            f.write(
+                "打点位置：每次实际 block dispatch（dispatch do-while 单次迭代，`x31/x32`）触发一次。\n\n"
+            )
+            f.write("| 统计项 | sessions | 总指令数 | 平均指令数 | 最大指令数 | 最小指令数 |\n")
+            f.write("| --- | ---: | ---: | ---: | ---: | ---: |\n")
+            f.write(f"| dispatch_block (x31/x32) | `{s}` | `{total}` | `{avg}` | `{mx}` | `{mn}` |\n\n")
+
+            blk_phase_id = int(blk_info.get("phase_id", -1))
+            blk_rows = [r for r in csv_rows if int(r[1]) == blk_phase_id]
+            by_cpu_blk: dict[int, list[int]] = {}
+            for _sid, _ph, cpu, insn in blk_rows:
+                by_cpu_blk.setdefault(cpu, []).append(insn)
+            if by_cpu_blk:
+                f.write("| cpu_id | sessions | 合计指令 | 最小 | 最大 | 平均 |\n")
+                f.write("| ---: | ---: | ---: | ---: | ---: | ---: |\n")
+                for cid in sorted(by_cpu_blk.keys()):
+                    cc = by_cpu_blk[cid]
+                    ssum = sum(cc)
+                    f.write(
+                        f"| {cid} | {len(cc)} | {ssum} | {min(cc)} | {max(cc)} | {ssum / len(cc):.2f} |\n"
+                    )
+                f.write("\n")
+        else:
+            f.write(
+                "- 未在插件输出中解析到 `dispatch_block` 阶段；"
+                "请确认已使用包含 x31/x32 打点的二进制与插件重新运行。\n\n"
             )
 
         f.write("## 2) Per-step Instruction Stats\n\n")
@@ -267,9 +371,9 @@ def main() -> None:
 
         step_desc = {
             "sched_loop": "main loop iteration (outer x23/x24)",
-            "complete": "completion check (x25/x26)",
-            "dispatch": "task dispatch (x27/x28)",
-            "idle": "idle wait (x29/x30)",
+            "complete": "completion check (x26 backward-match nearest x25)",
+            "dispatch": "task dispatch (x28 backward-match nearest x25)",
+            "idle": "idle wait (x30 backward-match nearest x25)",
         }
         step_order = ["sched_loop", "complete", "dispatch", "idle"]
         # sched_loop has no dedicated spin marker; only steps with actual spin sub-phases listed.

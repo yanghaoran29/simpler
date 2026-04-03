@@ -605,7 +605,8 @@ TaskOutputTensors pto2_submit_mixed_task(
 
         PTO2LookupResult lookup_result;
         orch->tensor_map.lookup(*tensor, lookup_result);
-
+        
+        // LOG_ALWAYS("lookup_result.count: %d", lookup_result.count);
         for (int r = 0; r < lookup_result.count; r++) {
             PTO2TensorMapEntry& entry = *lookup_result.entries[r].entry;
             auto overlap_status = lookup_result.entries[r].overlap_status;
@@ -730,7 +731,11 @@ TaskOutputTensors pto2_submit_mixed_task(
             cur_slot_state.fanin_refcount.fetch_add(initial_refcount, std::memory_order_acq_rel) + initial_refcount;
         if (new_rc >= fanin_count + 1) {
             PTO2ResourceShape shape = pto2_active_mask_to_shape(active_mask);
-            sched->ready_queues[static_cast<int32_t>(shape)].push(&cur_slot_state);
+            if (!sched->ready_queues[static_cast<int32_t>(shape)].push(&cur_slot_state)) {
+                LOG_ERROR("FATAL: PTO2 ready queue push failed (orchestrator submit path), task_id.raw=%" PRIu64,
+                    task_id.raw);
+                abort();
+            }
         }
         // Record dep pool watermark in local slot state (used by tail reclamation)
         cur_slot_state.dep_pool_mark = orch->rings[ring_id].dep_pool.top;

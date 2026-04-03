@@ -135,7 +135,9 @@ int perf_aicpu_complete_record(PerfBuffer* perf_buf,
     uint64_t dispatch_time,
     uint64_t finish_time,
     const uint64_t* fanout,
-    int32_t fanout_count) {
+    int32_t fanout_count,
+    int32_t fanin_count,
+    int32_t fanin_refcount) {
     rmb();
     uint32_t count = perf_buf->count;
     if (count >= PLATFORM_PROF_BUFFER_SIZE) return -1;
@@ -158,6 +160,9 @@ int perf_aicpu_complete_record(PerfBuffer* perf_buf,
     } else {
         record->fanout_count = 0;
     }
+
+    record->fanin_count = fanin_count;
+    record->fanin_refcount = fanin_refcount;
 
     perf_buf->count = count + 1;
     wmb();

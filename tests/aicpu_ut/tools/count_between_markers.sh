@@ -140,6 +140,13 @@ case "${TEST_NAME}" in
             sched) BIN="${BIN_DIR}/test_latency_sched_prof_only_${TEST_IDX}" ;;
         esac
         ;;
+    test_spmd_mix)
+        case "${THREAD_MODE}" in
+            concurrent) BIN="${BIN_DIR}/test_spmd_mix_concurrent_${TEST_IDX}" ;;
+            orch) BIN="${BIN_DIR}/test_spmd_mix_orch_only_${TEST_IDX}" ;;
+            sched) BIN="${BIN_DIR}/test_spmd_mix_sched_prof_only_${TEST_IDX}" ;;
+        esac
+        ;;
     test_paged_attention)
         BIN="${BIN_DIR}/test_pa_concurrent_${TEST_IDX}"
         ;;
@@ -160,6 +167,7 @@ TS="$(date +%Y%m%d_%H%M%S)"
 OUTFILE="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_between_markers_${TS}.txt"
 BG_OUT="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_build_graph_${TS}.txt"
 PHASE_OUT="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_submit_phases_${TS}.txt"
+PHASE_RAW_OUT="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_submit_phases_raw_${TS}.txt"
 RUNLOG="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_submit_args_${TS}.log"
 INSN_TRACE_DEFAULT="${LOG_DIR}/${TEST_NAME}_${TEST_IDX}_guest_insn_trace_${TS}.txt"
 
@@ -244,6 +252,12 @@ if [[ ${_pass1_rc} -ne 0 ]] || [[ ! -s "${PHASE_OUT}" ]]; then
     fi
 fi
 rm -f "${_qemu_log1}"
+
+# Keep raw pass#1 phase CSV (session_id,phase_id,cpu_id,insn_count) for
+# post-analysis/debugging before any reformatting/truncation.
+if [[ -f "${PHASE_OUT}" && -s "${PHASE_OUT}" ]]; then
+    cp -f "${PHASE_OUT}" "${PHASE_RAW_OUT}"
+fi
 
 # Pass#2: rebuild without build_graph markers but with submit-args trace; run once without plugin.
 echo "[marker-count] run pass#2 (submit args trace): rebuild PTO2_TRACE_SUBMIT_ARGS_ENABLE=1, PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE=0"
@@ -414,6 +428,9 @@ fi
 } > "${OUTFILE}"
 
 echo "[marker-count] result file: ${OUTFILE}"
+if [[ -f "${PHASE_RAW_OUT}" ]]; then
+    echo "[marker-count] raw phase file: ${PHASE_RAW_OUT}"
+fi
 if [[ "${INSN_TRACE_ENABLED}" == "1" ]] && [[ -n "${INSN_TRACE_FILE:-}" ]]; then
     echo "[marker-count] guest insn trace file: ${INSN_TRACE_FILE}"
 fi

@@ -49,6 +49,7 @@ option(PTO2_ORCH_PROFILING "Enable orchestrator profiling" OFF)
 option(PTO2_TENSORMAP_PROFILING "Enable tensormap lookup profiling" OFF)
 option(PTO2_TRACE_SUBMIT_ARGS_ENABLE "Enable pto2_submit_mixed_task argument tracing" OFF)
 option(AICPU_UT_DISABLE_PRINTF "Compile out printf in UT sources" OFF)
+option(AICPU_UT_DISABLE_ALL_LOG "Compile out all LOG_*/DEV_* macros in UT instruction-count builds" OFF)
 # When ON: test_orchestrator_scheduler.cpp emits orr x17/x18 around build_graph() for QEMU insn_count markers.
 option(PTO2_INSTR_COUNT_BUILD_GRAPH_ENABLE "Emit build_graph insn-count markers (orr x17/x18) in scheduler driver" OFF)
 # When ON: aicpu_executor.cpp emits orr x23/x24 per scheduler loop iteration for QEMU insn_count (see count_scheduler_loop_markers.sh).
@@ -114,6 +115,9 @@ if(PTO2_TRACE_SUBMIT_ARGS_ENABLE)
 endif()
 if(AICPU_UT_DISABLE_PRINTF)
     list(APPEND COMMON_COMPILE_DEFS AICPU_UT_DISABLE_PRINTF=1)
+endif()
+if(AICPU_UT_DISABLE_ALL_LOG)
+    list(APPEND COMMON_COMPILE_DEFS AICPU_UT_DISABLE_ALL_LOG=1)
 endif()
 
 # ─── Optimization level ───────────────────────────────────────────────────────
@@ -353,7 +357,7 @@ set(THROUGHPUT_CASE_INDICES 0 1 2)
 set(LATENCY_CASE_INDICES 0 1)
 set(SPMD_BASIC_CASE_INDICES 0)
 set(SPMD_AIV_CASE_INDICES 0)
-set(SPMD_MIX_CASE_INDICES 0)
+set(SPMD_MIX_CASE_INDICES 0 1 2)
 set(PERF_SPMD ${PERF_DIR}/spmd)
 
 # Perf tests: one driver .cpp per target; it #includes the backend .cpp (cases/test_*.cpp, 以 test 开头、去掉结尾 case、其余不变), so do NOT add cases/test_*.cpp as source.
@@ -515,6 +519,7 @@ foreach(i IN LISTS LATENCY_CASE_INDICES)
 endforeach()
 
 foreach(i IN LISTS SPMD_BASIC_CASE_INDICES)
+    set(target test_spmd_basic_sched_prof_only_${i})
     add_executable(${target} ${PERF_DRIVERS}/test_scheduler.cpp)
     configure_test_target(${target})
     target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES} ${PERF_SPMD})
