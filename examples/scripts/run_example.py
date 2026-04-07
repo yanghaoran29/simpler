@@ -201,6 +201,20 @@ Golden.py interface:
         help="Compile runtime from source instead of using pre-built binaries",
     )
 
+    parser.add_argument(
+        "--qemu",
+        action="store_true",
+        help="Enable QEMU instruction counting for simulation platforms (a2a3sim/a5sim)",
+    )
+
+    parser.add_argument(
+        "--instr-count-output",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Output file for instruction count results (JSON or Chrome Trace format)",
+    )
+
     args = parser.parse_args()
 
     if args.all and args.case:
@@ -266,6 +280,8 @@ Golden.py interface:
             repeat_rounds=args.rounds,
             clone_protocol=args.clone_protocol,
             skip_golden=args.skip_golden,
+            enable_qemu_counting=args.qemu,
+            instr_count_output=args.instr_count_output,
         )
 
         # Snapshot existing device logs before the run so we can identify the

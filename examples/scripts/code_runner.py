@@ -485,6 +485,8 @@ class CodeRunner:
         repeat_rounds: Optional[int] = None,
         clone_protocol: str = "ssh",
         skip_golden: bool = False,
+        enable_qemu_counting: bool = False,
+        instr_count_output: Optional[str] = None,
     ):
         # Setup logging if not already configured (e.g., when used directly, not via run_example.py)
         _setup_logging_if_needed()
@@ -495,6 +497,8 @@ class CodeRunner:
         self.enable_profiling = enable_profiling
         self.skip_golden = skip_golden
         self.project_root = _get_project_root()
+        self.enable_qemu_counting = enable_qemu_counting
+        self.instr_count_output = instr_count_output
 
         # Resolve device ID
         self.device_id = device_id if device_id is not None else 0
@@ -961,6 +965,8 @@ def create_code_runner(  # noqa: PLR0913
     repeat_rounds=None,
     clone_protocol="ssh",
     skip_golden=False,
+    enable_qemu_counting=False,
+    instr_count_output=None,
 ):
     """Factory: creates a CodeRunner based on kernel_config."""
     return CodeRunner(
@@ -976,4 +982,6 @@ def create_code_runner(  # noqa: PLR0913
         repeat_rounds=repeat_rounds,
         clone_protocol=clone_protocol,
         skip_golden=skip_golden,
+        enable_qemu_counting=enable_qemu_counting,
+        instr_count_output=instr_count_output,
     )
