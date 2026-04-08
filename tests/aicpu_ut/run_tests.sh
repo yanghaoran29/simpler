@@ -48,6 +48,10 @@
 #   # 亦可显式同时传：--count-scheduler-submit-task-instructions --count-submit-task-instructions（与上一行等价）
 #   ./run_tests.sh --list                          # list all available tests
 #   ./run_tests.sh --self-check                    # internal self-check: validate sub-scripts and key options
+#   ./run_tests.sh --arch a5                       # use a5 runtime sources (default: a2a3)
+#   ./run_tests.sh --arch a5 --test test_qwen3     # run qwen3 prefill layer test on a5
+#   ./run_tests.sh --arch a5 --test test_qwen3 --count-submit-task-instructions
+#     # a5 下 qwen3 指令数统计（与 a2a3 使用相同 orr x3/x4 markers）
 #
 # Available tests:
 #   test_cpu_affinity               (functional)
@@ -59,6 +63,7 @@
 #   test_pau | test_paged_attention_unroll  (同义：perf, paged attention unroll, indices: 0 1 2; --orch / --sched)
 #   test_throughput                 (perf, 分层 DAG 吞吐, indices: 0 1 2; idx=0 all-AIV, idx=1 odd-AIC/even-AIV, idx=2 half-AIC/half-AIV per layer; --layer-num n --layer0-task-num W --dependency D --overlap O, 默认 n=10 layer0=320 D=6 O=5; --orch/--sched)
 #   test_latency                    (perf, 极限延迟; indices: 0 1; idx=0 all-AIV, idx=1 aic/aiv alternate; 默认 chains=64 len=64; --chain-num/--chain-length/--latency-nelems 在编译期写入二进制; --orch/--sched)
+#   test_qwen3                      (perf, qwen3 prefill layer orchestration, index: 0; --orch/--sched; 支持 --arch a5)
 #
 # Optional environment overrides:
 #   TIMEOUT=300 ./run_tests.sh
@@ -96,12 +101,14 @@ TEST_TYPE["test_latency"]="perf"                ; TEST_INDICES["test_latency"]="
 TEST_TYPE["test_spmd_basic"]="perf"             ; TEST_INDICES["test_spmd_basic"]="0"
 TEST_TYPE["test_spmd_aiv"]="perf"               ; TEST_INDICES["test_spmd_aiv"]="0 1 2 3 4"
 TEST_TYPE["test_spmd_mix"]="perf"               ; TEST_INDICES["test_spmd_mix"]="0 1 2 3 4"
+TEST_TYPE["test_qwen3"]="perf"                  ; TEST_INDICES["test_qwen3"]="0"
 
-ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention test_alt test_bgemm test_pau test_paged_attention_unroll test_throughput test_latency test_spmd_basic test_spmd_aiv test_spmd_mix)
+ALL_TESTS=(test_cpu_affinity test_platform_config test_paged_attention test_batch_paged_attention test_alt test_bgemm test_pau test_paged_attention_unroll test_throughput test_latency test_spmd_basic test_spmd_aiv test_spmd_mix test_qwen3)
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 TIMEOUT=${TIMEOUT:-600}
-BUILD_DIR=${BUILD_DIR:-"${SCRIPT_DIR}/build"}
+# BUILD_DIR is finalized after arg-parse (see below) so --arch affects the default path.
+_BUILD_DIR_OVERRIDE=${BUILD_DIR:-""}
 
 ORCH_CPU=${ORCH_CPU:-4}
 SCHED_CPU0=${SCHED_CPU0:-8}
@@ -129,6 +136,7 @@ PROFILING_MODE=${PROFILING_MODE:-0}
 RUN_FUNC=false
 RUN_PERF=true
 RUN_ALL_INDICES=false
+ARCH=${ARCH:-a2a3}          # target architecture: a2a3 | a5; overridable by --arch or env
 # Perf tests run by default (excludes test_paged_attention)
 # 默认 perf 集合中暂时跳过 test_bgemm；如需运行可显式 --test test_bgemm
 DEFAULT_PERF_TESTS=(test_batch_paged_attention test_alt test_pau test_throughput test_latency)
@@ -230,6 +238,15 @@ while [[ $# -gt 0 ]]; do
         --orch)         THREAD_MODE="orch"; shift ;;
         --sched)        THREAD_MODE="sched"; shift ;;
         --build-only)   BUILD_ONLY=true; shift ;;
+        --arch)
+            if [[ -z "${2:-}" ]]; then
+                echo "--arch requires an argument: a2a3 | a5" >&2; exit 1
+            fi
+            case "$2" in
+                a2a3|a5) ARCH="$2" ;;
+                *) echo "--arch: unsupported value '$2' (valid: a2a3, a5)" >&2; exit 1 ;;
+            esac
+            shift 2 ;;
         --opt-level)
             if [[ -z "${2:-}" ]]; then
                 echo "--opt-level requires a numeric argument (0/1/2/3)." >&2; exit 1
@@ -345,6 +362,13 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+# Finalize BUILD_DIR: arch-specific default prevents CMake cache conflicts between a2a3 and a5 builds.
+if [ -n "$_BUILD_DIR_OVERRIDE" ]; then
+    BUILD_DIR="$_BUILD_DIR_OVERRIDE"
+else
+    BUILD_DIR="${SCRIPT_DIR}/build_${ARCH}"
+fi
 
 if $SELF_CHECK; then
     PROJECT_ROOT="${SCRIPT_DIR}/../.."
@@ -888,6 +912,12 @@ get_binary_path() {
                 sched) echo "${BIN_DIR}/test_spmd_mix_sched_prof_only_${idx}" ;;
                 *)     echo "${BIN_DIR}/test_spmd_mix_concurrent_${idx}" ;;
             esac ;;
+        test_qwen3)
+            case "$THREAD_MODE" in
+                orch)  echo "${BIN_DIR}/test_qwen3_orch_only_${idx}" ;;
+                sched) echo "${BIN_DIR}/test_qwen3_sched_prof_only_${idx}" ;;
+                *)     echo "${BIN_DIR}/test_qwen3_concurrent_${idx}" ;;
+            esac ;;
         test_paged_attention) echo "${BIN_DIR}/test_pa_concurrent_${idx}" ;;
         *) echo "${BIN_DIR}/${name}_${idx}" ;;
     esac
@@ -966,6 +996,7 @@ quiet_echo "  Configuring with CMake"
 quiet_echo "============================================================"
 quiet_echo "  Build dir : $BUILD_DIR"
 quiet_echo "  Source dir: $SCRIPT_DIR"
+quiet_echo "  Arch      : $ARCH"
 quiet_echo "  Opt level : -O${OPT_LEVEL}"
 quiet_echo "  Callstack : AICPU_UT_PROFILE_CALLSTACK=$AICPU_UT_PROFILE_CALLSTACK"
 quiet_echo "  Profiling : mode=$PROFILING_MODE (0=off 1=base 2=full) PTO2_PROFILING=$PTO2_PROFILING"
@@ -973,6 +1004,7 @@ quiet_echo "  Profiling : mode=$PROFILING_MODE (0=off 1=base 2=full) PTO2_PROFIL
 mkdir -p "$BUILD_DIR"
 
 cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
+    -DARCH="$ARCH" \
     -DORCH_CPU="$ORCH_CPU" \
     -DSCHED_CPU0="$SCHED_CPU0" \
     -DSCHED_CPU1="$SCHED_CPU1" \
