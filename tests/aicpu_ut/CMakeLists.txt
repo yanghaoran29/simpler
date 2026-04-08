@@ -60,27 +60,47 @@ option(PTO2_INSTR_COUNT_SCHEDULER_LOOP_ENABLE "Emit per-iteration scheduler loop
 
 # ─── Source directories ────────────────────────────────────────────────────────
 set(ROOT_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/../..)
-set(RUNTIME_DIR ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/runtime)
-set(AICPU_DIR   ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/aicpu)
-set(ORCH_DIR    ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/orchestration)
+
+# ARCH selects which chip runtime to use: a2a3 (default) or a5
+set(ARCH "a2a3" CACHE STRING "Target architecture: a2a3 | a5")
+
+if(ARCH STREQUAL "a5")
+    set(RUNTIME_DIR ${ROOT_DIR}/src/a5/runtime/tensormap_and_ringbuffer/runtime)
+    set(AICPU_DIR   ${ROOT_DIR}/src/a5/runtime/tensormap_and_ringbuffer/aicpu)
+    set(ORCH_DIR    ${ROOT_DIR}/src/a5/runtime/tensormap_and_ringbuffer/orchestration)
+    set(PLATFORM_AICPU_DIR ${ROOT_DIR}/src/a5/platform/src/aicpu)
+    # a5 has no standalone sim/ dir; reuse a2a3 sim (msgq/hscb/sim_aicore are arch-agnostic)
+    set(SIM_DIR            ${ROOT_DIR}/src/a2a3/sim)
+    set(ARCH_PLATFORM_SIM_AICPU_DIR ${ROOT_DIR}/src/a5/platform/sim/aicpu)
+    set(ARCH_PLATFORM_INCLUDE_DIR   ${ROOT_DIR}/src/a5/platform/include)
+    set(ARCH_RUNTIME_COMMON_DIR     ${ROOT_DIR}/src/a5/runtime/tensormap_and_ringbuffer/common)
+else()
+    set(RUNTIME_DIR ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/runtime)
+    set(AICPU_DIR   ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/aicpu)
+    set(ORCH_DIR    ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/orchestration)
+    set(PLATFORM_AICPU_DIR ${ROOT_DIR}/src/a2a3/platform/src/aicpu)
+    set(SIM_DIR            ${ROOT_DIR}/src/a2a3/sim)
+    set(ARCH_PLATFORM_SIM_AICPU_DIR ${ROOT_DIR}/src/a2a3/platform/sim/aicpu)
+    set(ARCH_PLATFORM_INCLUDE_DIR   ${ROOT_DIR}/src/a2a3/platform/include)
+    set(ARCH_RUNTIME_COMMON_DIR     ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/common)
+endif()
+
 set(COMMON_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/common)
 set(FUNC_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/functional)
 set(PERF_DIR    ${CMAKE_CURRENT_SOURCE_DIR}/perf)
-set(PLATFORM_AICPU_DIR ${ROOT_DIR}/src/a2a3/platform/src/aicpu)
-set(SIM_DIR            ${ROOT_DIR}/src/a2a3/sim)
 
 # ─── Common include directories ───────────────────────────────────────────────
 set(COMMON_INCLUDES
     ${RUNTIME_DIR}
-    ${ROOT_DIR}/src/a2a3/runtime/tensormap_and_ringbuffer/common
-    ${ROOT_DIR}/src/a2a3/platform/include
+    ${ARCH_RUNTIME_COMMON_DIR}
+    ${ARCH_PLATFORM_INCLUDE_DIR}
     ${ROOT_DIR}/src/common/task_interface
     ${ORCH_DIR}
     ${COMMON_DIR}
     ${AICPU_DIR}
     ${PLATFORM_AICPU_DIR}
     ${SIM_DIR}
-    ${ROOT_DIR}/src/a2a3/platform/sim/aicpu
+    ${ARCH_PLATFORM_SIM_AICPU_DIR}
 )
 
 # ─── Common compile definitions ───────────────────────────────────────────────
@@ -190,7 +210,7 @@ set(RUNTIME_SRCS
     ${RUNTIME_DIR}/pto_shared_memory.cpp
     ${RUNTIME_DIR}/pto_tensormap.cpp
     ${ORCH_DIR}/common.cpp
-    ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/device_time.cpp
+    ${ARCH_PLATFORM_SIM_AICPU_DIR}/device_time.cpp
     ${RUNTIME_DIR}/runtime.cpp
     ${AICPU_DIR}/aicpu_executor.cpp
     ${SIM_DIR}/sim_aicore.cpp
@@ -198,7 +218,7 @@ set(RUNTIME_SRCS
     ${SIM_DIR}/hscb_cpu_sim.cpp
     ${PLATFORM_AICPU_DIR}/platform_regs.cpp
     ${PLATFORM_AICPU_DIR}/performance_collector_aicpu.cpp
-    ${ROOT_DIR}/src/a2a3/platform/sim/aicpu/cache_ops.cpp
+    ${ARCH_PLATFORM_SIM_AICPU_DIR}/cache_ops.cpp
 )
 
 # ─── Common test source files ─────────────────────────────────────────────────
@@ -587,6 +607,32 @@ foreach(i IN LISTS SPMD_MIX_CASE_INDICES)
     apply_sched_build_graph_markers(${target})
 endforeach()
 
+# ─── Qwen3 prefill layer test (PERF_BACKEND=12) ───────────────────────────────
+set(QWEN3_CASE_INDICES 0)
+
+foreach(i IN LISTS QWEN3_CASE_INDICES)
+    set(target test_qwen3_sched_prof_only_${i})
+    add_executable(${target} ${PERF_DRIVERS}/test_scheduler.cpp)
+    configure_test_target(${target})
+    target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
+    target_compile_definitions(${target} PRIVATE PERF_BACKEND=12 PERF_CASE_IDX=${i})
+endforeach()
+foreach(i IN LISTS QWEN3_CASE_INDICES)
+    set(target test_qwen3_orch_only_${i})
+    add_executable(${target} ${PERF_DRIVERS}/test_orchestrator.cpp)
+    configure_test_target(${target})
+    target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
+    target_compile_definitions(${target} PRIVATE PERF_BACKEND=12 PERF_CASE_IDX=${i})
+endforeach()
+foreach(i IN LISTS QWEN3_CASE_INDICES)
+    set(target test_qwen3_concurrent_${i})
+    add_executable(${target} ${PERF_DRIVERS}/test_orchestrator_scheduler.cpp)
+    configure_test_target(${target})
+    target_include_directories(${target} PRIVATE ${PERF_DRIVERS} ${PERF_CASES})
+    target_compile_definitions(${target} PRIVATE PERF_BACKEND=12 PERF_CASE_IDX=${i})
+    apply_sched_build_graph_markers(${target})
+endforeach()
+
 # ─── CTest integration ────────────────────────────────────────────────────────
 enable_testing()
 
@@ -723,4 +769,17 @@ endforeach()
 foreach(i IN LISTS SPMD_MIX_CASE_INDICES)
     add_test(NAME spmd_mix_sched_prof_only_${i} COMMAND test_spmd_mix_sched_prof_only_${i})
     set_tests_properties(spmd_mix_sched_prof_only_${i} PROPERTIES TIMEOUT 600 LABELS "perf;sched_prof_only")
+endforeach()
+
+foreach(i IN LISTS QWEN3_CASE_INDICES)
+    add_test(NAME qwen3_concurrent_${i} COMMAND test_qwen3_concurrent_${i})
+    set_tests_properties(qwen3_concurrent_${i} PROPERTIES TIMEOUT 600 LABELS "perf")
+endforeach()
+foreach(i IN LISTS QWEN3_CASE_INDICES)
+    add_test(NAME qwen3_orch_only_${i} COMMAND test_qwen3_orch_only_${i})
+    set_tests_properties(qwen3_orch_only_${i} PROPERTIES TIMEOUT 600 LABELS "perf;orch_only")
+endforeach()
+foreach(i IN LISTS QWEN3_CASE_INDICES)
+    add_test(NAME qwen3_sched_prof_only_${i} COMMAND test_qwen3_sched_prof_only_${i})
+    set_tests_properties(qwen3_sched_prof_only_${i} PROPERTIES TIMEOUT 600 LABELS "perf;sched_prof_only")
 endforeach()

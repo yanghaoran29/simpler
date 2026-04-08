@@ -18,6 +18,8 @@
 #include "test_spmd_multiblock_aiv.cpp"
 #elif PERF_BACKEND == 11
 #include "test_spmd_multiblock_mix.cpp"
+#elif PERF_BACKEND == 12
+#include "test_qwen3_prefill_layer.cpp"
 #else
 #error "Unsupported PERF_BACKEND"
 #endif
