@@ -679,6 +679,7 @@ int DeviceRunner::run(
         perf_collector_.drain_remaining_buffers();
         perf_collector_.scan_remaining_perf_buffers();
         perf_collector_.collect_phase_data();
+        perf_collector_.print_profiling_summary();
         export_swimlane_json();
     }
 

@@ -16,6 +16,8 @@
 #include "dlog_pub.h"  // CANN dlog API
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 bool g_is_log_enable_debug = false;
 bool g_is_log_enable_info = false;
@@ -23,6 +25,10 @@ bool g_is_log_enable_warn = false;
 bool g_is_log_enable_error = false;
 
 const char *TILE_FWK_DEVICE_MACHINE = "AI_CPU";
+
+static bool g_dev_always_mirror_to_stderr = false;
+
+void dev_log_set_always_mirror_to_stderr(bool enable) { g_dev_always_mirror_to_stderr = enable; }
 
 void init_log_switch() {
     g_is_log_enable_debug = CheckLogLevel(AICPU, DLOG_DEBUG);
@@ -79,4 +85,16 @@ void dev_log_always(const char *func, const char *fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     dlog_error(AICPU, "[ALWAYS] %lu %s\n\"%s\"", GET_TID(), func, buffer);
+    // 设备进程无主机环境变量：由 kernel 入口 dev_log_set_always_mirror_to_stderr(runtime->enable_profiling) 打开。
+    const char *mir = std::getenv("PTO_AICPU_ALWAYS_STDERR");
+    const bool mirror_env =
+        mir != nullptr && mir[0] != '\0' && std::strcmp(mir, "0") != 0;
+    if (g_dev_always_mirror_to_stderr || mirror_env) {
+        std::fputs("[ALWAYS] ", stderr);
+        std::fputs(func, stderr);
+        std::fputs(": ", stderr);
+        std::fputs(buffer, stderr);
+        std::fputc('\n', stderr);
+        std::fflush(stderr);
+    }
 }

@@ -189,4 +189,17 @@ void perf_aicpu_write_core_assignments(
  */
 void perf_aicpu_flush_phase_buffers(int thread_idx);
 
+/**
+ * Write scheduler profiling summary for a thread to shared memory
+ *
+ * Copies the per-thread AicpuSchedProfilingSummary (CSV counters + cycle data)
+ * into AicpuPhaseHeader::sched_summary[thread_idx] for host-side collection.
+ * Must be called after pto2_scheduler_get_profiling() and before
+ * perf_aicpu_flush_phase_buffers().
+ *
+ * @param thread_idx Scheduler thread index
+ * @param src        Populated summary to write
+ */
+void perf_aicpu_write_sched_summary(int thread_idx, const AicpuSchedProfilingSummary *src);
+
 #endif  // PLATFORM_AICPU_PERFORMANCE_COLLECTOR_AICPU_H_

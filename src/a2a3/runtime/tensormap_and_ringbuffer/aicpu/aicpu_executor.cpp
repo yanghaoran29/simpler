@@ -428,6 +428,7 @@ struct AicpuExecutor {
         uint64_t sched_complete_perf_cycle{0};
         uint64_t sched_dispatch_pop_cycle{0};
         uint64_t sched_dispatch_setup_cycle{0};
+        uint64_t idle_no_progress_loops_total{0};
 #endif
         void reset() { *this = SchedProfilingCounters{}; }
     };
@@ -806,6 +807,269 @@ struct AicpuExecutor {
                     cycles_to_us(perf.sched_complete_cycle) / cur_thread_completed
                 );
             }
+
+            DEV_ALWAYS(
+                "Thread %d:   [自旋/轮询/空转] complete_poll probe=%" PRIu64 " hit=%" PRIu64 " miss=%" PRIu64
+                " | readyQ_pop hit_task=%" PRIu64 " miss_round=%" PRIu64 " | idle_no_progress_loops=%" PRIu64,
+                thread_idx, static_cast<uint64_t>(perf.complete_probe_count),
+                static_cast<uint64_t>(perf.complete_hit_count),
+                static_cast<uint64_t>((perf.complete_probe_count > perf.complete_hit_count) ?
+                                          (perf.complete_probe_count - perf.complete_hit_count) :
+                                          0),
+                static_cast<uint64_t>(perf.pop_hit), static_cast<uint64_t>(perf.pop_miss),
+                static_cast<uint64_t>(perf.idle_no_progress_loops_total)
+            );
+
+            // module-struct-access.csv — 调度侧五列（读/写/atomic/锁/CAS）；分段标题与 CSV「模块」列一致
+            DEV_ALWAYS(
+                "Thread %d: === Scheduler CSV (读/写/atomic/锁/CAS) 对应 CSV 模块 ②④⑤⑥⑦ ===", thread_idx);
+            DEV_ALWAYS("Thread %d: --- ②依赖构建 ---", thread_idx);
+            DEV_ALWAYS(
+                "Thread %d:   [②依赖构建] PTO2TaskSlotState      r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m2_pto2_task_slot_state.read_events,
+                sp.csv_m2_pto2_task_slot_state.write_events, sp.csv_m2_pto2_task_slot_state.atomic_ops,
+                sp.csv_m2_pto2_task_slot_state.lock_ops, sp.csv_m2_pto2_task_slot_state.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [②依赖构建] PTO2TaskPayload        r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m2_pto2_task_payload.read_events, sp.csv_m2_pto2_task_payload.write_events,
+                sp.csv_m2_pto2_task_payload.atomic_ops, sp.csv_m2_pto2_task_payload.lock_ops,
+                sp.csv_m2_pto2_task_payload.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [②依赖构建] PTO2DepListEntry       r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m2_pto2_dep_list_entry.read_events,
+                sp.csv_m2_pto2_dep_list_entry.write_events, sp.csv_m2_pto2_dep_list_entry.atomic_ops,
+                sp.csv_m2_pto2_dep_list_entry.lock_ops, sp.csv_m2_pto2_dep_list_entry.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [②依赖构建] PTO2ReadyQueue         r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m2_pto2_ready_queue.read_events, sp.csv_m2_pto2_ready_queue.write_events,
+                sp.csv_m2_pto2_ready_queue.atomic_ops, sp.csv_m2_pto2_ready_queue.lock_ops,
+                sp.csv_m2_pto2_ready_queue.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [②依赖构建] PTO2ReadyQueue(自旋拆分)   a=%" PRIu64 "+%" PRIu64 "(自旋) [base=cas]",
+                thread_idx, sp.csv_m2_pto2_ready_queue.cas_ops, sp.csv_m2_pto2_ready_queue_spin_retry_ops
+            );
+            DEV_ALWAYS("Thread %d: --- ④任务Dispatch ---", thread_idx);
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2TaskSlotState      r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_task_slot_state.read_events,
+                sp.csv_m4_pto2_task_slot_state.write_events, sp.csv_m4_pto2_task_slot_state.atomic_ops,
+                sp.csv_m4_pto2_task_slot_state.lock_ops, sp.csv_m4_pto2_task_slot_state.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2TaskPayload(meta)  r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_task_payload_meta.read_events,
+                sp.csv_m4_pto2_task_payload_meta.write_events, sp.csv_m4_pto2_task_payload_meta.atomic_ops,
+                sp.csv_m4_pto2_task_payload_meta.lock_ops, sp.csv_m4_pto2_task_payload_meta.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2TaskPayload(tens)  r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_task_payload_tensors.read_events,
+                sp.csv_m4_pto2_task_payload_tensors.write_events,
+                sp.csv_m4_pto2_task_payload_tensors.atomic_ops,
+                sp.csv_m4_pto2_task_payload_tensors.lock_ops, sp.csv_m4_pto2_task_payload_tensors.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2TaskPayload(scal)  r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_task_payload_scalars.read_events,
+                sp.csv_m4_pto2_task_payload_scalars.write_events,
+                sp.csv_m4_pto2_task_payload_scalars.atomic_ops,
+                sp.csv_m4_pto2_task_payload_scalars.lock_ops, sp.csv_m4_pto2_task_payload_scalars.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2TaskDescriptor     r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_task_descriptor.read_events,
+                sp.csv_m4_pto2_task_descriptor.write_events, sp.csv_m4_pto2_task_descriptor.atomic_ops,
+                sp.csv_m4_pto2_task_descriptor.lock_ops, sp.csv_m4_pto2_task_descriptor.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2DispatchPayload    r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_dispatch_payload.read_events,
+                sp.csv_m4_pto2_dispatch_payload.write_events, sp.csv_m4_pto2_dispatch_payload.atomic_ops,
+                sp.csv_m4_pto2_dispatch_payload.lock_ops, sp.csv_m4_pto2_dispatch_payload.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2ReadyQueue(pop)    r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_ready_queue.read_events, sp.csv_m4_pto2_ready_queue.write_events,
+                sp.csv_m4_pto2_ready_queue.atomic_ops, sp.csv_m4_pto2_ready_queue.lock_ops,
+                sp.csv_m4_pto2_ready_queue.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2ReadyQueue(pop命中) r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_ready_queue_pop_hit.read_events,
+                sp.csv_m4_pto2_ready_queue_pop_hit.write_events,
+                sp.csv_m4_pto2_ready_queue_pop_hit.atomic_ops,
+                sp.csv_m4_pto2_ready_queue_pop_hit.lock_ops, sp.csv_m4_pto2_ready_queue_pop_hit.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2ReadyQueue(pop空转) r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_ready_queue_pop_miss.read_events,
+                sp.csv_m4_pto2_ready_queue_pop_miss.write_events,
+                sp.csv_m4_pto2_ready_queue_pop_miss.atomic_ops,
+                sp.csv_m4_pto2_ready_queue_pop_miss.lock_ops, sp.csv_m4_pto2_ready_queue_pop_miss.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [④任务Dispatch] PTO2ReadyQueue(pop自旋重试) retry=%" PRIu64 " empty_poll=%" PRIu64,
+                thread_idx, sp.csv_m4_pto2_ready_queue_spin_retry_ops,
+                sp.csv_m4_pto2_ready_queue_empty_poll_ops
+            );
+            DEV_ALWAYS("Thread %d: --- ⑤AICore执行 ---", thread_idx);
+            DEV_ALWAYS(
+                "Thread %d:   [⑤AICore执行] PTO2TaskSlotState      r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m5_pto2_task_slot_state.read_events,
+                sp.csv_m5_pto2_task_slot_state.write_events, sp.csv_m5_pto2_task_slot_state.atomic_ops,
+                sp.csv_m5_pto2_task_slot_state.lock_ops, sp.csv_m5_pto2_task_slot_state.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑤AICore执行] PTO2DispatchPayload    r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m5_pto2_dispatch_payload.read_events,
+                sp.csv_m5_pto2_dispatch_payload.write_events, sp.csv_m5_pto2_dispatch_payload.atomic_ops,
+                sp.csv_m5_pto2_dispatch_payload.lock_ops, sp.csv_m5_pto2_dispatch_payload.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑤AICore执行] Tensor                 r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m5_tensor.read_events, sp.csv_m5_tensor.write_events,
+                sp.csv_m5_tensor.atomic_ops, sp.csv_m5_tensor.lock_ops, sp.csv_m5_tensor.cas_ops
+            );
+            DEV_ALWAYS("Thread %d: --- ⑥解依赖 ---", thread_idx);
+            DEV_ALWAYS(
+                "Thread %d:   [⑥解依赖] PTO2TaskSlotState      r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m6_pto2_task_slot_state.read_events,
+                sp.csv_m6_pto2_task_slot_state.write_events, sp.csv_m6_pto2_task_slot_state.atomic_ops,
+                sp.csv_m6_pto2_task_slot_state.lock_ops, sp.csv_m6_pto2_task_slot_state.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑥解依赖] PTO2DepListEntry       r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m6_pto2_dep_list_entry.read_events,
+                sp.csv_m6_pto2_dep_list_entry.write_events, sp.csv_m6_pto2_dep_list_entry.atomic_ops,
+                sp.csv_m6_pto2_dep_list_entry.lock_ops, sp.csv_m6_pto2_dep_list_entry.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑥解依赖] PTO2ReadyQueue(push)   r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m6_pto2_ready_queue.read_events, sp.csv_m6_pto2_ready_queue.write_events,
+                sp.csv_m6_pto2_ready_queue.atomic_ops, sp.csv_m6_pto2_ready_queue.lock_ops,
+                sp.csv_m6_pto2_ready_queue.cas_ops
+            );
+            DEV_ALWAYS("Thread %d: --- ⑦资源释放 ---", thread_idx);
+            DEV_ALWAYS(
+                "Thread %d:   [⑦资源释放] PTO2TaskSlotState      r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m7_pto2_task_slot_state.read_events,
+                sp.csv_m7_pto2_task_slot_state.write_events, sp.csv_m7_pto2_task_slot_state.atomic_ops,
+                sp.csv_m7_pto2_task_slot_state.lock_ops, sp.csv_m7_pto2_task_slot_state.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑦资源释放] PTO2TaskPayload        r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m7_pto2_task_payload.read_events, sp.csv_m7_pto2_task_payload.write_events,
+                sp.csv_m7_pto2_task_payload.atomic_ops, sp.csv_m7_pto2_task_payload.lock_ops,
+                sp.csv_m7_pto2_task_payload.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑦资源释放] PTO2RingFlowControl    r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m7_pto2_ring_flow_control.read_events,
+                sp.csv_m7_pto2_ring_flow_control.write_events, sp.csv_m7_pto2_ring_flow_control.atomic_ops,
+                sp.csv_m7_pto2_ring_flow_control.lock_ops, sp.csv_m7_pto2_ring_flow_control.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑦资源释放] PTO2FaninSpillEntry    r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m7_pto2_fanin_spill_entry.read_events,
+                sp.csv_m7_pto2_fanin_spill_entry.write_events, sp.csv_m7_pto2_fanin_spill_entry.atomic_ops,
+                sp.csv_m7_pto2_fanin_spill_entry.lock_ops, sp.csv_m7_pto2_fanin_spill_entry.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [⑦资源释放] advance_lock           r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64
+                " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, sp.csv_m7_ring_sched_state_advance_lock.read_events,
+                sp.csv_m7_ring_sched_state_advance_lock.write_events,
+                sp.csv_m7_ring_sched_state_advance_lock.atomic_ops,
+                sp.csv_m7_ring_sched_state_advance_lock.lock_ops,
+                sp.csv_m7_ring_sched_state_advance_lock.cas_ops
+            );
+
+            // Write scheduler CSV summary to shared memory for host-side collection
+            if (perf.profiling_enabled) {
+                auto copy_csv = [](AicpuCsvCounters &dst, const PTO2CsvAccessCounters &src) {
+                    dst.read_events = src.read_events;
+                    dst.write_events = src.write_events;
+                    dst.atomic_ops = src.atomic_ops;
+                    dst.atomic_read_ops = src.atomic_read_ops;
+                    dst.atomic_write_ops = src.atomic_write_ops;
+                    dst.lock_ops = src.lock_ops;
+                    dst.cas_ops = src.cas_ops;
+                };
+                AicpuSchedProfilingSummary ss{};
+                ss.lock_cycle = sp.lock_cycle;
+                ss.fanout_cycle = sp.fanout_cycle;
+                ss.fanin_cycle = sp.fanin_cycle;
+                ss.self_consumed_cycle = sp.self_consumed_cycle;
+                ss.lock_wait_cycle = sp.lock_wait_cycle;
+                ss.push_wait_cycle = sp.push_wait_cycle;
+                ss.pop_wait_cycle = sp.pop_wait_cycle;
+                ss.lock_atomic_count = sp.lock_atomic_count;
+                ss.fanout_atomic_count = sp.fanout_atomic_count;
+                ss.fanin_atomic_count = sp.fanin_atomic_count;
+                ss.self_atomic_count = sp.self_atomic_count;
+                ss.pop_atomic_count = sp.pop_atomic_count;
+                ss.complete_count = sp.complete_count;
+                copy_csv(ss.csv_m2_pto2_task_slot_state, sp.csv_m2_pto2_task_slot_state);
+                copy_csv(ss.csv_m2_pto2_task_payload, sp.csv_m2_pto2_task_payload);
+                copy_csv(ss.csv_m2_pto2_dep_list_entry, sp.csv_m2_pto2_dep_list_entry);
+                copy_csv(ss.csv_m2_pto2_ready_queue, sp.csv_m2_pto2_ready_queue);
+                ss.csv_m2_pto2_ready_queue_spin_retry_ops = sp.csv_m2_pto2_ready_queue_spin_retry_ops;
+                copy_csv(ss.csv_m4_pto2_task_slot_state, sp.csv_m4_pto2_task_slot_state);
+                copy_csv(ss.csv_m4_pto2_task_payload_meta, sp.csv_m4_pto2_task_payload_meta);
+                copy_csv(ss.csv_m4_pto2_task_payload_tensors, sp.csv_m4_pto2_task_payload_tensors);
+                copy_csv(ss.csv_m4_pto2_task_payload_scalars, sp.csv_m4_pto2_task_payload_scalars);
+                copy_csv(ss.csv_m4_pto2_task_descriptor, sp.csv_m4_pto2_task_descriptor);
+                copy_csv(ss.csv_m4_pto2_dispatch_payload, sp.csv_m4_pto2_dispatch_payload);
+                copy_csv(ss.csv_m4_pto2_ready_queue, sp.csv_m4_pto2_ready_queue);
+                ss.csv_m4_pto2_ready_queue_spin_retry_ops = sp.csv_m4_pto2_ready_queue_spin_retry_ops;
+                ss.csv_m4_pto2_ready_queue_empty_poll_ops = sp.csv_m4_pto2_ready_queue_empty_poll_ops;
+                copy_csv(ss.csv_m4_pto2_ready_queue_pop_hit, sp.csv_m4_pto2_ready_queue_pop_hit);
+                copy_csv(ss.csv_m4_pto2_ready_queue_pop_miss, sp.csv_m4_pto2_ready_queue_pop_miss);
+                copy_csv(ss.csv_m5_pto2_task_slot_state, sp.csv_m5_pto2_task_slot_state);
+                copy_csv(ss.csv_m5_pto2_dispatch_payload, sp.csv_m5_pto2_dispatch_payload);
+                copy_csv(ss.csv_m5_tensor, sp.csv_m5_tensor);
+                copy_csv(ss.csv_m6_pto2_task_slot_state, sp.csv_m6_pto2_task_slot_state);
+                copy_csv(ss.csv_m6_pto2_dep_list_entry, sp.csv_m6_pto2_dep_list_entry);
+                copy_csv(ss.csv_m6_pto2_ready_queue, sp.csv_m6_pto2_ready_queue);
+                copy_csv(ss.csv_m7_pto2_task_slot_state, sp.csv_m7_pto2_task_slot_state);
+                copy_csv(ss.csv_m7_pto2_task_payload, sp.csv_m7_pto2_task_payload);
+                copy_csv(ss.csv_m7_pto2_ring_flow_control, sp.csv_m7_pto2_ring_flow_control);
+                copy_csv(ss.csv_m7_pto2_fanin_spill_entry, sp.csv_m7_pto2_fanin_spill_entry);
+                copy_csv(ss.csv_m7_ring_sched_state_advance_lock, sp.csv_m7_ring_sched_state_advance_lock);
+                ss.complete_poll_probe_count = perf.complete_probe_count;
+                ss.complete_poll_hit_count = perf.complete_hit_count;
+                ss.ready_queue_pop_hit_task_count = perf.pop_hit;
+                ss.ready_queue_pop_miss_round_count = perf.pop_miss;
+                ss.idle_no_progress_loop_count = perf.idle_no_progress_loops_total;
+                perf_aicpu_write_sched_summary(thread_idx, &ss);
+            }
         }
 #endif
         DEV_ALWAYS(
@@ -874,6 +1138,11 @@ struct AicpuExecutor {
         auto &perf = sched_perf_[thread_idx];
 #else
         (void)hank;
+#endif
+#if PTO2_SCHED_PROFILING
+        extern uint64_t g_sched_subtask_complete_count[];
+        // 每检测到一条子任务完成：CSV ⑤「completed_subtasks.fetch_add」次数 → g_sched_subtask_complete_count
+        g_sched_subtask_complete_count[thread_idx]++;
 #endif
         bool mixed_complete = rt->scheduler.on_subtask_complete(slot_state);
         if (mixed_complete) {
@@ -1112,16 +1381,41 @@ struct AicpuExecutor {
     ) {
 #if PTO2_SCHED_PROFILING
         auto &perf = sched_perf_[thread_idx];
-        extern uint64_t g_sched_pop_atomic_count[], g_sched_pop_wait_cycle[];
+        // pop_batch 内部原子/等待写入 g_sched_pop_*；用于 CSV ④ ReadyQueue 的 atomic 近似
+        extern uint64_t g_sched_pop_atomic_count[], g_sched_pop_atomic_read_count[], g_sched_pop_atomic_write_count[],
+            g_sched_pop_wait_cycle[], g_sched_ready_queue_pop_count[];
+        extern uint64_t g_sched_ready_queue_pop_hit_round_count[], g_sched_ready_queue_pop_miss_round_count[];
+        extern uint64_t g_sched_ready_queue_pop_hit_atomic_count[], g_sched_ready_queue_pop_miss_atomic_count[];
+        extern uint64_t g_sched_ready_queue_pop_hit_atomic_read_count[], g_sched_ready_queue_pop_hit_atomic_write_count[];
+        extern uint64_t g_sched_ready_queue_pop_miss_atomic_read_count[], g_sched_ready_queue_pop_miss_atomic_write_count[];
+        extern uint64_t g_sched_m4_ready_queue_pop_retry_count[], g_sched_m4_ready_queue_pop_empty_poll_count[];
+        uint64_t pop_atomic_before = g_sched_pop_atomic_count[thread_idx];
+        uint64_t pop_atomic_read_before = g_sched_pop_atomic_read_count[thread_idx];
+        uint64_t pop_atomic_write_before = g_sched_pop_atomic_write_count[thread_idx];
         uint64_t t_pop_start = get_sys_cnt_aicpu();
         int count = rt->scheduler.get_ready_tasks_batch(
-            shape, local_buf, out, max_count, g_sched_pop_atomic_count[thread_idx], g_sched_pop_wait_cycle[thread_idx],
-            perf.local_dispatch_count
+            shape, local_buf, out, max_count, g_sched_pop_atomic_count[thread_idx],
+            g_sched_pop_atomic_read_count[thread_idx], g_sched_pop_atomic_write_count[thread_idx],
+            g_sched_pop_wait_cycle[thread_idx], perf.local_dispatch_count,
+            g_sched_m4_ready_queue_pop_retry_count[thread_idx], g_sched_m4_ready_queue_pop_empty_poll_count[thread_idx]
         );
+        uint64_t pop_atomic_delta = g_sched_pop_atomic_count[thread_idx] - pop_atomic_before;
+        uint64_t pop_atomic_read_delta = g_sched_pop_atomic_read_count[thread_idx] - pop_atomic_read_before;
+        uint64_t pop_atomic_write_delta = g_sched_pop_atomic_write_count[thread_idx] - pop_atomic_write_before;
         perf.sched_dispatch_pop_cycle += (get_sys_cnt_aicpu() - t_pop_start);
+        // 每轮调度循环一次 pop 尝试：CSV ④「全局就绪队列 pop」读次数 rqp 的数据源
+        g_sched_ready_queue_pop_count[thread_idx]++;
         if (count > 0) {
+            g_sched_ready_queue_pop_hit_round_count[thread_idx]++;
+            g_sched_ready_queue_pop_hit_atomic_count[thread_idx] += pop_atomic_delta;
+            g_sched_ready_queue_pop_hit_atomic_read_count[thread_idx] += pop_atomic_read_delta;
+            g_sched_ready_queue_pop_hit_atomic_write_count[thread_idx] += pop_atomic_write_delta;
             perf.pop_hit += count;
         } else {
+            g_sched_ready_queue_pop_miss_round_count[thread_idx]++;
+            g_sched_ready_queue_pop_miss_atomic_count[thread_idx] += pop_atomic_delta;
+            g_sched_ready_queue_pop_miss_atomic_read_count[thread_idx] += pop_atomic_read_delta;
+            g_sched_ready_queue_pop_miss_atomic_write_count[thread_idx] += pop_atomic_write_delta;
             perf.pop_miss++;
         }
 #else
@@ -1201,6 +1495,17 @@ struct AicpuExecutor {
         uint32_t buf_idx = reg_task_id & 1u;
         PTO2DispatchPayload &payload = s_pto2_payload_per_core[core_id][buf_idx];
         build_payload(payload, slot_state, subslot);
+#if PTO2_SCHED_PROFILING
+        // 与 build_payload 内循环一致：每 dispatch 一次累加 tensor_count / scalar_count → CSV ④ Payload 张量区/标量区「读次数」
+        extern uint64_t g_sched_m4_payload_tensor_lane_reads[];
+        extern uint64_t g_sched_m4_payload_scalar_lane_reads[];
+        if (slot_state.payload != nullptr) {
+            g_sched_m4_payload_tensor_lane_reads[thread_idx] +=
+                static_cast<uint64_t>(slot_state.payload->tensor_count);
+            g_sched_m4_payload_scalar_lane_reads[thread_idx] +=
+                static_cast<uint64_t>(slot_state.payload->scalar_count);
+        }
+#endif
 
         // to_pending is determined by the caller (idle dispatch = false, pending dispatch = true).
         if (to_pending) {
@@ -2094,6 +2399,11 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
         } else {
             CYCLE_COUNT_LAP(perf.sched_dispatch_cycle);
             if (perf.profiling_enabled && perf.phase_dispatch_count > 0) {
+#if PTO2_SCHED_PROFILING
+                extern uint64_t g_sched_dispatch_subtask_count[];
+                // 本调度相位内子任务下发总数：CSV ④ ∑S，与 DispatchPayload 写、SlotState RMW 同阶
+                g_sched_dispatch_subtask_count[thread_idx] += static_cast<uint64_t>(perf.phase_dispatch_count);
+#endif
                 perf_aicpu_record_phase(
                     thread_idx, AicpuPhaseId::SCHED_DISPATCH, _t0_phase, _t1, perf.sched_loop_count,
                     perf.phase_dispatch_count
@@ -2127,6 +2437,9 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
 #endif
             }
             idle_iterations++;
+#if PTO2_SCHED_PROFILING
+            perf.idle_no_progress_loops_total++;
+#endif
 
             // Check for orchestrator fatal error during idle (every 1024 iterations)
             // orch_error_code is set in shared memory by the orchestrator's spin loop
@@ -2417,7 +2730,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
             // Print orchestrator profiling data
 #if PTO2_ORCH_PROFILING
-            PTO2OrchProfilingData p = pto2_orchestrator_get_profiling();
+            PTO2OrchProfilingData p = pto2_orchestrator_get_profiling(&rt->orchestrator);
             uint64_t total =
                 p.sync_cycle + p.alloc_cycle + p.args_cycle + p.lookup_cycle + p.insert_cycle + p.fanin_cycle;
             if (total == 0) total = 1;  // avoid div-by-zero
@@ -2457,6 +2770,87 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 "Thread %d:   avg/task       : %.3fus", thread_idx,
                 p.submit_count > 0 ? cycles_to_us(total) / p.submit_count : 0.0
             );
+            // module-struct-access.csv 第 1–9 行注释中的符号（先于 ① 五列打印；按任务形状聚合见 p.csv_glossary）
+            DEV_ALWAYS(
+                "Thread %d: === CSV注释变量(module-struct-access.csv 行1-9) ===", thread_idx);
+            DEV_ALWAYS(
+                "Thread %d: CSV变量说明: P=fanin/producer侧条数 C=fanout_count-1(编排瞬时值) S=total_required_subtasks "
+                "N=Ring自旋(单任务未拆,见本块alloc_atomic与①③RingFC读) N_in/N_out=tensor槽位类型计数 "
+                "N_scope≈submit时scope栈深 tensor_count/scalar_count=payload元数据",
+                thread_idx);
+            DEV_ALWAYS(
+                "Thread %d:   编译常量: PTO2_FANIN_INLINE_CAP=%d PTO2_NUM_RESOURCE_SHAPES=%d PTO2_SUBTASK_SLOT_COUNT=%d "
+                "PTO2_MAX_RING_DEPTH=%d",
+                thread_idx, PTO2_FANIN_INLINE_CAP, PTO2_NUM_RESOURCE_SHAPES, PTO2_SUBTASK_SLOT_COUNT,
+                PTO2_MAX_RING_DEPTH);
+            DEV_ALWAYS(
+                "Thread %d: === CSV按task种类(同键合并submit_count; kind 0=mixed_incore 1=alloc_tensors) ===",
+                thread_idx);
+            DEV_ALWAYS(
+                "Thread %d: CSV按task种类-列说明: 本类submit次数 | P=CSV注释「producer条数」=本任务fanin生产者条数 | "
+                "C=「consumer链」近似=fanout_count-1(编排刚结束多为0) | S=subtask数 | Nin/Nout=tensor槽位 | "
+                "Nscp=scope栈深近似 | tc/sc=payload元数据 | ka/k0/k1=AIC/AIV0/AIV1 kernel_id",
+                thread_idx);
+            DEV_ALWAYS(
+                "Thread %d: CSV按task种类: 本flush共%u个bucket(每bucket一行含P/C/S与N_in/N_out等)",
+                thread_idx, static_cast<unsigned>(p.csv_glossary.bucket_count));
+            if (p.csv_glossary.bucket_count == 0) {
+                DEV_ALWAYS(
+                    "Thread %d: CSV按task种类(无bucket): 本flush内未合并到任何任务形状,或编排未写入rt->orchestrator.csv_glossary",
+                    thread_idx);
+            }
+            for (uint32_t bi = 0; bi < p.csv_glossary.bucket_count; bi++) {
+                const PTO2CsvGlossaryTaskKindBucket &gb = p.csv_glossary.buckets[bi];
+                const char *kind_name =
+                    (gb.k.kind_tag == 1) ? "alloc_tensors(无InCore)" : "mixed_InCore(AIC/AIV)";
+                // 单行输出: 仅用 grep「CSV按task种类」时也能看到 producer(P)/consumer近似(C)/S 与 N_in/N_out
+                DEV_ALWAYS(
+                    "Thread %d: CSV按task种类[bucket%u] submit=%u | %s | ring=%u mask=0x%02x | "
+                    "ka=%" PRId32 " k0=%" PRId32 " k1=%" PRId32 " | "
+                    "P(生产者/fanin条数)=%" PRId32 " C(fanout_count-1)=%" PRId32 " S(子任务)=%" PRId32 " | "
+                    "N_in=%" PRId16 " N_out=%" PRId16 " N_scope=%" PRId16 " | tc=%" PRId16 " sc=%" PRId16,
+                    thread_idx, bi, static_cast<unsigned>(gb.submit_count), kind_name,
+                    static_cast<unsigned>(gb.k.ring_id), static_cast<unsigned>(gb.k.active_mask), gb.k.kernel_aic,
+                    gb.k.kernel_aiv0, gb.k.kernel_aiv1, gb.k.P_fanin_producers, gb.k.C_fanout_minus_scope,
+                    gb.k.S_subtasks, gb.k.N_in, gb.k.N_out, gb.k.scope_depth, gb.k.tensor_count, gb.k.scalar_count);
+            }
+            // module-struct-access.csv ① Payload构建 — 五列（与 CSV「模块」列同名）
+            DEV_ALWAYS(
+                "Thread %d: === Orchestrator CSV (读/写/atomic/锁/CAS) ①Payload构建 ===", thread_idx);
+            DEV_ALWAYS("Thread %d: --- ①Payload构建 ---", thread_idx);
+            DEV_ALWAYS(
+                "Thread %d:   [①Payload构建] PTO2TaskSlotState      r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64 " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, p.csv_m1_pto2_task_slot_state.read_events, p.csv_m1_pto2_task_slot_state.write_events,
+                p.csv_m1_pto2_task_slot_state.atomic_ops, p.csv_m1_pto2_task_slot_state.lock_ops,
+                p.csv_m1_pto2_task_slot_state.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [①Payload构建] PTO2TaskPayload        r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64 " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, p.csv_m1_pto2_task_payload.read_events, p.csv_m1_pto2_task_payload.write_events,
+                p.csv_m1_pto2_task_payload.atomic_ops, p.csv_m1_pto2_task_payload.lock_ops, p.csv_m1_pto2_task_payload.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [①Payload构建] PTO2TaskDescriptor     r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64 " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, p.csv_m1_pto2_task_descriptor.read_events, p.csv_m1_pto2_task_descriptor.write_events,
+                p.csv_m1_pto2_task_descriptor.atomic_ops, p.csv_m1_pto2_task_descriptor.lock_ops,
+                p.csv_m1_pto2_task_descriptor.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [①Payload构建] Tensor                 r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64 " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, p.csv_m1_tensor.read_events, p.csv_m1_tensor.write_events, p.csv_m1_tensor.atomic_ops,
+                p.csv_m1_tensor.lock_ops, p.csv_m1_tensor.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [①Payload构建] PTO2ReadyQueue         r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64 " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, p.csv_m1_pto2_ready_queue.read_events, p.csv_m1_pto2_ready_queue.write_events,
+                p.csv_m1_pto2_ready_queue.atomic_ops, p.csv_m1_pto2_ready_queue.lock_ops, p.csv_m1_pto2_ready_queue.cas_ops
+            );
+            DEV_ALWAYS(
+                "Thread %d:   [①Payload构建] PTO2RingFlowControl    r=%" PRIu64 " w=%" PRIu64 " a=%" PRIu64 " L=%" PRIu64 " cas=%" PRIu64,
+                thread_idx, p.csv_m1_pto2_ring_flow_control.read_events, p.csv_m1_pto2_ring_flow_control.write_events,
+                p.csv_m1_pto2_ring_flow_control.atomic_ops, p.csv_m1_pto2_ring_flow_control.lock_ops,
+                p.csv_m1_pto2_ring_flow_control.cas_ops
+            );
 
 #if PTO2_TENSORMAP_PROFILING
             PTO2TensorMapProfilingData tp = pto2_tensormap_get_profiling();
@@ -2493,6 +2887,31 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 orch_summary.fanin_cycle = p.fanin_cycle;
                 orch_summary.scope_end_cycle = p.scope_end_cycle;
                 orch_summary.submit_count = p.submit_count;
+                uint32_t bucket_count = p.csv_glossary.bucket_count;
+                if (bucket_count > AICPU_CSV_GLOSSARY_BUCKET_MAX) {
+                    bucket_count = AICPU_CSV_GLOSSARY_BUCKET_MAX;
+                }
+                orch_summary.csv_glossary.bucket_count = bucket_count;
+                for (uint32_t bi = 0; bi < bucket_count; bi++) {
+                    const auto &src = p.csv_glossary.buckets[bi];
+                    auto &dst = orch_summary.csv_glossary.buckets[bi];
+                    dst.k.kernel_aic = src.k.kernel_aic;
+                    dst.k.kernel_aiv0 = src.k.kernel_aiv0;
+                    dst.k.kernel_aiv1 = src.k.kernel_aiv1;
+                    dst.k.active_mask = src.k.active_mask;
+                    dst.k.ring_id = src.k.ring_id;
+                    dst.k.kind_tag = src.k.kind_tag;
+                    dst.k.scope_depth = src.k.scope_depth;
+                    dst.k.P_fanin_producers = src.k.P_fanin_producers;
+                    dst.k.C_fanout_minus_scope = src.k.C_fanout_minus_scope;
+                    dst.k.S_subtasks = src.k.S_subtasks;
+                    dst.k.N_ring_acquire_proxy = src.k.N_ring_acquire_proxy;
+                    dst.k.N_in = src.k.N_in;
+                    dst.k.N_out = src.k.N_out;
+                    dst.k.tensor_count = src.k.tensor_count;
+                    dst.k.scalar_count = src.k.scalar_count;
+                    dst.submit_count = src.submit_count;
+                }
                 perf_aicpu_write_orch_summary(&orch_summary);
             }
 #endif

@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -1154,10 +1155,239 @@ void PerformanceCollector::collect_phase_data() {
         LOG_INFO("  Core-to-thread mapping: %d cores", num_cores);
     }
 
+    // Read per-thread scheduler CSV summaries
+    for (int t = 0; t < PLATFORM_MAX_AICPU_THREADS; t++) {
+        if (phase_header->sched_summary[t].magic == AICPU_PHASE_MAGIC) {
+            collected_sched_summary_[t] = phase_header->sched_summary[t];
+            LOG_INFO("  Thread %d: sched_summary valid (complete_count=%" PRId64 ")", t,
+                     static_cast<int64_t>(collected_sched_summary_[t].complete_count));
+        }
+    }
+
     LOG_INFO(
         "Phase data collection complete: %d remaining records, orch_summary=%s", total_phase_records,
         orch_valid ? "yes" : "no"
     );
+}
+
+void PerformanceCollector::print_profiling_summary() const {
+    // Print orchestrator summary
+    if (collected_orch_summary_.magic == AICPU_PHASE_MAGIC) {
+        const AicpuOrchSummary &o = collected_orch_summary_;
+        uint64_t total = o.sync_cycle + o.alloc_cycle + o.args_cycle + o.lookup_cycle + o.insert_cycle + o.fanin_cycle;
+        if (total != 0) {
+            int tidx = 0;
+            printf(
+                "[ALWAYS] run: Thread %d: === Orchestrator Profiling: %" PRId64 " tasks, total=%.3fus ===\n",
+                tidx, static_cast<int64_t>(o.submit_count), cycles_to_us(total)
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   task+heap_alloc: %.3fus (%.1f%%)\n",
+                tidx, cycles_to_us(o.alloc_cycle), o.alloc_cycle * 100.0 / total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   sync_tensormap : %.3fus (%.1f%%)\n",
+                tidx, cycles_to_us(o.sync_cycle), o.sync_cycle * 100.0 / total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   lookup+dep     : %.3fus (%.1f%%)\n",
+                tidx, cycles_to_us(o.lookup_cycle), o.lookup_cycle * 100.0 / total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   tensormap_ins  : %.3fus (%.1f%%)\n",
+                tidx, cycles_to_us(o.insert_cycle), o.insert_cycle * 100.0 / total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   param_copy     : %.3fus (%.1f%%)\n",
+                tidx, cycles_to_us(o.args_cycle), o.args_cycle * 100.0 / total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   fanin+ready    : %.3fus (%.1f%%)\n",
+                tidx, cycles_to_us(o.fanin_cycle), o.fanin_cycle * 100.0 / total
+            );
+            if (o.submit_count > 0) {
+                printf(
+                    "[ALWAYS] run: Thread %d:   avg/task       : %.3fus\n",
+                    tidx, cycles_to_us(total) / o.submit_count
+                );
+            }
+            printf("[ALWAYS] run: Thread %d: === CSV注释变量(module-struct-access.csv 行1-9) ===\n", tidx);
+            printf(
+                "[ALWAYS] run: Thread %d: CSV变量说明: P=fanin/producer侧条数 C=fanout_count-1(编排瞬时值) "
+                "S=total_required_subtasks N=Ring自旋(单任务未拆) N_in/N_out=tensor槽位类型计数 "
+                "N_scope≈submit时scope栈深 tensor_count/scalar_count=payload元数据\n",
+                tidx
+            );
+            printf(
+                "[ALWAYS] run: Thread %d: === CSV按task种类(同键合并submit_count; kind 0=mixed_incore 1=alloc_tensors) ===\n",
+                tidx
+            );
+            printf(
+                "[ALWAYS] run: Thread %d: CSV按task种类: 本flush共%u个bucket(每bucket一行含P/C/S与N_in/N_out等)\n",
+                tidx, static_cast<unsigned>(o.csv_glossary.bucket_count)
+            );
+            if (o.csv_glossary.bucket_count == 0) {
+                printf(
+                    "[ALWAYS] run: Thread %d: CSV按task种类(无bucket): 本flush内未合并到任何任务形状,或编排未写入rt->orchestrator.csv_glossary\n",
+                    tidx
+                );
+            }
+            for (uint32_t bi = 0; bi < o.csv_glossary.bucket_count; bi++) {
+                const AicpuCsvGlossaryTaskKindBucket &gb = o.csv_glossary.buckets[bi];
+                const char *kind_name = (gb.k.kind_tag == 1) ? "alloc_tensors(无InCore)" : "mixed_InCore(AIC/AIV)";
+                printf(
+                    "[ALWAYS] run: Thread %d: CSV按task种类[bucket%u] submit=%u | %s | ring=%u mask=0x%02x | "
+                    "ka=%" PRId32 " k0=%" PRId32 " k1=%" PRId32 " | "
+                    "P(生产者/fanin条数)=%" PRId32 " C(fanout_count-1)=%" PRId32 " S(子任务)=%" PRId32 " | "
+                    "N_in=%" PRId16 " N_out=%" PRId16 " N_scope=%" PRId16 " | tc=%" PRId16 " sc=%" PRId16 "\n",
+                    tidx, bi, static_cast<unsigned>(gb.submit_count), kind_name, static_cast<unsigned>(gb.k.ring_id),
+                    static_cast<unsigned>(gb.k.active_mask), gb.k.kernel_aic, gb.k.kernel_aiv0, gb.k.kernel_aiv1,
+                    gb.k.P_fanin_producers, gb.k.C_fanout_minus_scope, gb.k.S_subtasks, gb.k.N_in, gb.k.N_out,
+                    gb.k.scope_depth, gb.k.tensor_count, gb.k.scalar_count
+                );
+            }
+        }
+    }
+
+    // Helper to print one AicpuCsvCounters row
+    auto print_csv = [](int tidx, const char *label, const AicpuCsvCounters &c) {
+        printf(
+            "[ALWAYS] run: Thread %d:   %s r=%" PRIu64 " w=%" PRIu64
+            " a=%" PRIu64 " ar=%" PRIu64 " aw=%" PRIu64 " L=%" PRIu64 " cas=%" PRIu64 "\n",
+            tidx, label, c.read_events, c.write_events, c.atomic_ops, c.atomic_read_ops, c.atomic_write_ops,
+            c.lock_ops, c.cas_ops
+        );
+    };
+
+    // Print per-thread scheduler phase breakdown + CSV counters
+    for (int t = 0; t < PLATFORM_MAX_AICPU_THREADS; t++) {
+        // --- Phase timing (from collected_phase_records_) ---
+        bool has_phase_recs = (t < static_cast<int>(collected_phase_records_.size()) &&
+                               !collected_phase_records_[t].empty());
+        bool has_sched_summary = (collected_sched_summary_[t].magic == AICPU_PHASE_MAGIC);
+
+        if (!has_phase_recs && !has_sched_summary) {
+            continue;
+        }
+
+        uint64_t complete_cycle = 0;
+        uint64_t dispatch_cycle = 0;
+        uint64_t scan_cycle = 0;
+        uint64_t idle_cycle = 0;
+        int tasks_completed = 0;
+
+        if (has_phase_recs) {
+            for (const auto &r : collected_phase_records_[t]) {
+                uint64_t dur = (r.end_time > r.start_time) ? (r.end_time - r.start_time) : 0;
+                switch (r.phase_id) {
+                case AicpuPhaseId::SCHED_COMPLETE:
+                    complete_cycle += dur;
+                    tasks_completed += static_cast<int>(r.tasks_processed);
+                    break;
+                case AicpuPhaseId::SCHED_DISPATCH:
+                    dispatch_cycle += dur;
+                    break;
+                case AicpuPhaseId::SCHED_SCAN:
+                    scan_cycle += dur;
+                    break;
+                case AicpuPhaseId::SCHED_IDLE_WAIT:
+                    idle_cycle += dur;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+
+        uint64_t sched_total = complete_cycle + dispatch_cycle + scan_cycle + idle_cycle;
+        if (sched_total > 0) {
+            printf(
+                "[ALWAYS] run: Thread %d: === Scheduler Phase Breakdown: total=%.3fus, %d tasks ===\n",
+                t, cycles_to_us(sched_total), tasks_completed
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   complete       : %.3fus (%.1f%%)\n",
+                t, cycles_to_us(complete_cycle), complete_cycle * 100.0 / sched_total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   dispatch       : %.3fus (%.1f%%)\n",
+                t, cycles_to_us(dispatch_cycle), dispatch_cycle * 100.0 / sched_total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   scan           : %.3fus (%.1f%%)\n",
+                t, cycles_to_us(scan_cycle), scan_cycle * 100.0 / sched_total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d:   idle           : %.3fus (%.1f%%)\n",
+                t, cycles_to_us(idle_cycle), idle_cycle * 100.0 / sched_total
+            );
+            printf(
+                "[ALWAYS] run: Thread %d: Scheduler summary: total_time=%.3fus, tasks_scheduled=%d\n",
+                t, cycles_to_us(sched_total), tasks_completed
+            );
+        }
+
+        // --- CSV counters (from sched_summary in shared memory) ---
+        if (!has_sched_summary) {
+            continue;
+        }
+        const AicpuSchedProfilingSummary &ss = collected_sched_summary_[t];
+
+        printf(
+            "[ALWAYS] run: Thread %d: === Scheduler CSV (读/写/atomic/atomic读/atomic写/锁/CAS) 对应 CSV 模块 ②④⑤⑥⑦ ===\n",
+            t
+        );
+        printf("[ALWAYS] run: Thread %d: --- ②依赖构建 ---\n", t);
+        print_csv(t, "[②依赖构建] PTO2TaskSlotState     ", ss.csv_m2_pto2_task_slot_state);
+        print_csv(t, "[②依赖构建] PTO2TaskPayload       ", ss.csv_m2_pto2_task_payload);
+        print_csv(t, "[②依赖构建] PTO2DepListEntry      ", ss.csv_m2_pto2_dep_list_entry);
+        print_csv(t, "[②依赖构建] PTO2ReadyQueue        ", ss.csv_m2_pto2_ready_queue);
+        printf(
+            "[ALWAYS] run: Thread %d:   [②依赖构建] PTO2ReadyQueue(自旋拆分)   a=%" PRIu64 "+%" PRIu64
+            "(自旋) [base=cas]\n",
+            t, ss.csv_m2_pto2_ready_queue.cas_ops, ss.csv_m2_pto2_ready_queue_spin_retry_ops
+        );
+        printf(
+            "[ALWAYS] run: Thread %d:   [自旋/轮询/空转] complete_poll probe=%" PRIu64 " hit=%" PRIu64
+            " miss=%" PRIu64 " | readyQ_pop hit_task=%" PRIu64 " miss_round=%" PRIu64
+            " | idle_no_progress_loops=%" PRIu64 "\n",
+            t, ss.complete_poll_probe_count, ss.complete_poll_hit_count,
+            (ss.complete_poll_probe_count > ss.complete_poll_hit_count) ?
+                (ss.complete_poll_probe_count - ss.complete_poll_hit_count) :
+                0,
+            ss.ready_queue_pop_hit_task_count, ss.ready_queue_pop_miss_round_count, ss.idle_no_progress_loop_count
+        );
+        printf("[ALWAYS] run: Thread %d: --- ④任务Dispatch ---\n", t);
+        print_csv(t, "[④任务Dispatch] PTO2TaskSlotState     ", ss.csv_m4_pto2_task_slot_state);
+        print_csv(t, "[④任务Dispatch] PTO2TaskPayload(meta) ", ss.csv_m4_pto2_task_payload_meta);
+        print_csv(t, "[④任务Dispatch] PTO2TaskPayload(tens) ", ss.csv_m4_pto2_task_payload_tensors);
+        print_csv(t, "[④任务Dispatch] PTO2TaskPayload(scal) ", ss.csv_m4_pto2_task_payload_scalars);
+        print_csv(t, "[④任务Dispatch] PTO2TaskDescriptor    ", ss.csv_m4_pto2_task_descriptor);
+        print_csv(t, "[④任务Dispatch] PTO2DispatchPayload   ", ss.csv_m4_pto2_dispatch_payload);
+        print_csv(t, "[④任务Dispatch] PTO2ReadyQueue(pop)   ", ss.csv_m4_pto2_ready_queue);
+        print_csv(t, "[④任务Dispatch] PTO2ReadyQueue(pop命中)", ss.csv_m4_pto2_ready_queue_pop_hit);
+        print_csv(t, "[④任务Dispatch] PTO2ReadyQueue(pop空转)", ss.csv_m4_pto2_ready_queue_pop_miss);
+        printf(
+            "[ALWAYS] run: Thread %d:   [④任务Dispatch] PTO2ReadyQueue(pop自旋重试) retry=%" PRIu64
+            " empty_poll=%" PRIu64 "\n",
+            t, ss.csv_m4_pto2_ready_queue_spin_retry_ops, ss.csv_m4_pto2_ready_queue_empty_poll_ops
+        );
+        printf("[ALWAYS] run: Thread %d: --- ⑤AICore执行 ---\n", t);
+        print_csv(t, "[⑤AICore执行] PTO2TaskSlotState     ", ss.csv_m5_pto2_task_slot_state);
+        print_csv(t, "[⑤AICore执行] PTO2DispatchPayload   ", ss.csv_m5_pto2_dispatch_payload);
+        print_csv(t, "[⑤AICore执行] Tensor                ", ss.csv_m5_tensor);
+        printf("[ALWAYS] run: Thread %d: --- ⑥解依赖 ---\n", t);
+        print_csv(t, "[⑥解依赖] PTO2TaskSlotState     ", ss.csv_m6_pto2_task_slot_state);
+        print_csv(t, "[⑥解依赖] PTO2DepListEntry      ", ss.csv_m6_pto2_dep_list_entry);
+        print_csv(t, "[⑥解依赖] PTO2ReadyQueue(push)  ", ss.csv_m6_pto2_ready_queue);
+        printf("[ALWAYS] run: Thread %d: --- ⑦资源释放 ---\n", t);
+        print_csv(t, "[⑦资源释放] PTO2TaskSlotState     ", ss.csv_m7_pto2_task_slot_state);
+        print_csv(t, "[⑦资源释放] PTO2TaskPayload       ", ss.csv_m7_pto2_task_payload);
+        print_csv(t, "[⑦资源释放] PTO2RingFlowControl   ", ss.csv_m7_pto2_ring_flow_control);
+        print_csv(t, "[⑦资源释放] PTO2FaninSpillEntry   ", ss.csv_m7_pto2_fanin_spill_entry);
+        print_csv(t, "[⑦资源释放] advance_lock          ", ss.csv_m7_ring_sched_state_advance_lock);
+    }
+    fflush(stdout);
 }
 
 int PerformanceCollector::export_swimlane_json(const std::string &output_path_arg) {
@@ -1168,6 +1398,7 @@ int PerformanceCollector::export_swimlane_json(const std::string &output_path_ar
     // second-precision timestamp. Empty env var is treated as unset.
     const char *env_dir = std::getenv("SIMPLER_PERF_OUTPUT_DIR");
     const std::string output_path = (env_dir != nullptr && env_dir[0] != '\0') ? std::string(env_dir) : output_path_arg;
+
 
     // Step 1: Validate collected data
     bool has_any_records = false;
@@ -1544,6 +1775,9 @@ int PerformanceCollector::finalize(PerfUnregisterCallback unregister_cb, PerfFre
     collected_perf_records_.clear();
     collected_phase_records_.clear();
     core_to_thread_.clear();
+    for (auto &ss : collected_sched_summary_) {
+        ss = {};
+    }
     has_phase_data_ = false;
     device_id_ = -1;
     alloc_cb_ = nullptr;

@@ -17,7 +17,9 @@
  * the appropriate backend with a layered design to minimize code duplication.
  *
  * Platform Support:
- * - a2a3: Real hardware with CANN dlog API
+ * - a2a3: Real hardware with CANN dlog API (DEV_ALWAYS → dlog；见 onboard device_log.cpp
+ *   真机侧 getenv 通常不可用；由 dev_log_set_always_mirror_to_stderr(runtime->enable_profiling) 控制。
+ *   另：环境变量 PTO_AICPU_ALWAYS_STDERR=1（非 0）时强制镜像，便于本机仅跑 device 二进制调试。）
  * - a2a3sim: Host-based simulation using printf
  */
 
@@ -159,5 +161,8 @@ inline bool is_log_enable_error() { return g_is_log_enable_error; }
 
 // Initialize log switch (platform-specific implementation)
 void init_log_switch();
+
+/** 真机：为 true 时 DEV_ALWAYS 除 dlog 外再写 stderr（与 --enable-profiling 联动）；sim 上为空操作 */
+void dev_log_set_always_mirror_to_stderr(bool enable);
 
 #endif  // PLATFORM_DEVICE_LOG_H_

@@ -46,11 +46,11 @@
 #endif
 
 #ifndef PTO2_ORCH_PROFILING
-#define PTO2_ORCH_PROFILING 0
+#define PTO2_ORCH_PROFILING 1
 #endif
 
 #ifndef PTO2_SCHED_PROFILING
-#define PTO2_SCHED_PROFILING 0
+#define PTO2_SCHED_PROFILING 1
 #endif
 
 #ifndef PTO2_TENSORMAP_PROFILING
@@ -565,7 +565,10 @@ typedef void (*PTO2InCoreFunc)(void **args, int32_t num_args);
 #endif
 
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
-static inline void pto2_fanout_lock(PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
+static inline void pto2_fanout_lock(
+    PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &wait_cycle, uint64_t &atomic_read_count,
+    uint64_t &atomic_write_count
+) {
     uint64_t t0 = get_sys_cnt_aicpu();
     bool contended = false;
     uint32_t atomic_ops = 0;
@@ -574,6 +577,7 @@ static inline void pto2_fanout_lock(PTO2TaskSlotState &slot_state, uint64_t &ato
         while (slot_state.fanout_lock.load(std::memory_order_acquire) != 0) {
             contended = true;
             atomic_ops++;  // each load = 1 atomic
+            atomic_read_count++;
             SPIN_WAIT_HINT();
         }
         int32_t expected = 0;
@@ -581,6 +585,7 @@ static inline void pto2_fanout_lock(PTO2TaskSlotState &slot_state, uint64_t &ato
                 expected, 1, std::memory_order_acquire, std::memory_order_relaxed
             )) {
             atomic_ops++;  // successful CAS = 1 atomic
+            atomic_write_count++;
             atomic_count += atomic_ops;
             if (contended) {
                 wait_cycle += (get_sys_cnt_aicpu() - t0);
@@ -589,7 +594,15 @@ static inline void pto2_fanout_lock(PTO2TaskSlotState &slot_state, uint64_t &ato
         }
         contended = true;
         atomic_ops++;  // failed CAS = 1 atomic
+        atomic_write_count++;
     }
+}
+
+// Backward-compatible overload for sites that only need total atomic count.
+static inline void pto2_fanout_lock(PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
+    uint64_t dummy_read = 0;
+    uint64_t dummy_write = 0;
+    pto2_fanout_lock(slot_state, atomic_count, wait_cycle, dummy_read, dummy_write);
 }
 #endif
 

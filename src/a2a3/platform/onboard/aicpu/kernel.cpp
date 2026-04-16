@@ -93,6 +93,8 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
     }
 
     LOG_INFO("%s", "DynTileFwkBackendKernelServer: Calling aicpu_execute with Runtime");
+    // 设备侧无主机 getenv：用 Runtime 上已由 host 写入的 enable_profiling 打开 DEV_ALWAYS→stderr 镜像（与 sim printf 对齐）
+    dev_log_set_always_mirror_to_stderr(runtime->enable_profiling);
     int rc = aicpu_execute(runtime);
     if (rc != 0) {
         LOG_ERROR("DynTileFwkBackendKernelServer: aicpu_execute failed with rc=%d", rc);

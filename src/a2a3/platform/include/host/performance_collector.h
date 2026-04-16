@@ -372,6 +372,15 @@ public:
      */
     const std::vector<std::vector<PerfRecord>> &get_records() const { return collected_perf_records_; }
 
+    /**
+     * Print profiling summary to stdout in [ALWAYS] format.
+     *
+     * Emits orchestrator profiling and per-thread scheduler phase breakdown
+     * using data already collected into collected_orch_summary_ and
+     * collected_phase_records_. Call after collect_phase_data().
+     */
+    void print_profiling_summary() const;
+
 private:
     // Shared memory pointers
     void *perf_shared_mem_dev_{nullptr};   // Device memory pointer (slot arrays)
@@ -396,6 +405,7 @@ private:
     // AICPU phase profiling data (per-thread, mixed sched + orch records)
     std::vector<std::vector<AicpuPhaseRecord>> collected_phase_records_;
     AicpuOrchSummary collected_orch_summary_{};
+    AicpuSchedProfilingSummary collected_sched_summary_[PLATFORM_MAX_AICPU_THREADS]{};
     bool has_phase_data_{false};
 
     // Core-to-thread mapping (core_id → scheduler thread index, -1 = unassigned)

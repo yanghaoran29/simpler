@@ -280,6 +280,117 @@ struct AicpuPhaseRecord {
 };
 
 /**
+ * Access counter (mirrors PTO2CsvAccessCounters in the runtime layer):
+ * read/write/atomic + atomic-read/atomic-write split + lock/cas.
+ * POD-safe: usable in shared memory and on the host without runtime headers.
+ */
+struct AicpuCsvCounters {
+    uint64_t read_events;
+    uint64_t write_events;
+    uint64_t atomic_ops;
+    uint64_t atomic_read_ops;
+    uint64_t atomic_write_ops;
+    uint64_t lock_ops;
+    uint64_t cas_ops;
+} __attribute__((packed));
+
+#ifndef AICPU_CSV_GLOSSARY_BUCKET_MAX
+#define AICPU_CSV_GLOSSARY_BUCKET_MAX 32
+#endif
+
+/**
+ * Task-kind glossary key mirrored from runtime-side PTO2CsvGlossaryTaskKindKey.
+ * Packed to keep POD layout stable across host/device shared-memory exchange.
+ */
+struct __attribute__((packed)) AicpuCsvGlossaryTaskKindKey {
+    int32_t kernel_aic;
+    int32_t kernel_aiv0;
+    int32_t kernel_aiv1;
+    uint8_t active_mask;
+    uint8_t ring_id;
+    int8_t kind_tag;   // 0=mixed_incore, 1=alloc_tensors
+    int16_t scope_depth;
+    int32_t P_fanin_producers;
+    int32_t C_fanout_minus_scope;
+    int32_t S_subtasks;
+    int32_t N_ring_acquire_proxy;
+    int16_t N_in;
+    int16_t N_out;
+    int16_t tensor_count;
+    int16_t scalar_count;
+};
+
+struct AicpuCsvGlossaryTaskKindBucket {
+    AicpuCsvGlossaryTaskKindKey k;
+    uint32_t submit_count;
+};
+
+struct AicpuCsvGlossaryStats {
+    uint32_t bucket_count;
+    AicpuCsvGlossaryTaskKindBucket buckets[AICPU_CSV_GLOSSARY_BUCKET_MAX];
+};
+
+/**
+ * Per-thread scheduler profiling summary transferred via shared memory.
+ *
+ * Mirrors the fields of PTO2SchedProfilingData that are printed by DEV_ALWAYS.
+ * Written by AICPU after pto2_scheduler_get_profiling(); read by host in
+ * collect_phase_data() and printed by print_profiling_summary().
+ */
+struct AicpuSchedProfilingSummary {
+    // Phase cycle breakdown (non-CSV fields)
+    uint64_t lock_cycle;
+    uint64_t fanout_cycle;
+    uint64_t fanin_cycle;
+    uint64_t self_consumed_cycle;
+    uint64_t lock_wait_cycle;
+    uint64_t push_wait_cycle;
+    uint64_t pop_wait_cycle;
+    uint64_t lock_atomic_count;
+    uint64_t fanout_atomic_count;
+    uint64_t fanin_atomic_count;
+    uint64_t self_atomic_count;
+    uint64_t pop_atomic_count;
+    int64_t  complete_count;
+    // CSV module counters ②~⑦
+    AicpuCsvCounters csv_m2_pto2_task_slot_state;
+    AicpuCsvCounters csv_m2_pto2_task_payload;
+    AicpuCsvCounters csv_m2_pto2_dep_list_entry;
+    AicpuCsvCounters csv_m2_pto2_ready_queue;
+    uint64_t csv_m2_pto2_ready_queue_spin_retry_ops;
+    AicpuCsvCounters csv_m4_pto2_task_slot_state;
+    AicpuCsvCounters csv_m4_pto2_task_payload_meta;
+    AicpuCsvCounters csv_m4_pto2_task_payload_tensors;
+    AicpuCsvCounters csv_m4_pto2_task_payload_scalars;
+    AicpuCsvCounters csv_m4_pto2_task_descriptor;
+    AicpuCsvCounters csv_m4_pto2_dispatch_payload;
+    AicpuCsvCounters csv_m4_pto2_ready_queue;
+    uint64_t csv_m4_pto2_ready_queue_spin_retry_ops;
+    uint64_t csv_m4_pto2_ready_queue_empty_poll_ops;
+    AicpuCsvCounters csv_m4_pto2_ready_queue_pop_hit;
+    AicpuCsvCounters csv_m4_pto2_ready_queue_pop_miss;
+    AicpuCsvCounters csv_m5_pto2_task_slot_state;
+    AicpuCsvCounters csv_m5_pto2_dispatch_payload;
+    AicpuCsvCounters csv_m5_tensor;
+    AicpuCsvCounters csv_m6_pto2_task_slot_state;
+    AicpuCsvCounters csv_m6_pto2_dep_list_entry;
+    AicpuCsvCounters csv_m6_pto2_ready_queue;
+    AicpuCsvCounters csv_m7_pto2_task_slot_state;
+    AicpuCsvCounters csv_m7_pto2_task_payload;
+    AicpuCsvCounters csv_m7_pto2_ring_flow_control;
+    AicpuCsvCounters csv_m7_pto2_fanin_spill_entry;
+    AicpuCsvCounters csv_m7_ring_sched_state_advance_lock;
+    // Explicit spin/poll/idle counters (avoid deriving by subtraction)
+    uint64_t complete_poll_probe_count;
+    uint64_t complete_poll_hit_count;
+    uint64_t ready_queue_pop_hit_task_count;
+    uint64_t ready_queue_pop_miss_round_count;
+    uint64_t idle_no_progress_loop_count;
+    uint32_t magic;  // AICPU_PHASE_MAGIC when valid
+    uint32_t padding;
+} __attribute__((aligned(64)));
+
+/**
  * AICPU orchestrator cumulative summary
  *
  * Contains accumulated cycle counts from the orchestrator thread.
@@ -297,6 +408,7 @@ struct AicpuOrchSummary {
     uint64_t fanin_cycle;      // fanin+ready phase
     uint64_t scope_end_cycle;  // scope_end phase
     int64_t submit_count;      // Total tasks submitted
+    AicpuCsvGlossaryStats csv_glossary;  // Task-kind buckets (P/C/S/N_in/N_out...)
     uint32_t magic;            // Validation magic (AICPU_PHASE_MAGIC)
     uint32_t padding;          // Alignment padding
 } __attribute__((aligned(64)));
@@ -328,6 +440,7 @@ struct AicpuPhaseHeader {
     uint32_t num_cores;                         // Total number of cores with valid assignments
     int8_t core_to_thread[PLATFORM_MAX_CORES];  // core_id → scheduler thread index (-1 = unassigned)
     AicpuOrchSummary orch_summary;              // Orchestrator cumulative data
+    AicpuSchedProfilingSummary sched_summary[PLATFORM_MAX_AICPU_THREADS];  // Per-thread scheduler CSV data
 } __attribute__((aligned(64)));
 
 // =============================================================================

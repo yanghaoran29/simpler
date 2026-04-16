@@ -38,6 +38,8 @@ bool g_is_log_enable_error = true;
 
 const char *TILE_FWK_DEVICE_MACHINE = "SIM_CPU";
 
+void dev_log_set_always_mirror_to_stderr(bool enable) { (void)enable; }
+
 // =============================================================================
 // Log Initialization (Read from PTO_LOG_LEVEL environment variable)
 // =============================================================================

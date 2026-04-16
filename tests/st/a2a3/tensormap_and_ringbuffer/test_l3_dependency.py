@@ -103,4 +103,7 @@ class TestL3Dependency(SceneTestCase):
 
 
 if __name__ == "__main__":
+    # Profiling 日志过滤示例（含 CSV 变量说明、glossary bucket、①–⑦；r= 匹配五列计数行，避免依赖 UTF-8 圆圈数字）:
+    # python tests/st/a2a3/tensormap_and_ringbuffer/test_l3_dependency.py -p a2a3sim --enable-profiling 2>&1 | \
+    #   grep -E 'CSV注释变量|CSV变量说明|CSV按task种类|-> P\\(|编译常量|Orchestrator CSV|Scheduler CSV|--- |r=|PASSED|FAILED'
     SceneTestCase.run_module(__name__)

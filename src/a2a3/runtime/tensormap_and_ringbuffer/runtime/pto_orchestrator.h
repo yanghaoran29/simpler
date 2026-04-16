@@ -28,6 +28,7 @@
 #ifndef PTO_ORCHESTRATOR_H
 #define PTO_ORCHESTRATOR_H
 
+#include "pto2_csv_glossary_stats.h"
 #include "pto_ring_buffer.h"
 #include "pto_runtime2_types.h"
 #include "pto_submit_types.h"
@@ -99,6 +100,13 @@ struct PTO2OrchestratorState {
     int64_t tasks_submitted;
     int64_t buffers_allocated;
     int64_t bytes_allocated;
+#endif
+#if PTO2_ORCH_PROFILING
+    /**
+     * module-struct-access.csv 行 1–9：按任务形状聚合（与 submit 传入的 orch 同址）。
+     * 放在此结构中而非文件静态变量，避免编排 .so 与 aicpu 主模块各有一份静态区导致 bucket 始终为空。
+     */
+    PTO2CsvGlossaryStats csv_glossary;
 #endif
 
     /**
@@ -228,30 +236,42 @@ void pto2_orchestrator_print_scope_stack(PTO2OrchestratorState *orch);
 
 #if PTO2_ORCH_PROFILING
 struct PTO2OrchProfilingData {
-    uint64_t sync_cycle;
-    uint64_t alloc_cycle;  // Combined task slot + heap allocation
-    uint64_t args_cycle;
-    uint64_t lookup_cycle;
-    uint64_t insert_cycle;
-    uint64_t fanin_cycle;
-    uint64_t scope_end_cycle;
-    int64_t submit_count;
-    // Wait time tracking for blocking phases
-    uint64_t alloc_wait_cycle;  // Cycles spent waiting in unified alloc
-    uint64_t fanin_wait_cycle;  // Cycles spent waiting in fanout_lock
-    // Atomic operation counts per phase
-    uint64_t alloc_atomic_count;
-    uint64_t args_atomic_count;
-    uint64_t fanin_atomic_count;
-    uint64_t finalize_atomic_count;
-    uint64_t scope_end_atomic_count;
+    uint64_t sync_cycle;        // 周期：TensorMap sync_tensormap
+    uint64_t alloc_cycle;       // 周期：统一 alloc（任务槽 + heap）
+    uint64_t args_cycle;        // 周期：参数/GM 批量写
+    uint64_t lookup_cycle;      // 周期：TensorMap lookup + 依赖收集
+    uint64_t insert_cycle;      // 周期：TensorMap insert
+    uint64_t fanin_cycle;       // 周期：fanin 元数据 + wiring_queue 入队
+    uint64_t scope_end_cycle;   // 周期：pto2_scope_end 整段
+    int64_t submit_count;       // 已提交任务数（编排统计，非 CSV 五列）
+    uint64_t alloc_wait_cycle;  // alloc 内自旋等待周期（流控/heap 反压）
+    uint64_t fanin_wait_cycle;  // fanout_lock 等等待周期（若路径启用）
+    uint64_t alloc_atomic_count;     // alloc 路径原子累计（实现口径）
+    uint64_t args_atomic_count;      // 参数阶段原子累计（如 fanout_lock.store 等）
+    uint64_t fanin_atomic_count;     // fanin/ready 阶段原子累计
+    uint64_t finalize_atomic_count;  // finalize 路径原子累计
+    uint64_t scope_end_atomic_count; // scope_end→release_producer 链上原子累计（用于 CSV ① SlotState atomic 近似）
+    /** CSV ① 行「PTO2TaskSlotState」五列；由 pto2_orchestrator_get_profiling() 从 g_orch_* 原始事件填出 */
+    PTO2CsvAccessCounters csv_m1_pto2_task_slot_state;
+    /** CSV ① 行「PTO2TaskPayload」五列（整段 payload 批量写等） */
+    PTO2CsvAccessCounters csv_m1_pto2_task_payload;
+    /** CSV ① 行「PTO2TaskDescriptor」五列 */
+    PTO2CsvAccessCounters csv_m1_pto2_task_descriptor;
+    /** CSV ① 行「Tensor」五列（INPUT/INOUT 查表、OUTPUT 写 owner 等） */
+    PTO2CsvAccessCounters csv_m1_tensor;
+    /** CSV ① 行「PTO2ReadyQueue」五列（wiring_queue 入队等） */
+    PTO2CsvAccessCounters csv_m1_pto2_ready_queue;
+    /** CSV ①/③ 行「PTO2RingFlowControl」在编排侧 alloc 路径上的五列 */
+    PTO2CsvAccessCounters csv_m1_pto2_ring_flow_control;
+    /** module-struct-access.csv 行 1–9 符号：按任务形状聚合的 submit 次数（与下述 CSV 五列同一次 flush） */
+    PTO2CsvGlossaryStats csv_glossary;
 };
 
 /**
  * Get and reset orchestrator profiling data.
  * Returns accumulated profiling data and resets counters.
  */
-PTO2OrchProfilingData pto2_orchestrator_get_profiling();
+PTO2OrchProfilingData pto2_orchestrator_get_profiling(PTO2OrchestratorState *orch);
 #endif
 
 #endif  // PTO_ORCHESTRATOR_H

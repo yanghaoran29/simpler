@@ -56,23 +56,150 @@ __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() { retur
 // Also hidden to prevent HOST .so from polluting the global symbol table.
 __attribute__((weak, visibility("hidden"))) void
 perf_aicpu_record_orch_phase(AicpuPhaseId, uint64_t, uint64_t, uint32_t, uint64_t) {}
-// Accumulated cycles per sub-step (only needed for ORCH_PROFILING export)
-static uint64_t g_orch_sync_cycle = 0;       // tensormap sync
-static uint64_t g_orch_alloc_cycle = 0;      // unified task+heap alloc
-static uint64_t g_orch_args_cycle = 0;       // param copy
-static uint64_t g_orch_lookup_cycle = 0;     // tensormap lookup + dep building
-static uint64_t g_orch_insert_cycle = 0;     // tensormap insert
-static uint64_t g_orch_fanin_cycle = 0;      // fanin list + early-return check
-static uint64_t g_orch_scope_end_cycle = 0;  // scope_end overhead
-static int64_t g_orch_submit_count = 0;
-static uint32_t g_orch_submit_idx = 0;
+// ---------- 编排器周期量（CPU cycle，非 CSV 五列）----------
+static uint64_t g_orch_sync_cycle = 0;
+static uint64_t g_orch_alloc_cycle = 0;
+static uint64_t g_orch_args_cycle = 0;
+static uint64_t g_orch_lookup_cycle = 0;
+static uint64_t g_orch_insert_cycle = 0;
+static uint64_t g_orch_fanin_cycle = 0;
+static uint64_t g_orch_scope_end_cycle = 0;
+static int64_t g_orch_submit_count = 0;   // 成功 submit 路径累计任务数
+static uint32_t g_orch_submit_idx = 0;    // 泳道/phase 记录用单调序号
+/** alloc 在 TaskAllocator 自旋等待上消耗的 CPU cycle（PTO2OrchProfilingData.alloc_wait_cycle） */
 uint64_t g_orch_alloc_wait_cycle = 0;
+/** fanin+ready 阶段若统计等待则写入（PTO2OrchProfilingData.fanin_wait_cycle；当前热路径多为 0） */
 uint64_t g_orch_fanin_wait_cycle = 0;
+/** alloc 子阶段原子/自旋 load 累计（PTO2OrchProfilingData.alloc_atomic_count；含 record_wait 中 spin+1） */
 uint64_t g_orch_alloc_atomic_count = 0;
+/** 参数阶段 fanout_lock/fanout_count 等原子写累计（PTO2OrchProfilingData.args_atomic_count） */
 uint64_t g_orch_args_atomic_count = 0;
+/** fanin/ready 路径原子累计（PTO2OrchProfilingData.fanin_atomic_count） */
 uint64_t g_orch_fanin_atomic_count = 0;
+/** finalize 路径原子累计（预留；PTO2OrchProfilingData.finalize_atomic_count） */
 uint64_t g_orch_finalize_atomic_count = 0;
+/** scope_end→scheduler::release_producer 链上累计的原子/RWM 次数（汇入 CSV ① PTO2TaskSlotState.atomic_ops） */
 uint64_t g_orch_scope_end_atomic_count = 0;
+uint64_t g_orch_scope_end_atomic_read_count = 0;
+uint64_t g_orch_scope_end_atomic_write_count = 0;
+// ---------- 原始事件计数：在 pto2_orchestrator_get_profiling(orch) 中映射为 CSV ① 各「读/写/atomic/锁/CAS」----------
+/** CSV ① PTO2TaskSlotState 写口径之一：各 producer 上 fanout_count++ 次数，累加为 ∑P */
+static uint64_t g_orch_fanout_increment_count = 0;
+/** CSV ① scope_end 行：pto2_scope_end 内 release_producer 调用次数，即 ∑N_scope */
+static uint64_t g_orch_scope_end_release_count = 0;
+/** CSV ① PTO2TaskSlotState 写：本任务 SlotState 字段批量初始化次数（每提交任务 1） */
+static uint64_t g_orch_slot_state_init_count = 0;
+/** CSV ① PTO2TaskPayload 写：payload->init 批量写次数（每任务 1） */
+static uint64_t g_orch_payload_init_count = 0;
+/** CSV ① PTO2TaskDescriptor 写：task 描述符批量写次数（每任务 1） */
+static uint64_t g_orch_descriptor_write_count = 0;
+/** CSV ① Tensor 读：INPUT/INOUT 进入 TensorMap lookup 前计数，对应 N_in 维度的查表次数 */
+static uint64_t g_orch_tensor_input_read_count = 0;
+/** CSV ① Tensor 写：OUTPUT/INOUT/OUTPUT_EXISTING 写 payload 内 owner_task_id 次数，与 N_out 槽位计数口径一致 */
+static uint64_t g_orch_tensor_output_write_count = 0;
+/** CSV ①③ RingFlowControl：TaskAllocator::alloc 成功返回次数（含 commit 写流控字） */
+static uint64_t g_orch_ring_fc_alloc_count = 0;
+/** CSV ①③ RingFlowControl 读：对 last_task_alive 的 memory_order_acquire 次数（含 alloc 入口与 spin） */
+uint64_t g_orch_ring_fc_last_alive_acquire_reads = 0;
+/** CSV ① PTO2ReadyQueue 写：wiring_queue.push 成功次数 */
+static uint64_t g_orch_m1_wiring_queue_push_done = 0;
+
+/** 见 g_orch_m1_wiring_queue_push_done：每成功 push 调用一次 */
+void pto2_orch_profile_csv_m1_wiring_queue_push_done() { g_orch_m1_wiring_queue_push_done++; }
+
+// ---------- module-struct-access.csv 行 1–9：聚合在 PTO2OrchestratorState::csv_glossary（与 dlopen 编排 .so 共用 orch 指针）----------
+static bool pto2_csv_glossary_key_equal(const PTO2CsvGlossaryTaskKindKey &a, const PTO2CsvGlossaryTaskKindKey &b) {
+    return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+static void pto2_csv_glossary_record(PTO2OrchestratorState *orch, const PTO2CsvGlossaryTaskKindKey &key) {
+    PTO2CsvGlossaryStats *gs = &orch->csv_glossary;
+    for (uint32_t i = 0; i < gs->bucket_count; i++) {
+        if (pto2_csv_glossary_key_equal(gs->buckets[i].k, key)) {
+            gs->buckets[i].submit_count++;
+            return;
+        }
+    }
+    if (gs->bucket_count < PTO2_CSV_GLOSSARY_BUCKET_MAX) {
+        const uint32_t idx = gs->bucket_count++;
+        gs->buckets[idx].k = key;
+        gs->buckets[idx].submit_count = 1;
+    }
+}
+
+static void pto2_csv_glossary_count_n_in_n_out(const Arg &args, int16_t *n_in, int16_t *n_out) {
+    *n_in = 0;
+    *n_out = 0;
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        const TensorArgType ptype = args.tag(i);
+        if (ptype == TensorArgType::INPUT) {
+            (*n_in)++;
+        } else if (ptype == TensorArgType::OUTPUT || ptype == TensorArgType::OUTPUT_EXISTING) {
+            (*n_out)++;
+        } else if (ptype == TensorArgType::INOUT) {
+            (*n_in)++;
+            (*n_out)++;
+        }
+    }
+}
+
+/** 每次成功 pto2_submit_mixed_task：采样 P/C/S、N_in/out、tensor/scalar_count、scope 深度（见 CSV 注释） */
+static void pto2_csv_glossary_record_mixed_submit(
+    PTO2OrchestratorState *orch, const PTO2TaskDescriptor &task, const PTO2TaskSlotState &slot,
+    const PTO2TaskPayload &payload, const Arg &args, int32_t fanin_producers
+) {
+    int16_t n_in = 0;
+    int16_t n_out = 0;
+    pto2_csv_glossary_count_n_in_n_out(args, &n_in, &n_out);
+    PTO2CsvGlossaryTaskKindKey k{};
+    k.kernel_aic = task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)];
+    k.kernel_aiv0 = task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)];
+    k.kernel_aiv1 = task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)];
+    k.active_mask = slot.active_mask;
+    k.ring_id = slot.ring_id;
+    k.kind_tag = 0;
+    k.scope_depth = static_cast<int16_t>((orch->scope_stack_top >= 0) ? (orch->scope_stack_top + 1) : 0);
+    k.P_fanin_producers = fanin_producers;
+    k.C_fanout_minus_scope = (slot.fanout_count > 0) ? (slot.fanout_count - 1) : 0;
+    k.S_subtasks = slot.total_required_subtasks;
+    k.N_ring_acquire_proxy = 0;
+    k.N_in = n_in;
+    k.N_out = n_out;
+    k.tensor_count = static_cast<int16_t>(payload.tensor_count);
+    k.scalar_count = static_cast<int16_t>(payload.scalar_count);
+    pto2_csv_glossary_record(orch, k);
+}
+
+/** pto2_alloc_tensors 等无 InCore 的隐藏任务 */
+static void pto2_csv_glossary_record_alloc_hidden(
+    PTO2OrchestratorState *orch, const PTO2TaskSlotState *slot, const PTO2TaskPayload &payload, const Arg &args,
+    uint8_t ring_id
+) {
+    if (slot == nullptr) {
+        return;
+    }
+    int16_t n_in = 0;
+    int16_t n_out = 0;
+    pto2_csv_glossary_count_n_in_n_out(args, &n_in, &n_out);
+    PTO2CsvGlossaryTaskKindKey k{};
+    k.kernel_aic = INVALID_KERNEL_ID;
+    k.kernel_aiv0 = INVALID_KERNEL_ID;
+    k.kernel_aiv1 = INVALID_KERNEL_ID;
+    k.active_mask = 0;
+    k.ring_id = ring_id;
+    k.kind_tag = 1;
+    k.scope_depth = static_cast<int16_t>((orch->scope_stack_top >= 0) ? (orch->scope_stack_top + 1) : 0);
+    k.P_fanin_producers = 0;
+    k.C_fanout_minus_scope = (slot->fanout_count > 0) ? (slot->fanout_count - 1) : 0;
+    k.S_subtasks = slot->total_required_subtasks;
+    k.N_ring_acquire_proxy = 0;
+    k.N_in = n_in;
+    k.N_out = n_out;
+    k.tensor_count = static_cast<int16_t>(payload.tensor_count);
+    k.scalar_count = static_cast<int16_t>(payload.scalar_count);
+    pto2_csv_glossary_record(orch, k);
+}
+
 #define CYCLE_COUNT_START() uint64_t _t0 = get_sys_cnt_aicpu(), _t1
 #define CYCLE_COUNT_LAP(acc)       \
     do {                           \
@@ -314,6 +441,9 @@ static bool pto2_prepare_task(
         pto2_orch_mark_fatal(orch, PTO2_ERROR_HEAP_RING_DEADLOCK);
         return false;
     }
+#if PTO2_ORCH_PROFILING
+    g_orch_ring_fc_alloc_count++;  // 见 g_orch_ring_fc_alloc_count：每任务一次成功 alloc+commit
+#endif
 
     out->task_id = PTO2TaskId::make(ring_id, static_cast<uint32_t>(out->alloc_result.task_id));
     out->slot_state = &orch->sm_header->rings[ring_id].get_slot_state_by_slot(out->alloc_result.slot);
@@ -337,6 +467,9 @@ static bool pto2_prepare_task(
     out->slot_state->active_mask = active_mask;
     // fanin_count is set by scheduler during wiring
     scope_tasks_push(orch, out->slot_state);
+#if PTO2_ORCH_PROFILING
+    g_orch_slot_state_init_count++;  // 见 g_orch_slot_state_init_count
+#endif
 
     return true;
 }
@@ -483,6 +616,10 @@ void pto2_scope_end(PTO2OrchestratorState *orch) {
     uint64_t _se1 = get_sys_cnt_aicpu();
     g_orch_scope_end_cycle += (_se1 - _se0);
     // perf_aicpu_record_orch_phase(AicpuPhaseId::ORCH_SCOPE_END, _se0, _se1, g_orch_submit_idx, -1);
+    if (count > 0) {
+        // 见 g_orch_scope_end_release_count：本 scope 内待 release 的槽位数 = N_scope
+        g_orch_scope_end_release_count += static_cast<uint64_t>(count);
+    }
 #endif
 }
 
@@ -613,6 +750,9 @@ pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_ke
         if (tensor->manual_dep) {
             continue;
         }
+#if PTO2_ORCH_PROFILING
+        g_orch_tensor_input_read_count++;  // 见 g_orch_tensor_input_read_count
+#endif
 
         PTO2LookupResult lookup_result;
         orch->tensor_map.lookup(*tensor, lookup_result);
@@ -665,6 +805,9 @@ pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_ke
         fanin_builder.inline_slots, fanin_builder.count, fanin_builder.spill_start, fanin_builder.spill_pool,
         [](PTO2TaskSlotState *producer) {
             producer->fanout_count++;
+#if PTO2_ORCH_PROFILING
+            g_orch_fanout_increment_count++;  // 见 g_orch_fanout_increment_count（每 producer 一次）
+#endif
         }
     );
 
@@ -678,10 +821,24 @@ pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_ke
     }
 
     payload.init(args, result, prepared.alloc_result, layout);
+#if PTO2_ORCH_PROFILING
+    g_orch_payload_init_count++;     // 见 g_orch_payload_init_count
+    g_orch_descriptor_write_count++; // 见 g_orch_descriptor_write_count
+    // Write owner_task_id into payload tensors for every output-side slot (OUTPUT / INOUT /
+    // OUTPUT_EXISTING) so creator-only dependency tracking matches CSV ① Tensor「写 N_out」.
+    for (int i = 0; i < args.tensor_count(); i++) {
+        const TensorArgType ptype = args.tag(i);
+        if (ptype == TensorArgType::OUTPUT || ptype == TensorArgType::INOUT ||
+            ptype == TensorArgType::OUTPUT_EXISTING) {
+            g_orch_tensor_output_write_count++;  // 见 g_orch_tensor_output_write_count
+        }
+    }
+#endif
 
     CYCLE_COUNT_LAP_RECORD(g_orch_args_cycle, AicpuPhaseId::ORCH_PARAMS, task_id.raw);
 #if PTO2_ORCH_PROFILING
-    g_orch_args_atomic_count += 2;  // fanout_lock.store + fanout_count.store
+    // g_orch_args_atomic_count：当前实现将 consumer 侧 fanout_lock/fanout_count 初始化记 2 次原子写
+    g_orch_args_atomic_count += 2;
 #endif
 
     // === STEP 6: push to wiring queue ===
@@ -692,13 +849,19 @@ pto2_submit_mixed_task(PTO2OrchestratorState *orch, const MixedKernels &mixed_ke
     while (!sched->wiring.queue.push(&cur_slot_state)) {
         SPIN_WAIT_HINT();
     }
+    // module-struct-access.csv 行 1–9：本任务 P/S、N_in/out、tensor/scalar_count 等（写入 orch->csv_glossary）
+    pto2_csv_glossary_record_mixed_submit(orch, task, cur_slot_state, payload, args, fanin_builder.count);
+#if PTO2_ORCH_PROFILING
+    // 预留：submit 热路径不向 g_orch_fanin_atomic_count 累加（保持与历史行为一致）
+    g_orch_fanin_atomic_count += 0;
+#endif
 
     CYCLE_COUNT_LAP_RECORD(g_orch_fanin_cycle, AicpuPhaseId::ORCH_FANIN, task_id.raw);
 
 #if PTO2_PROFILING
     orch->tasks_submitted++;
 #if PTO2_ORCH_PROFILING
-    g_orch_submit_count++;
+    g_orch_submit_count++;  // 见 g_orch_submit_count：pto2_submit_mixed_task 成功路径
 #endif
     g_orch_submit_idx++;
 #endif
@@ -774,6 +937,11 @@ TaskOutputTensors pto2_alloc_tensors(PTO2OrchestratorState *orch, const Arg &arg
     payload.fanin_actual_count = 0;
     payload.fanin_spill_start = 0;
     payload.fanin_spill_pool = &orch->rings[prepared.task_id.ring()].fanin_pool;
+#if PTO2_ORCH_PROFILING
+    for (int32_t i = 0; i < args.tensor_count(); i++) {
+        g_orch_tensor_output_write_count++;  // alloc 路径仅 OUTPUT，与 N_out 一致
+    }
+#endif
 
     CYCLE_COUNT_LAP_RECORD(g_orch_args_cycle, AicpuPhaseId::ORCH_PARAMS, prepared.task_id.raw);
 
@@ -792,10 +960,14 @@ TaskOutputTensors pto2_alloc_tensors(PTO2OrchestratorState *orch, const Arg &arg
 
     CYCLE_COUNT_LAP_RECORD(g_orch_fanin_cycle, AicpuPhaseId::ORCH_FANIN, prepared.task_id.raw);
 
+    pto2_csv_glossary_record_alloc_hidden(
+        orch, prepared.slot_state, payload, args, prepared.task_id.ring()
+    );
+
 #if PTO2_PROFILING
     orch->tasks_submitted++;
 #if PTO2_ORCH_PROFILING
-    g_orch_submit_count++;
+    g_orch_submit_count++;  // 见 g_orch_submit_count：pto2_alloc_tensors / hidden alloc 成功路径
 #endif
     g_orch_submit_idx++;
 #endif
@@ -870,8 +1042,8 @@ void pto2_orchestrator_print_scope_stack(PTO2OrchestratorState *orch) {
 }
 
 #if PTO2_ORCH_PROFILING
-PTO2OrchProfilingData pto2_orchestrator_get_profiling() {
-    PTO2OrchProfilingData d;
+PTO2OrchProfilingData pto2_orchestrator_get_profiling(PTO2OrchestratorState *orch) {
+    PTO2OrchProfilingData d{};
     d.sync_cycle = g_orch_sync_cycle;
     d.alloc_cycle = g_orch_alloc_cycle;
     d.args_cycle = g_orch_args_cycle;
@@ -888,7 +1060,77 @@ PTO2OrchProfilingData pto2_orchestrator_get_profiling() {
     d.finalize_atomic_count = g_orch_finalize_atomic_count;
     d.scope_end_atomic_count = g_orch_scope_end_atomic_count;
 
-    // Reset
+    const uint64_t p_fan = g_orch_fanout_increment_count;
+    const uint64_t n_scope = g_orch_scope_end_release_count;
+    const uint64_t slot_init = g_orch_slot_state_init_count;
+    const uint64_t pay_init = g_orch_payload_init_count;
+    const uint64_t desc_w = g_orch_descriptor_write_count;
+    const uint64_t tin = g_orch_tensor_input_read_count;
+    const uint64_t tout = g_orch_tensor_output_write_count;
+    const uint64_t fc_alloc = g_orch_ring_fc_alloc_count;
+    const uint64_t fc_reads = g_orch_ring_fc_last_alive_acquire_reads;
+    const uint64_t wq_push = g_orch_m1_wiring_queue_push_done;
+
+    // --- CSV ① PTO2TaskSlotState：读≈P+N_scope，写≈1+P+N_scope；atomic 用 scope_end 链上原子累计近似 ---
+    d.csv_m1_pto2_task_slot_state.read_events = p_fan + n_scope;
+    d.csv_m1_pto2_task_slot_state.write_events = slot_init + p_fan + n_scope;
+    d.csv_m1_pto2_task_slot_state.atomic_ops = g_orch_scope_end_atomic_count;
+    d.csv_m1_pto2_task_slot_state.atomic_read_ops = g_orch_scope_end_atomic_read_count;
+    d.csv_m1_pto2_task_slot_state.atomic_write_ops = g_orch_scope_end_atomic_write_count;
+    d.csv_m1_pto2_task_slot_state.lock_ops = 0;
+    d.csv_m1_pto2_task_slot_state.cas_ops = 0;
+
+    // --- CSV ① PTO2TaskPayload：读 0、写 1（每任务一次 init）---
+    d.csv_m1_pto2_task_payload.read_events = 0;
+    d.csv_m1_pto2_task_payload.write_events = pay_init;
+    d.csv_m1_pto2_task_payload.atomic_ops = 0;
+    d.csv_m1_pto2_task_payload.atomic_read_ops = 0;
+    d.csv_m1_pto2_task_payload.atomic_write_ops = 0;
+    d.csv_m1_pto2_task_payload.lock_ops = 0;
+    d.csv_m1_pto2_task_payload.cas_ops = 0;
+
+    // --- CSV ① PTO2TaskDescriptor：写 1 / 读 0 ---
+    d.csv_m1_pto2_task_descriptor.read_events = 0;
+    d.csv_m1_pto2_task_descriptor.write_events = desc_w;
+    d.csv_m1_pto2_task_descriptor.atomic_ops = 0;
+    d.csv_m1_pto2_task_descriptor.atomic_read_ops = 0;
+    d.csv_m1_pto2_task_descriptor.atomic_write_ops = 0;
+    d.csv_m1_pto2_task_descriptor.lock_ops = 0;
+    d.csv_m1_pto2_task_descriptor.cas_ops = 0;
+
+    // --- CSV ① Tensor：读 N_in、写 N_out ---
+    d.csv_m1_tensor.read_events = tin;
+    d.csv_m1_tensor.write_events = tout;
+    d.csv_m1_tensor.atomic_ops = 0;
+    d.csv_m1_tensor.atomic_read_ops = 0;
+    d.csv_m1_tensor.atomic_write_ops = 0;
+    d.csv_m1_tensor.lock_ops = 0;
+    d.csv_m1_tensor.cas_ops = 0;
+
+    // --- CSV ① PTO2ReadyQueue（wiring_queue）：写=push 次数；atomic≈3×push；CAS≈push（Vyukov 单生产者近似）---
+    d.csv_m1_pto2_ready_queue.read_events = 0;
+    d.csv_m1_pto2_ready_queue.write_events = wq_push;
+    d.csv_m1_pto2_ready_queue.atomic_ops = wq_push * 3;
+    d.csv_m1_pto2_ready_queue.atomic_read_ops = wq_push * 2;
+    d.csv_m1_pto2_ready_queue.atomic_write_ops = wq_push;
+    d.csv_m1_pto2_ready_queue.lock_ops = 0;
+    d.csv_m1_pto2_ready_queue.cas_ops = wq_push;
+
+    // --- CSV ①③ PTO2RingFlowControl：读=last_task_alive acquire 总次数；写=成功 alloc 次数；atomic 近似 2×alloc + 额外 spin 读 ---
+    d.csv_m1_pto2_ring_flow_control.read_events = fc_reads;
+    d.csv_m1_pto2_ring_flow_control.write_events = fc_alloc;
+    d.csv_m1_pto2_ring_flow_control.atomic_ops = fc_alloc * 2 + (fc_reads > fc_alloc ? fc_reads - fc_alloc : 0);
+    d.csv_m1_pto2_ring_flow_control.atomic_read_ops = (fc_reads > fc_alloc ? fc_reads - fc_alloc : 0);
+    d.csv_m1_pto2_ring_flow_control.atomic_write_ops = fc_alloc * 2;
+    d.csv_m1_pto2_ring_flow_control.lock_ops = 0;
+    d.csv_m1_pto2_ring_flow_control.cas_ops = 0;
+
+    if (orch != nullptr) {
+        d.csv_glossary = orch->csv_glossary;
+        orch->csv_glossary.bucket_count = 0;
+    }
+
+    // 清零：以下变量已全部汇入 d.csv_m1_* / 周期字段，下一窗口重新累计
     g_orch_sync_cycle = g_orch_alloc_cycle = g_orch_args_cycle = 0;
     g_orch_lookup_cycle = g_orch_insert_cycle = 0;
     g_orch_fanin_cycle = g_orch_scope_end_cycle = 0;
@@ -901,6 +1143,18 @@ PTO2OrchProfilingData pto2_orchestrator_get_profiling() {
     g_orch_fanin_atomic_count = 0;
     g_orch_finalize_atomic_count = 0;
     g_orch_scope_end_atomic_count = 0;
+    g_orch_scope_end_atomic_read_count = 0;
+    g_orch_scope_end_atomic_write_count = 0;
+    g_orch_fanout_increment_count = 0;
+    g_orch_scope_end_release_count = 0;
+    g_orch_slot_state_init_count = 0;
+    g_orch_payload_init_count = 0;
+    g_orch_descriptor_write_count = 0;
+    g_orch_tensor_input_read_count = 0;
+    g_orch_tensor_output_write_count = 0;
+    g_orch_ring_fc_alloc_count = 0;
+    g_orch_ring_fc_last_alive_acquire_reads = 0;
+    g_orch_m1_wiring_queue_push_done = 0;
     return d;
 }
 #endif

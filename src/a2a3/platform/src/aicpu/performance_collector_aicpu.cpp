@@ -489,6 +489,21 @@ void perf_aicpu_write_orch_summary(const AicpuOrchSummary *src) {
     );
 }
 
+void perf_aicpu_write_sched_summary(int thread_idx, const AicpuSchedProfilingSummary *src) {
+    if (s_phase_header == nullptr) {
+        return;
+    }
+    if (thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS) {
+        return;
+    }
+
+    AicpuSchedProfilingSummary *dst = &s_phase_header->sched_summary[thread_idx];
+    memcpy(dst, src, sizeof(AicpuSchedProfilingSummary));
+    dst->magic = AICPU_PHASE_MAGIC;
+    dst->padding = 0;
+    wmb();
+}
+
 void perf_aicpu_set_orch_thread_idx(int thread_idx) { s_orch_thread_idx = thread_idx; }
 
 void perf_aicpu_record_orch_phase(

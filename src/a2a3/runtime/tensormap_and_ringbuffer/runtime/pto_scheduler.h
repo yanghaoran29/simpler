@@ -32,9 +32,15 @@
 #include <atomic>
 
 #include "common/core_type.h"
+#include "pto2_csv_access_stats.h"
 #include "pto_ring_buffer.h"
 #include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
+
+#if PTO2_ORCH_PROFILING
+/** CSV ①「PTO2ReadyQueue」写次数：wiring_queue.push 成功一次计一次（见 pto_orchestrator.cpp 内计数器） */
+void pto2_orch_profile_csv_m1_wiring_queue_push_done();
+#endif
 
 #if PTO2_SCHED_PROFILING
 #include "aicpu/device_time.h"
@@ -126,24 +132,54 @@ struct alignas(64) PTO2ReadyQueue {
     bool push(PTO2TaskSlotState *slot_state) {
         uint64_t pos;
         PTO2ReadyQueueSlot *slot;
+#if PTO2_SCHED_PROFILING
+        extern uint64_t g_sched_m2_ready_queue_atomic_read_raw[], g_sched_m2_ready_queue_atomic_write_raw[];
+        extern uint64_t g_sched_m2_ready_queue_spin_retry_raw[];
+#endif
         while (true) {
             pos = enqueue_pos.load(std::memory_order_relaxed);
             slot = &slots[pos & mask];
             int64_t seq = slot->sequence.load(std::memory_order_acquire);
+#if PTO2_SCHED_PROFILING
+            // wiring push（CSV②）底层原子读：enqueue_pos.load + sequence.load
+            g_sched_m2_ready_queue_atomic_read_raw[0] += 2;
+#endif
             int64_t diff = seq - static_cast<int64_t>(pos);
             if (diff == 0) {
                 if (enqueue_pos.compare_exchange_weak(
                         pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed
                     )) {
+#if PTO2_SCHED_PROFILING
+                    // CAS 成功计原子写
+                    g_sched_m2_ready_queue_atomic_write_raw[0] += 1;
+#endif
                     break;
                 }
+#if PTO2_SCHED_PROFILING
+                // CAS 失败重试仍记原子写尝试
+                g_sched_m2_ready_queue_atomic_write_raw[0] += 1;
+                g_sched_m2_ready_queue_spin_retry_raw[0] += 1;
+#endif
             } else if (diff < 0) {
                 return false;  // Queue full
+            } else {
+#if PTO2_SCHED_PROFILING
+                // slot 尚未 release，push 路径轮询重试
+                g_sched_m2_ready_queue_spin_retry_raw[0] += 1;
+#endif
             }
         }
 
         slot->slot_state = slot_state;
         slot->sequence.store(static_cast<int64_t>(pos + 1), std::memory_order_release);
+#if PTO2_SCHED_PROFILING
+        // 发布 sequence.store 计原子写
+        g_sched_m2_ready_queue_atomic_write_raw[0] += 1;
+#endif
+#if PTO2_ORCH_PROFILING
+        // CSV ① PTO2ReadyQueue「写次数」+1：per-ring wiring_queue 一次成功 push（Payload 构建阶段）
+        pto2_orch_profile_csv_m1_wiring_queue_push_done();
+#endif
         return true;
     }
 
@@ -183,7 +219,10 @@ struct alignas(64) PTO2ReadyQueue {
     }
 
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
-    bool push(PTO2TaskSlotState *slot_state, uint64_t &atomic_count, uint64_t &wait_cycle) {
+    bool push(
+        PTO2TaskSlotState *slot_state, uint64_t &atomic_count, uint64_t &wait_cycle, uint64_t &atomic_read_count,
+        uint64_t &atomic_write_count
+    ) {
         uint64_t pos;
         PTO2ReadyQueueSlot *slot;
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -195,15 +234,18 @@ struct alignas(64) PTO2ReadyQueue {
             int64_t seq = slot->sequence.load(std::memory_order_acquire);
             int64_t diff = seq - static_cast<int64_t>(pos);
             atomic_ops += 2;  // enqueue_pos.load + sequence.load
+            atomic_read_count += 2;
             if (diff == 0) {
                 if (enqueue_pos.compare_exchange_weak(
                         pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed
                     )) {
                     atomic_ops++;  // successful CAS
+                    atomic_write_count++;
                     break;
                 }
                 contended = true;
                 atomic_ops++;  // failed CAS
+                atomic_write_count++;
             } else if (diff < 0) {
                 return false;  // Queue full
             } else {
@@ -211,6 +253,7 @@ struct alignas(64) PTO2ReadyQueue {
             }
         }
         atomic_ops++;  // final sequence.store
+        atomic_write_count++;
         atomic_count += atomic_ops;
         if (contended) {
             wait_cycle += (get_sys_cnt_aicpu() - t0);
@@ -253,11 +296,14 @@ struct alignas(64) PTO2ReadyQueue {
     }
 
 #if PTO2_SCHED_PROFILING
-    PTO2TaskSlotState *pop(uint64_t &atomic_count, uint64_t &wait_cycle) {
+    PTO2TaskSlotState *pop(
+        uint64_t &atomic_count, uint64_t &wait_cycle, uint64_t &atomic_read_count, uint64_t &atomic_write_count
+    ) {
         // Fast-path: skip slot load when queue is clearly empty
         uint64_t d = dequeue_pos.load(std::memory_order_relaxed);
         uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
         atomic_count += 2;  // dequeue_pos.load + enqueue_pos.load
+        atomic_read_count += 2;
         if (d >= e) {
             return nullptr;
         }
@@ -273,15 +319,18 @@ struct alignas(64) PTO2ReadyQueue {
             int64_t seq = slot->sequence.load(std::memory_order_acquire);
             int64_t diff = seq - static_cast<int64_t>(pos + 1);
             atomic_ops += 2;  // dequeue_pos.load + sequence.load
+            atomic_read_count += 2;
             if (diff == 0) {
                 if (dequeue_pos.compare_exchange_weak(
                         pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed
                     )) {
                     atomic_ops++;  // successful CAS
+                    atomic_write_count++;
                     break;
                 }
                 contended = true;
                 atomic_ops++;  // failed CAS
+                atomic_write_count++;
             } else if (diff < 0) {
                 atomic_count += atomic_ops;
                 return nullptr;  // Queue empty
@@ -290,6 +339,7 @@ struct alignas(64) PTO2ReadyQueue {
             }
         }
         atomic_ops++;  // final sequence.store
+        atomic_write_count++;
         atomic_count += atomic_ops;
         if (contended) {
             wait_cycle += (get_sys_cnt_aicpu() - t0);
@@ -341,7 +391,11 @@ struct alignas(64) PTO2ReadyQueue {
     }
 
 #if PTO2_SCHED_PROFILING
-    int pop_batch(PTO2TaskSlotState **out, int max_count, uint64_t &atomic_count, uint64_t &wait_cycle) {
+    int pop_batch(
+        PTO2TaskSlotState **out, int max_count, uint64_t &atomic_count, uint64_t &wait_cycle,
+        uint64_t &atomic_read_count, uint64_t &atomic_write_count, uint64_t &spin_retry_count,
+        uint64_t &empty_poll_count
+    ) {
         uint64_t pos;
         int count;
         uint64_t t0 = get_sys_cnt_aicpu();
@@ -350,12 +404,14 @@ struct alignas(64) PTO2ReadyQueue {
         while (true) {
             pos = dequeue_pos.load(std::memory_order_relaxed);
             atomic_ops++;  // dequeue_pos.load
+            atomic_read_count++;
             count = 0;
             while (count < max_count) {
                 PTO2ReadyQueueSlot *slot = &slots[(pos + count) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + count + 1);
                 atomic_ops++;  // sequence.load
+                atomic_read_count++;
                 if (diff == 0) {
                     count++;
                     continue;
@@ -368,20 +424,25 @@ struct alignas(64) PTO2ReadyQueue {
                 break;
             }
             if (count == 0) {
+                empty_poll_count++;
                 atomic_count += atomic_ops;
                 return 0;
             }
             if (count < 0) {
+                spin_retry_count++;
                 continue;
             }
             if (dequeue_pos.compare_exchange_weak(
                     pos, pos + count, std::memory_order_relaxed, std::memory_order_relaxed
                 )) {
                 atomic_ops++;  // successful CAS
+                    atomic_write_count++;
                 break;
             }
             contended = true;
+            spin_retry_count++;
             atomic_ops++;  // failed CAS
+                atomic_write_count++;
         }
 
         for (int i = 0; i < count; i++) {
@@ -389,6 +450,7 @@ struct alignas(64) PTO2ReadyQueue {
             out[i] = slot->slot_state;
             slot->sequence.store(static_cast<int64_t>(pos + i + mask + 1), std::memory_order_release);
             atomic_ops++;  // sequence.store
+            atomic_write_count++;
         }
         atomic_count += atomic_ops;
         if (contended) {
@@ -658,6 +720,12 @@ struct PTO2SchedulerState {
     void wire_task(RingSchedState &rss, PTO2TaskSlotState *ws, int32_t wfanin) {
         PTO2TaskPayload *wp = ws->payload;
         ws->fanin_count = wfanin + 1;
+#if PTO2_SCHED_PROFILING
+        extern uint64_t g_sched_wire_task_count[], g_sched_wire_fanin_count[], g_sched_wire_dep_entry_count[];
+        // CSV ②「读/写」原始量：wire_task 次数 wt；本行对 fanin 边数 wf 累加（∑P，每 producer 一条边）
+        g_sched_wire_task_count[0]++;
+        g_sched_wire_fanin_count[0] += static_cast<uint64_t>(wfanin);
+#endif
 
         if (wfanin != 0) {
             int32_t early_finished = 0;
@@ -668,6 +736,10 @@ struct PTO2SchedulerState {
                     early_finished++;
                 } else {
                     producer->fanout_head = rss.dep_pool.prepend(producer->fanout_head, ws);
+#if PTO2_SCHED_PROFILING
+                    // CSV ②「PTO2DepListEntry」写次数：每存活 producer 分配并挂接一条 dep 节点
+                    g_sched_wire_dep_entry_count[0]++;
+#endif
                 }
                 pto2_fanout_unlock(*producer);
             });
@@ -702,6 +774,11 @@ struct PTO2SchedulerState {
         int32_t ring_id = slot_state.ring_id;
         // Try-lock — if another thread is advancing this ring, it will scan our CONSUMED task
         int32_t expected_lock = 0;
+#if PTO2_SCHED_PROFILING
+        extern uint64_t g_sched_advance_lock_cas_count[];
+        // CSV ⑦ advance_lock「CAS次数」：每次尝试 compare_exchange（线程索引 0 表示非 profiling 重载路径）
+        g_sched_advance_lock_cas_count[0]++;
+#endif
         if (ring_sched_states[ring_id].advance_lock.compare_exchange_strong(
                 expected_lock, 1, std::memory_order_acquire, std::memory_order_relaxed
             )) {
@@ -711,11 +788,15 @@ struct PTO2SchedulerState {
     }
 
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
-    void check_and_handle_consumed(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
+    void check_and_handle_consumed(
+        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &atomic_read_count,
+        uint64_t &atomic_write_count, int32_t thread_idx = 0
+    ) {
         int32_t fc = slot_state.fanout_count;
         int32_t rc = slot_state.fanout_refcount.load(std::memory_order_acquire);
 
         atomic_count += 2;  // fanout_count.load + fanout_refcount.load
+        atomic_read_count += 2;
 
         if (rc != fc) return;
 
@@ -724,10 +805,12 @@ struct PTO2SchedulerState {
                 expected, PTO2_TASK_CONSUMED, std::memory_order_acq_rel, std::memory_order_acquire
             )) {
             atomic_count += 1;  // failed CAS
+            atomic_write_count += 1;
             return;
         }
 
         atomic_count += 1;  // successful CAS
+        atomic_write_count += 1;
 
 #if PTO2_SCHED_PROFILING
         tasks_consumed.fetch_add(1, std::memory_order_relaxed);
@@ -736,14 +819,24 @@ struct PTO2SchedulerState {
         int32_t ring_id = slot_state.ring_id;
         // Try-lock — if another thread is advancing this ring, it will scan our CONSUMED task
         int32_t expected_lock = 0;
+#if PTO2_SCHED_PROFILING
+        extern uint64_t g_sched_advance_lock_cas_count[];
+        // CSV ⑦ advance_lock「CAS次数」：本调度线程 thread_idx 上每次 try-lock 计 1
+        g_sched_advance_lock_cas_count[thread_idx]++;
+#endif
         if (ring_sched_states[ring_id].advance_lock.compare_exchange_strong(
                 expected_lock, 1, std::memory_order_acquire, std::memory_order_relaxed
             )) {
             ring_sched_states[ring_id].advance_ring_pointers();
             ring_sched_states[ring_id].advance_lock.store(0, std::memory_order_release);
-            atomic_count += 2;  // try-lock CAS + unlock store
+            atomic_count += 2;  // advance_lock CAS 成功 + advance_lock.store(0)
+            atomic_write_count += 2;
+            extern uint64_t g_sched_advance_count[];
+            // CSV ⑦「PTO2RingFlowControl」写侧：成功推进环指针一次（advance_ring_pointers）
+            g_sched_advance_count[thread_idx]++;
         } else {
             atomic_count += 1;  // failed try-lock CAS
+            atomic_write_count += 1;
         }
     }
 #endif
@@ -754,10 +847,14 @@ struct PTO2SchedulerState {
     }
 
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
-    void release_producer(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
+    void release_producer(
+        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &atomic_read_count,
+        uint64_t &atomic_write_count, int32_t thread_idx = 0
+    ) {
         slot_state.fanout_refcount.fetch_add(1, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
-        check_and_handle_consumed(slot_state, atomic_count);
+        atomic_write_count += 1;
+        check_and_handle_consumed(slot_state, atomic_count, atomic_read_count, atomic_write_count, thread_idx);
     }
 #endif
 
@@ -781,11 +878,14 @@ struct PTO2SchedulerState {
 
 #if PTO2_ORCH_PROFILING || PTO2_SCHED_PROFILING
     bool release_fanin_and_check_ready(
-        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
+        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &atomic_read_count,
+        uint64_t &atomic_write_count, uint64_t &push_wait, uint64_t &queue_atomic_read_count,
+        uint64_t &queue_atomic_write_count,
         PTO2LocalReadyBuffer *local_bufs = nullptr
     ) {
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
+        atomic_write_count += 1;
 
         if (new_refcount == slot_state.fanin_count) {
             PTO2TaskState expected = PTO2_TASK_PENDING;
@@ -793,10 +893,17 @@ struct PTO2SchedulerState {
                     expected, PTO2_TASK_READY, std::memory_order_acq_rel, std::memory_order_acquire
                 )) {
                 atomic_count += 1;  // CAS(task_state PENDING→READY)
+                atomic_write_count += 1;
                 // Local-first: try per-CoreType thread-local buffer before global queue
                 PTO2ResourceShape shape = pto2_active_mask_to_shape(slot_state.active_mask);
                 if (!local_bufs || !local_bufs[static_cast<int32_t>(shape)].try_push(&slot_state)) {
-                    ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+                    uint64_t q_read_before = atomic_read_count;
+                    uint64_t q_write_before = atomic_write_count;
+                    ready_queues[static_cast<int32_t>(shape)].push(
+                        &slot_state, atomic_count, push_wait, atomic_read_count, atomic_write_count
+                    );
+                    queue_atomic_read_count += (atomic_read_count - q_read_before);
+                    queue_atomic_write_count += (atomic_write_count - q_write_before);
                 }
                 return true;
             }
@@ -822,7 +929,8 @@ struct PTO2SchedulerState {
 #if PTO2_SCHED_PROFILING
     int get_ready_tasks_batch(
         PTO2ResourceShape shape, PTO2LocalReadyBuffer &local_buf, PTO2TaskSlotState **out, int max_count,
-        uint64_t &atomic_count, uint64_t &wait_cycle, uint64_t &local_dispatch_count
+        uint64_t &atomic_count, uint64_t &atomic_read_count, uint64_t &atomic_write_count, uint64_t &wait_cycle,
+        uint64_t &local_dispatch_count, uint64_t &spin_retry_count, uint64_t &empty_poll_count
     ) {
         int count = 0;
         while (count < max_count && local_buf.count > 0) {
@@ -831,8 +939,10 @@ struct PTO2SchedulerState {
         }
         int remaining = max_count - count;
         if (remaining > 0) {
-            count +=
-                ready_queues[static_cast<int32_t>(shape)].pop_batch(out + count, remaining, atomic_count, wait_cycle);
+            count += ready_queues[static_cast<int32_t>(shape)].pop_batch(
+                out + count, remaining, atomic_count, wait_cycle, atomic_read_count, atomic_write_count,
+                spin_retry_count, empty_poll_count
+            );
         }
         return count;
     }
@@ -840,11 +950,16 @@ struct PTO2SchedulerState {
 
     void on_scope_end(PTO2TaskSlotState **task_slot_states, int32_t count) {
 #if PTO2_ORCH_PROFILING
-        extern uint64_t g_orch_scope_end_atomic_count;
+        // release_producer 内原子累加到 g_orch_scope_end_atomic_count，供 CSV ① PTO2TaskSlotState.atomic_ops 汇总
+        extern uint64_t g_orch_scope_end_atomic_count, g_orch_scope_end_atomic_read_count,
+            g_orch_scope_end_atomic_write_count;
         if (count > 0) __builtin_prefetch(task_slot_states[0], 1, 0);
         for (int32_t i = 0; i < count; i++) {
             if (i + 1 < count) __builtin_prefetch(task_slot_states[i + 1], 1, 0);
-            release_producer(*task_slot_states[i], g_orch_scope_end_atomic_count);
+            release_producer(
+                *task_slot_states[i], g_orch_scope_end_atomic_count, g_orch_scope_end_atomic_read_count,
+                g_orch_scope_end_atomic_write_count
+            );
         }
 #else
         if (count > 0) __builtin_prefetch(task_slot_states[0], 1, 0);
@@ -893,7 +1008,9 @@ struct PTO2SchedulerState {
 #if PTO2_SCHED_PROFILING
         extern uint64_t g_sched_lock_cycle[], g_sched_fanout_cycle[];
         extern uint64_t g_sched_lock_atomic_count[], g_sched_lock_wait_cycle[];
-        extern uint64_t g_sched_fanout_atomic_count[], g_sched_push_wait_cycle[];
+        extern uint64_t g_sched_fanout_atomic_count[], g_sched_push_wait_cycle[], g_sched_lock_atomic_read_count[],
+            g_sched_lock_atomic_write_count[], g_sched_fanout_atomic_read_count[], g_sched_fanout_atomic_write_count[],
+            g_sched_m6_ready_queue_atomic_read_count[], g_sched_m6_ready_queue_atomic_write_count[];
         uint64_t lock_atomics = 0, lock_wait = 0;
         PTO2_SCHED_CYCLE_START();
 #endif
@@ -908,21 +1025,28 @@ struct PTO2SchedulerState {
         pto2_fanout_unlock(slot_state);
 
 #if PTO2_SCHED_PROFILING
-        lock_atomics += 2;  // state.store + unlock.store
+        lock_atomics += 2;  // task_state.store(COMPLETED) + fanout_unlock.store
+        // ⑥ SlotState 等：fanout_lock 段原子/RWM 累计，用于周期分解（非直接 CSV 列，但与 CSV「锁次数」相关路径）
         g_sched_lock_atomic_count[thread_idx] += lock_atomics;
+        g_sched_lock_atomic_read_count[thread_idx] += 0;
+        g_sched_lock_atomic_write_count[thread_idx] += lock_atomics;
         g_sched_lock_wait_cycle[thread_idx] += lock_wait;
         PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);
 #endif
 
         // Fanout: notify consumers
 #if PTO2_SCHED_PROFILING
-        uint64_t fanout_atomics = 0, push_wait = 0;
+        uint64_t fanout_atomics = 0, fanout_atomic_reads = 0, fanout_atomic_writes = 0;
+        uint64_t push_wait = 0, m6_readyq_atomic_reads = 0, m6_readyq_atomic_writes = 0;
 #endif
         while (current != nullptr) {
             PTO2TaskSlotState &consumer_slot = *current->slot_state;
 #if PTO2_SCHED_PROFILING
             stats.fanout_edges++;
-            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, local_bufs)) {
+            if (release_fanin_and_check_ready(
+                    consumer_slot, fanout_atomics, fanout_atomic_reads, fanout_atomic_writes, push_wait,
+                    m6_readyq_atomic_reads, m6_readyq_atomic_writes, local_bufs
+                )) {
                 stats.tasks_enqueued++;
             }
 #else
@@ -932,9 +1056,21 @@ struct PTO2SchedulerState {
         }
 
 #if PTO2_SCHED_PROFILING
+        // fanout 通知 consumer 时队列原子/等待（对应 CSV ⑥ ReadyQueue 原子近似的数据源之一）
         g_sched_fanout_atomic_count[thread_idx] += fanout_atomics;
+        g_sched_fanout_atomic_read_count[thread_idx] += fanout_atomic_reads;
+        g_sched_fanout_atomic_write_count[thread_idx] += fanout_atomic_writes;
+        g_sched_m6_ready_queue_atomic_read_count[thread_idx] += m6_readyq_atomic_reads;
+        g_sched_m6_ready_queue_atomic_write_count[thread_idx] += m6_readyq_atomic_writes;
         g_sched_push_wait_cycle[thread_idx] += push_wait;
         PTO2_SCHED_CYCLE_LAP(g_sched_fanout_cycle[thread_idx]);
+        extern uint64_t g_sched_fanout_edge_count[], g_sched_tasks_enqueued_count[], g_sched_dep_list_traverse_count[];
+        // CSV ⑥「C」：沿 fanout 边通知 consumer 的次数（每条边一次）
+        g_sched_fanout_edge_count[thread_idx] += static_cast<uint64_t>(stats.fanout_edges);
+        // CSV ⑥：因 fanin 就绪而 push 进全局/本地就绪队列的次数
+        g_sched_tasks_enqueued_count[thread_idx] += static_cast<uint64_t>(stats.tasks_enqueued);
+        // CSV ⑥「PTO2DepListEntry」读：每遍历一条 fanout 边读 dep 节点一次（与 fanout_edges 同计数）
+        g_sched_dep_list_traverse_count[thread_idx] += static_cast<uint64_t>(stats.fanout_edges);
         return stats;
 #endif
     }
@@ -947,34 +1083,58 @@ struct PTO2SchedulerState {
 #if PTO2_SCHED_PROFILING
     int32_t on_task_release(PTO2TaskSlotState &slot_state, int32_t thread_idx) {
         PTO2_SCHED_CYCLE_START();
-        extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
-        extern uint64_t g_sched_self_atomic_count[];
+        extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[], g_sched_fanin_atomic_read_count[],
+            g_sched_fanin_atomic_write_count[];
+        extern uint64_t g_sched_self_atomic_count[], g_sched_self_atomic_read_count[], g_sched_self_atomic_write_count[];
         extern uint64_t g_sched_self_consumed_cycle[];
         extern uint64_t g_sched_complete_count[];
-        uint64_t fanin_atomics = 0;
+        extern uint64_t g_sched_fanin_spill_read_count[];
+        uint64_t fanin_atomics = 0, fanin_atomic_reads = 0, fanin_atomic_writes = 0;
 #else
     int32_t on_task_release(PTO2TaskSlotState &slot_state) {
 #endif
         PTO2TaskPayload *payload = slot_state.payload;
+#if PTO2_SCHED_PROFILING
+        // Count spill entries accessed (entries beyond PTO2_FANIN_INLINE_CAP)
+        int32_t spill_count = payload->fanin_actual_count - std::min(payload->fanin_actual_count, PTO2_FANIN_INLINE_CAP);
+        if (spill_count > 0) {
+            // CSV ⑦「PTO2FaninSpillEntry」读次数：超过内联上限后每条 spill 槽计一次读
+            g_sched_fanin_spill_read_count[thread_idx] += static_cast<uint64_t>(spill_count);
+        }
+#endif
         pto2_for_each_fanin_slot_state(*payload, [&](PTO2TaskSlotState *producer_slot_state) {
 #if PTO2_SCHED_PROFILING
-            release_producer(*producer_slot_state, fanin_atomics);
+            release_producer(
+                *producer_slot_state, fanin_atomics, fanin_atomic_reads, fanin_atomic_writes, thread_idx
+            );
 #else
             release_producer(*producer_slot_state);
 #endif
         });
 #if PTO2_SCHED_PROFILING
+        // ⑦ producer 侧 fanout_refcount.fetch_add 等原子累计（见 release_producer 内 fanin_atomics）
         g_sched_fanin_atomic_count[thread_idx] += fanin_atomics;
+        g_sched_fanin_atomic_read_count[thread_idx] += fanin_atomic_reads;
+        g_sched_fanin_atomic_write_count[thread_idx] += fanin_atomic_writes;
         PTO2_SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
 #endif
 
         // Self consumed check
 #if PTO2_SCHED_PROFILING
-        uint64_t self_atomics = 0;
-        check_and_handle_consumed(slot_state, self_atomics);
+        uint64_t self_atomics = 0, self_atomic_reads = 0, self_atomic_writes = 0;
+        check_and_handle_consumed(slot_state, self_atomics, self_atomic_reads, self_atomic_writes, thread_idx);
+        // ⑦ 自身 CONSUMED 判定路径上的原子累计（含 advance_lock 尝试等，见 check_and_handle_consumed）
         g_sched_self_atomic_count[thread_idx] += self_atomics;
+        g_sched_self_atomic_read_count[thread_idx] += self_atomic_reads;
+        g_sched_self_atomic_write_count[thread_idx] += self_atomic_writes;
         PTO2_SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
+        // 非 CSV 五列：本线程完成一次「释放生产者 + 自检 CONSUMED」的调用次数窗口累计
         g_sched_complete_count[thread_idx]++;
+        extern uint64_t g_sched_task_release_count[], g_sched_fanin_release_count[];
+        // CSV ⑦「on_task_release」调用次数（每释放一个已完成任务 payload 计一次）
+        g_sched_task_release_count[thread_idx]++;
+        // CSV ⑦「∑P」：本任务 fanin 边数，每边 release 上做一次 fanout_refcount.fetch_add
+        g_sched_fanin_release_count[thread_idx] += static_cast<uint64_t>(payload->fanin_actual_count);
 #else
         check_and_handle_consumed(slot_state);
 #endif
@@ -1005,25 +1165,82 @@ const char *pto2_task_state_name(PTO2TaskState state);
 
 #if PTO2_SCHED_PROFILING
 struct PTO2SchedProfilingData {
-    // Sub-phase cycle breakdown within on_mixed_task_complete
-    uint64_t lock_cycle;           // pto2_fanout_lock + state store + unlock
-    uint64_t fanout_cycle;         // fanout traversal
-    uint64_t fanin_cycle;          // fanin traversal
-    uint64_t self_consumed_cycle;  // self check_and_handle_consumed
+    // 周期量：on_mixed_task_complete 内各子阶段（非 CSV 五列，单位 CPU cycle）
+    uint64_t lock_cycle;           // fanout_lock 持锁 + 写 task_state + 解锁
+    uint64_t fanout_cycle;         // 遍历 fanout 链表通知 consumer
+    uint64_t fanin_cycle;          // fanin 侧 release / 入队路径
+    uint64_t self_consumed_cycle;   // 自身 CONSUMED 检查 check_and_handle_consumed
 
-    // Wait times
-    uint64_t lock_wait_cycle;  // spin-wait in fanout_lock
-    uint64_t push_wait_cycle;  // CAS contention in push()
-    uint64_t pop_wait_cycle;   // CAS contention in pop()
+    uint64_t lock_wait_cycle;   // fanout_lock 自旋等待周期
+    uint64_t push_wait_cycle;   // 就绪队列 push CAS 争用等待周期
+    uint64_t pop_wait_cycle;    // 就绪队列 pop CAS 争用等待周期
 
-    // Atomic counts per sub-phase
-    uint64_t lock_atomic_count;
-    uint64_t fanout_atomic_count;
-    uint64_t fanin_atomic_count;
-    uint64_t self_atomic_count;
-    uint64_t pop_atomic_count;
+    uint64_t lock_atomic_count;    // lock 子阶段内原子/RWM 等累计次数（实现内部口径）
+    uint64_t fanout_atomic_count;  // fanout 子阶段原子操作累计
+    uint64_t fanin_atomic_count;   // fanin 子阶段原子操作累计
+    uint64_t self_atomic_count;    // self_consumed 子阶段原子操作累计
+    uint64_t pop_atomic_count;     // get_ready_tasks_batch / pop_batch 路径原子累计
 
+    /** 窗口内 mixed 任务完成次数 = 对应 g_sched_complete_count[thread] 清零前的累计 */
     int64_t complete_count;
+    /** CSV ② 行「PTO2TaskSlotState」五列（依赖构建 / wire） */
+    PTO2CsvAccessCounters csv_m2_pto2_task_slot_state;
+    /** CSV ② 行「PTO2TaskPayload」五列（读 fanin 元数据等） */
+    PTO2CsvAccessCounters csv_m2_pto2_task_payload;
+    /** CSV ② 行「PTO2DepListEntry」五列 */
+    PTO2CsvAccessCounters csv_m2_pto2_dep_list_entry;
+    /** CSV ② 行「PTO2ReadyQueue」五列（wiring pop / 入全局队列等近似） */
+    PTO2CsvAccessCounters csv_m2_pto2_ready_queue;
+    /** CSV ② ReadyQueue wiring push 的显式自旋/重试次数（CAS 失败 + slot 未就绪轮询） */
+    uint64_t csv_m2_pto2_ready_queue_spin_retry_ops;
+    /** CSV ④ ReadyQueue(pop) 显式自旋/重试次数（count<0 或 CAS 失败） */
+    uint64_t csv_m4_pto2_ready_queue_spin_retry_ops;
+    /** CSV ④ ReadyQueue(pop) 空轮询次数（count==0 返回） */
+    uint64_t csv_m4_pto2_ready_queue_empty_poll_ops;
+    /** CSV ③ 行「PTO2RingFlowControl」五列（调度器侧未单独埋点时为 0） */
+    PTO2CsvAccessCounters csv_m3_pto2_ring_flow_control;
+    /** CSV ③ 行「PTO2SharedMemoryHeader」五列（当前未埋点，占位） */
+    PTO2CsvAccessCounters csv_m3_pto2_shared_memory_header;
+    /** CSV ④ 行「PTO2TaskSlotState」五列（dispatch 子任务 RMW 等） */
+    PTO2CsvAccessCounters csv_m4_pto2_task_slot_state;
+    /** CSV ④ 行「PTO2TaskPayload」CL0~2 元数据读五列 */
+    PTO2CsvAccessCounters csv_m4_pto2_task_payload_meta;
+    /** CSV ④ 行「PTO2TaskPayload」CL3~34 tensors[] 参与 build_payload 的读次数五列 */
+    PTO2CsvAccessCounters csv_m4_pto2_task_payload_tensors;
+    /** CSV ④ 行「PTO2TaskPayload」CL35~50 scalars[] 参与 build_payload 的读次数五列 */
+    PTO2CsvAccessCounters csv_m4_pto2_task_payload_scalars;
+    /** CSV ④ 行「PTO2TaskDescriptor」五列 */
+    PTO2CsvAccessCounters csv_m4_pto2_task_descriptor;
+    /** CSV ④ 行「PTO2DispatchPayload」五列（按子任务写满 dispatch 缓冲的写事件近似） */
+    PTO2CsvAccessCounters csv_m4_pto2_dispatch_payload;
+    /** CSV ④ 行「PTO2ReadyQueue」全局 pop 五列 */
+    PTO2CsvAccessCounters csv_m4_pto2_ready_queue;
+    /** CSV ④ 行「PTO2ReadyQueue(pop命中)」五列（按每次 pop 调用 count>0 拆分） */
+    PTO2CsvAccessCounters csv_m4_pto2_ready_queue_pop_hit;
+    /** CSV ④ 行「PTO2ReadyQueue(pop空转)」五列（按每次 pop 调用 count==0 拆分） */
+    PTO2CsvAccessCounters csv_m4_pto2_ready_queue_pop_miss;
+    /** CSV ⑤ 行「PTO2TaskSlotState」五列（completed_subtasks 等） */
+    PTO2CsvAccessCounters csv_m5_pto2_task_slot_state;
+    /** CSV ⑤ 行「PTO2DispatchPayload」读 args 五列 */
+    PTO2CsvAccessCounters csv_m5_pto2_dispatch_payload;
+    /** CSV ⑤ 行「Tensor」五列（与 dispatch 张量遍历统计关联的近似） */
+    PTO2CsvAccessCounters csv_m5_tensor;
+    /** CSV ⑥ 行「PTO2TaskSlotState」五列 */
+    PTO2CsvAccessCounters csv_m6_pto2_task_slot_state;
+    /** CSV ⑥ 行「PTO2DepListEntry」五列 */
+    PTO2CsvAccessCounters csv_m6_pto2_dep_list_entry;
+    /** CSV ⑥ 行「PTO2ReadyQueue」五列 */
+    PTO2CsvAccessCounters csv_m6_pto2_ready_queue;
+    /** CSV ⑦ 行「PTO2TaskSlotState」五列 */
+    PTO2CsvAccessCounters csv_m7_pto2_task_slot_state;
+    /** CSV ⑦ 行「PTO2TaskPayload」五列 */
+    PTO2CsvAccessCounters csv_m7_pto2_task_payload;
+    /** CSV ⑦ 行「PTO2RingFlowControl」五列（advance_ring_pointers） */
+    PTO2CsvAccessCounters csv_m7_pto2_ring_flow_control;
+    /** CSV ⑦ 行「PTO2FaninSpillEntry」五列 */
+    PTO2CsvAccessCounters csv_m7_pto2_fanin_spill_entry;
+    /** CSV ⑦ 行「RingSchedState.advance_lock」五列 */
+    PTO2CsvAccessCounters csv_m7_ring_sched_state_advance_lock;
 };
 
 /**

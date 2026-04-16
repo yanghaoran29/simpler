@@ -108,6 +108,11 @@ public:
 
         int spin_count = 0;
         int32_t prev_last_alive = last_alive_ptr_->load(std::memory_order_acquire);
+#if PTO2_ORCH_PROFILING
+        // 计入 g_orch_ring_fc_last_alive_acquire_reads：对应 CSV ①③「读次数」中每次对 last_task_alive 的 acquire 观测
+        extern uint64_t g_orch_ring_fc_last_alive_acquire_reads;
+        g_orch_ring_fc_last_alive_acquire_reads++;
+#endif
         int32_t last_alive = prev_last_alive;
         update_heap_tail(last_alive);
         bool blocked_on_heap = false;
@@ -141,6 +146,10 @@ public:
             }
 #endif
             last_alive = last_alive_ptr_->load(std::memory_order_acquire);
+#if PTO2_ORCH_PROFILING
+            // 同上：spin 每轮一次 acquire 读，累加为 CSV「0~N」中的 N 的可观测部分
+            g_orch_ring_fc_last_alive_acquire_reads++;
+#endif
             update_heap_tail(last_alive);
             if (last_alive > prev_last_alive) {
                 spin_count = 0;
@@ -290,6 +299,7 @@ private:
     }
 
 #if PTO2_ORCH_PROFILING
+    /** alloc 结束前：把本次阻塞等待时间记入 g_orch_alloc_wait_cycle；把 spin 轮次近似记入 g_orch_alloc_atomic_count */
     void record_wait(int spin_count, uint64_t wait_start, bool waiting) {
         if (waiting) {
             extern uint64_t g_orch_alloc_wait_cycle;
