@@ -71,6 +71,11 @@ struct L2PerfRecord {
     // Dependency relationship (fanout only)
     uint64_t fanout[RUNTIME_MAX_FANOUT];  // Successor task task_id array
     int32_t fanout_count;                 // Number of successor tasks
+
+    // PTO2 tensormap / aicpu_build_graph: copied from PTO2TaskSlotState at AICore completion.
+    // host_build_graph: set to 0 when not applicable.
+    int32_t fanin_count;     // Static fanin degree (scheduling threshold, includes +1 redundance)
+    int32_t fanin_refcount;  // Snapshot of fanin_refcount atomic at completion observation
 } __attribute__((aligned(64)));
 
 static_assert(sizeof(L2PerfRecord) % 64 == 0, "L2PerfRecord must be 64-byte aligned for optimal cache performance");

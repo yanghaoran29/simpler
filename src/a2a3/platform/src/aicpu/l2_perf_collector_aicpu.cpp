@@ -128,7 +128,8 @@ void l2_perf_aicpu_init_profiling(Runtime *runtime) {
 
 int l2_perf_aicpu_complete_record(
     L2PerfBuffer *l2_perf_buf, uint32_t expected_reg_task_id, uint64_t task_id, uint32_t func_id, CoreType core_type,
-    uint64_t dispatch_time, uint64_t finish_time, const uint64_t *fanout, int32_t fanout_count
+    uint64_t dispatch_time, uint64_t finish_time, const uint64_t *fanout, int32_t fanout_count, int32_t fanin_count,
+    int32_t fanin_refcount
 ) {
     rmb();
     uint32_t count = l2_perf_buf->count;
@@ -162,6 +163,8 @@ int l2_perf_aicpu_complete_record(
     } else {
         record->fanout_count = 0;
     }
+    record->fanin_count = fanin_count;
+    record->fanin_refcount = fanin_refcount;
 
     l2_perf_buf->count = count + 1;
     wmb();

@@ -142,7 +142,8 @@ void SchedulerContext::complete_slot_task(
         if (l2_perf_aicpu_complete_record(
                 pbuf, static_cast<uint32_t>(expected_reg_task_id), slot_state.task->task_id.raw,
                 slot_state.task->kernel_id[perf_slot_idx], hank[core_id].core_type, dispatch_ts, finish_ts, fanout_arr,
-                fanout_n
+                fanout_n, slot_state.fanin_count,
+                slot_state.fanin_refcount.load(std::memory_order_relaxed)
             ) != 0) {
             DEV_ERROR(
                 "Core %d: l2_perf_aicpu_complete_record failed for task 0x%" PRIx64, core_id,
