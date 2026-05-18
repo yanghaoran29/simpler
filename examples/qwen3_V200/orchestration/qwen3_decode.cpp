@@ -44,8 +44,8 @@
 //   4  per tile: qk_norm, fan-in from same-tile 1–3 (no cross-tile Func4 deps)
 //   5  per real batch b: rope_kv_cache, depends only on tile(b/16) Func4
 //   6–9  per b: QK matmul → softmax → SV matmul → online softmax writes attn_out[b]
-//   10/11  per tile: mixed out_proj (waits Func9 rows in that tile)
-//   12  post_rmsnorm; 13/14 gate/up; 15 silu; 16 down accum; 17/18 residual → out
+//   10+11  per tile: mixed out_proj AIC10+AIV11 (waits Func9 rows in that tile)
+//   12  post_rmsnorm; 13/14 gate/up; 15 silu; 16 down accum; 17+18 residual → out
 
 extern "C" {
 
@@ -74,7 +74,6 @@ struct taskInfo {
     u_int32_t block_num;
     u_int8_t mixed_aic;
     u_int8_t mixed_aiv0;
-    u_int8_t mixed_aiv1;
 };
 
 struct taskStatus {
@@ -113,20 +112,18 @@ static u_int16_t ring_emit(u_int8_t kernel_id, TASK_TYPE kind, u_int32_t block_n
     slot.block_num = block_num;
     slot.mixed_aic = 0;
     slot.mixed_aiv0 = 0;
-    slot.mixed_aiv1 = 0;
     globalReadyQueue.push(kind, taskID);
     return taskID;
 }
 
-// Mixed kernel: slot.kernel = AIC func_id; mixed_aiv0/1 = paired AIV func_ids.
-static u_int16_t ring_emit_mixed(u_int8_t aic, u_int8_t aiv0, u_int8_t aiv1, u_int32_t block_num) {
+// Mixed kernel: slot.kernel = AIC func_id; mixed_aiv0 = paired AIV func_id (no aiv1).
+static u_int16_t ring_emit_mixed(u_int8_t aic, u_int8_t aiv0, u_int32_t block_num) {
     const u_int16_t taskID = g_taskIndex++;
     (void)getRingIndex(taskID);
     taskInfo &slot = ring_slot(taskID);
     slot.kernel = aic;
     slot.mixed_aic = aic;
     slot.mixed_aiv0 = aiv0;
-    slot.mixed_aiv1 = aiv1;
     slot.block_num = block_num;
     globalReadyQueue.push(TASK_MIX, taskID);
     return taskID;
@@ -422,8 +419,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
         const int64_t cur_valid = std::min<int64_t>(QWEN3_USER_BATCH - b0, QWEN3_BATCH_TILE);
 
-        // [Func10/11] mixed out_proj: attn rows + hidden residual → resid1_tile (waits Func9 per row in tile)
-        const u_int16_t out_proj_id = ring_emit_mixed(10, 11, 11, 40);
+        // [Func10+11] mixed out_proj (AIC10+AIV11): attn rows + hidden residual → resid1_tile
+        const u_int16_t out_proj_id = ring_emit_mixed(10, 11, 40);
         {
             taskInfo &sop = ring_slot(out_proj_id);
             sop.input[0] = reinterpret_cast<u_int64_t>(&ext_hidden_states);
@@ -524,14 +521,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             down_proj_task_by_db[static_cast<size_t>(di)] = down_id;
         }
 
-        // [Func17/18] mixed residual: down block db + resid1 → ext_out (one chain per db)
+        // [Func17+18] mixed residual (AIC17+AIV18): down block db + resid1 → ext_out
         u_int16_t last_resid_id = 0;
         for (int64_t db = 0; db < QWEN3_DOWN_BLOCKS; db += 1) {
             const uint32_t gm_pipe_1_shapes[1] = {static_cast<uint32_t>(QWEN3_GM_PIPE_ELEMS)};
             const uint32_t gm_pipe_1_offsets[1] = {static_cast<uint32_t>(db * QWEN3_GM_PIPE_ELEMS)};
             Tensor gm_pipe_buffer_1 = gm_pipe_resid_pool.view(gm_pipe_1_shapes, gm_pipe_1_offsets, true);
 
-            const u_int16_t resid_id = ring_emit_mixed(17, 18, 18, 0);
+            const u_int16_t resid_id = ring_emit_mixed(17, 18, 0);
             taskInfo &sres = ring_slot(resid_id);
             sres.input[0] = reinterpret_cast<u_int64_t>(&resid1_tile);
             sres.input[1] = reinterpret_cast<u_int64_t>(&mlp_tile);
