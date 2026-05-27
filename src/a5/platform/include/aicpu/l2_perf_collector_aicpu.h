@@ -71,6 +71,16 @@ void l2_perf_aicpu_init(int worker_count);
  * @param finish_time           AICPU timestamp when task completion was observed
  * @param fanout                Pre-extracted successor task ID array (nullptr if none)
  * @param fanout_count          Number of entries in fanout array (0 if none)
+ * @param unlocked_count        Number of consumers whose fanin_refcount reached
+ *                              fanin_count due to this completion (i.e. tasks
+ *                              this TaskDone pushed to the ready queue).
+ *                              0 for non-final subtasks of a mixed task.
+ * @param early_finished_count  Number of THIS task's upstream producers that
+ *                              were already PTO2_TASK_COMPLETED when this
+ *                              task was wired. These edges are NOT recorded
+ *                              in the producers' fanout-hint, so analyses
+ *                              must add this count to reconstruct the true
+ *                              edge total.
  *
  * Routes the destination via state->current_buf_ptr (not Handshake), so that
  * flush()-clearing current_buf_ptr deterministically halts subsequent commits
@@ -78,7 +88,8 @@ void l2_perf_aicpu_init(int worker_count);
  */
 int l2_perf_aicpu_complete_record(
     int core_id, uint32_t expected_reg_task_id, uint64_t task_id, uint32_t func_id, CoreType core_type,
-    uint64_t dispatch_time, uint64_t finish_time, const uint64_t *fanout, int32_t fanout_count
+    uint64_t dispatch_time, uint64_t finish_time, const uint64_t *fanout, int32_t fanout_count,
+    int16_t unlocked_count, int16_t early_finished_count
 );
 
 /**

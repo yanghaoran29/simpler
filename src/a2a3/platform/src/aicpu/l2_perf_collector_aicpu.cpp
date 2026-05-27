@@ -226,7 +226,8 @@ static void switch_records_buffer(int core_id, int thread_idx) {
 
 int l2_perf_aicpu_complete_record(
     int core_id, int thread_idx, uint32_t expected_reg_task_id, uint64_t task_id, uint32_t func_id, CoreType core_type,
-    uint64_t dispatch_time, uint64_t finish_time, const uint64_t *fanout, int32_t fanout_count
+    uint64_t dispatch_time, uint64_t finish_time, const uint64_t *fanout, int32_t fanout_count,
+    int16_t unlocked_count, int16_t early_finished_count
 ) {
     if (core_id < 0 || core_id >= PLATFORM_MAX_CORES) {
         return -1;
@@ -301,10 +302,14 @@ int l2_perf_aicpu_complete_record(
         } else {
             record->fanout_count = 0;
         }
+        record->unlocked_count = unlocked_count;
+        record->early_finished_count = early_finished_count;
     } else {
         record->dispatch_time = 0;
         record->finish_time = 0;
         record->fanout_count = 0;
+        record->unlocked_count = 0;
+        record->early_finished_count = 0;
     }
 
     uint32_t new_count = count + 1;

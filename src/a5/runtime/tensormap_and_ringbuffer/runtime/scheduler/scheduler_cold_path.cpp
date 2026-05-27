@@ -500,6 +500,20 @@ void SchedulerContext::log_l2_perf_summary(int32_t thread_idx, int32_t cur_threa
         "Thread %d: Scheduler summary: total_time=%.3fus, loops=%" PRIu64 ", tasks_scheduled=%d", thread_idx,
         cycles_to_us(sched_total), static_cast<uint64_t>(l2_perf.sched_loop_count), cur_thread_completed
     );
+    {
+        // Always-on cross-check counters: each thread emits the cumulative
+        // global values at its own exit, so the last log line in time carries
+        // the final run totals (no inter-thread barrier needed for verification).
+        extern std::atomic<uint64_t> g_runtime_taskdone_total;
+        extern std::atomic<uint64_t> g_runtime_unlock_total;
+        // V9 = must-see verbosity; ensures the cross-check totals are not
+        // filtered out by the default INFO threshold (V5).
+        LOG_INFO_V9(
+            "Thread %d: Runtime totals: TaskDone=%" PRIu64 " unlocks=%" PRIu64, thread_idx,
+            g_runtime_taskdone_total.load(std::memory_order_relaxed),
+            g_runtime_unlock_total.load(std::memory_order_relaxed)
+        );
+    }
 }
 #endif
 

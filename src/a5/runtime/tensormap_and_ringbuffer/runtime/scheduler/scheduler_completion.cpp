@@ -106,6 +106,11 @@ void SchedulerContext::complete_slot_task(
             return;
         }
     }
+    // Number of consumers whose fanin_refcount reached fanin_count as a direct
+    // result of this task's completion. Populated by on_mixed_task_complete
+    // below (when this subtask is the last subtask of its mixed task). Stays 0
+    // for non-final subtasks — only the final subtask carries the unlocks.
+    int32_t unlocked_count = 0;
     if (mixed_complete) {
 #if PTO2_PROFILING
         if (is_dump_tensor_enabled()) {
@@ -123,11 +128,12 @@ void SchedulerContext::complete_slot_task(
 #if PTO2_SCHED_PROFILING
         // SCHED_PROFILING variant takes thread_idx for its per-thread atomic
         // counter side-effects (g_sched_*_atomic_count[thread_idx], consumed
-        // by the otc_* log lines). Its return value is unused.
-        (void)sched_->on_mixed_task_complete(slot_state, thread_idx, local_bufs);
+        // by the otc_* log lines).
+        auto stats = sched_->on_mixed_task_complete(slot_state, thread_idx, local_bufs);
 #else
-        sched_->on_mixed_task_complete(slot_state, local_bufs);
+        auto stats = sched_->on_mixed_task_complete(slot_state, local_bufs);
 #endif
+        unlocked_count = stats.tasks_enqueued;
 #if PTO2_PROFILING
         l2_perf.phase_complete_count++;
 #endif
@@ -165,10 +171,14 @@ void SchedulerContext::complete_slot_task(
         }
 
         int32_t perf_slot_idx = static_cast<int32_t>(subslot);
+        const int32_t early_finished_count =
+            slot_state.payload != nullptr ? slot_state.payload->fanin_early_finished : 0;
         if (l2_perf_aicpu_complete_record(
                 core_id, static_cast<uint32_t>(expected_reg_task_id), slot_state.task->task_id.raw,
                 slot_state.task->kernel_id[perf_slot_idx], hank[core_id].core_type, dispatch_ts, finish_ts, fanout_arr,
-                fanout_n
+                fanout_n,
+                static_cast<int16_t>(std::min<int32_t>(unlocked_count, INT16_MAX)),
+                static_cast<int16_t>(std::min<int32_t>(early_finished_count, INT16_MAX))
             ) != 0) {
             LOG_ERROR(
                 "Core %d: l2_perf_aicpu_complete_record failed for task 0x%" PRIx64, core_id,

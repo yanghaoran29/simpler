@@ -17,9 +17,25 @@
  */
 
 #include "pto_scheduler.h"
+#include <atomic>
 #include <inttypes.h>
 #include <stdlib.h>
 #include "common/unified_log.h"
+
+// =============================================================================
+// Always-on TaskDone / unlock counters
+// =============================================================================
+// Cross-check counters for the swimlane sum(unlocked_count) accounting:
+//   g_runtime_taskdone_total -- incremented once per on_mixed_task_complete call
+//                               (= number of completed mixed tasks, real + dummy)
+//   g_runtime_unlock_total   -- incremented by stats.tasks_enqueued per call
+//                               (= number of consumers transitioned to READY by
+//                               a producer's TaskDone, i.e. fanout-driven unlocks)
+// Not gated by PTO2_SCHED_PROFILING so the counts are always available; uses
+// relaxed ordering since these are pure observability counters. Reset in
+// PTO2SchedulerState::init_from_layout so values are per-run, not per-process.
+std::atomic<uint64_t> g_runtime_taskdone_total{0};
+std::atomic<uint64_t> g_runtime_unlock_total{0};
 
 // =============================================================================
 // Scheduler Profiling Counters
@@ -148,6 +164,9 @@ bool PTO2SchedulerState::init_from_layout(
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
 #endif
+    // Reset the always-on TaskDone/unlock counters so each run starts from 0.
+    g_runtime_taskdone_total.store(0, std::memory_order_relaxed);
+    g_runtime_unlock_total.store(0, std::memory_order_relaxed);
 
     // Per-ring scheduler state — no arena buffers, just field init.
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -194,6 +213,19 @@ bool PTO2SchedulerState::init_from_layout(
 
 void PTO2SchedulerState::destroy() {
     PTO2SchedulerState *sched = this;
+
+    // Emit the always-on TaskDone/unlock counters before teardown so each run
+    // produces a one-shot summary in the device log. Counters are reset in
+    // init_from_layout (per-run, not per-process).
+    {
+        uint64_t taskdone = g_runtime_taskdone_total.load(std::memory_order_relaxed);
+        uint64_t unlocks = g_runtime_unlock_total.load(std::memory_order_relaxed);
+        LOG_INFO_V0(
+            "[runtime-counters] TaskDone=%" PRIu64 " unlocks=%" PRIu64 " avg_unlocks_per_done=%.3f", taskdone, unlocks,
+            taskdone > 0 ? static_cast<double>(unlocks) / static_cast<double>(taskdone) : 0.0
+        );
+    }
+
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         sched->ring_sched_states[r].destroy();
         sched->ring_sched_states[r].dep_pool.base = nullptr;

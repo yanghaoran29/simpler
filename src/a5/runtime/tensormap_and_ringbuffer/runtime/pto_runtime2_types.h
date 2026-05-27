@@ -243,6 +243,14 @@ struct PTO2TaskPayload {
     int32_t fanin_spill_start{0};   // Linear start index in fanin spill pool (0 = no spill)
     PTO2FaninPool *fanin_spill_pool{nullptr};
     PTO2TaskSlotState *fanin_inline_slot_states[PTO2_FANIN_INLINE_CAP];
+    // Trails the inline fanin array (placed in the previously-unused tail of
+    // the 576B metadata block; tensors[] still starts at byte 576). Counts
+    // producers that were already PTO2_TASK_COMPLETED when this task was
+    // wired. Set inside wire_task; read at L2 perf record commit time. Such
+    // producers do NOT get this task appended to their fanout_head, so this
+    // counts edges missing from producers' fanout-hint.
+    // True edge total = sum_task(fanout_count) + sum_task(fanin_early_finished).
+    int32_t fanin_early_finished{0};
     // === Cache lines 9-40 (2048B) — tensors (alignas(64) forces alignment) ===
     Tensor tensors[MAX_TENSOR_ARGS];
     // === Cache lines 41-44 (256B) — scalars ===

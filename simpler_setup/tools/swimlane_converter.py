@@ -397,6 +397,10 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0915
             - task_id, func_id, core_id, core_type
             - start_time_us, end_time_us, duration_us
             - fanout, fanout_count
+            - unlocked_count (optional, consumers this TaskDone pushed to ready
+              queue; defaults to 0 for older traces)
+            - early_finished_count (optional, upstream producers that had
+              already completed when this task was wired; defaults to 0)
             - dispatch_time_us (optional, AICPU dispatch timestamp)
             - finish_time_us (optional, AICPU finish timestamp)
         output_path: Path to output JSON file
@@ -489,11 +493,26 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0915
         else:
             task_name = f"func_{_func_id_to_letter(func_id)}({tdisp})"
 
+        # Number of consumers this TaskDone unlocked (fanin_refcount reached
+        # fanin_count). Sourced from CompletionStats::tasks_enqueued in the
+        # runtime; carried per-record in L2PerfRecord::unlocked_count. Field
+        # may be absent for traces produced by older runtimes — default to 0.
+        unlocked_count = task.get("unlocked_count", 0)
+        # Number of THIS task's upstream producers that had already completed
+        # by the time the scheduler wired this task (so they don't carry
+        # the edge in their fanout-hint). Sourced from
+        # PTO2TaskSlotState::fanin_early_finished. Used together with
+        # fanout-hint to reconstruct the true edge total:
+        #   true_edges = sum_task(fanout_count) + sum_task(early_finished_count)
+        early_finished_count = task.get("early_finished_count", 0)
+
         events.append(
             {
                 "args": {
                     "event-hint": f"Task:{tdisp}, FuncId:{func_id}, CoreId:{task['core_id']}",
                     "fanout-hint": fanout_str,
+                    "unlocked-count": unlocked_count,
+                    "early-finished-count": early_finished_count,
                     "duration-us": dur,
                     "taskId": task["task_id"],
                 },

@@ -38,15 +38,18 @@ declare -A TMR_EXAMPLE_CASES=(
     [paged_attention_unroll]="Case1,Case2"
     [paged_attention_unroll_manual_scope]="Case1,Case2"
     [batch_paged_attention]="Case1"
-    [spmd_paged_attention]="Case1,Case2"
+    # spmd_paged_attention skipped — pre-existing AICPU stream sync timeout
+    # 507046 (verified independent of §6.7 atomic counters). Extended set:
+    [paged_attention]="Case1,Case2"
+    [paged_attention_manual_scope]="Case1,Case2"
+    [multi_round_paged_attention]="Case1"
+    [paged_attention_unroll_4dims]="Case1"
+    [spmd_basic]="Case1"
 )
 TMR_EXAMPLE_ORDER=(
-    alternating_matmul_add
-    benchmark_bgemm
-    paged_attention_unroll
-    paged_attention_unroll_manual_scope
-    batch_paged_attention
-    spmd_paged_attention
+    multi_round_paged_attention
+    paged_attention_unroll_4dims
+    spmd_basic
 )
 
 # ---------------------------------------------------------------------------

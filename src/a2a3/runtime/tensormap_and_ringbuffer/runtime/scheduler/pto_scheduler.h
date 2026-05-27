@@ -725,6 +725,12 @@ struct PTO2SchedulerState {
                 }
                 producer->unlock_fanout();
             });
+            // Expose early_finished on the payload so L2 perf can record it.
+            // Producers that hit this path do NOT get `ws` appended to their
+            // fanout_head, so they will not show this edge in their fanout-hint.
+            // Recording on the consumer side lets profiling reconstruct the
+            // true edge count as recorded_fanout + sum_consumer(fanin_early_finished).
+            wp->fanin_early_finished = early_finished;
 
             int32_t init_rc = early_finished + 1;
             int32_t new_rc = ws->fanin_refcount.fetch_add(init_rc, std::memory_order_acq_rel) + init_rc;
@@ -732,6 +738,7 @@ struct PTO2SchedulerState {
                 push_ready_routed(ws);
             }
         } else {
+            wp->fanin_early_finished = 0;
             ws->fanin_refcount.fetch_add(1, std::memory_order_acq_rel);
             push_ready_routed(ws);
         }
@@ -930,13 +937,14 @@ struct PTO2SchedulerState {
      * Called exactly once when all subtasks of a mixed task are done
      * (i.e., on_subtask_complete returned true).
      * Handles fanout notification, fanin release, and self-consumption check.
+     *
+     * Always returns CompletionStats. The cheap counters (fanout_edges,
+     * tasks_enqueued) are always populated — they are needed by the L2 perf
+     * record to expose per-TaskDone unlock counts (consumers whose
+     * fanin_refcount reached fanin_count due to this completion). The
+     * cycle/atomic profiling counters are still gated by PTO2_SCHED_PROFILING.
      */
-#if PTO2_SCHED_PROFILING
-    CompletionStats
-#else
-    void
-#endif
-    on_mixed_task_complete(
+    CompletionStats on_mixed_task_complete(
         PTO2TaskSlotState &slot_state,
 #if PTO2_SCHED_PROFILING
         int thread_idx,
@@ -944,9 +952,7 @@ struct PTO2SchedulerState {
 
         PTO2LocalReadyBuffer *local_bufs = nullptr
     ) {
-#if PTO2_SCHED_PROFILING
         CompletionStats stats = {0, 0, 0, true};
-#endif
 #if PTO2_SCHED_PROFILING
         extern uint64_t g_sched_lock_cycle[], g_sched_fanout_cycle[];
         extern uint64_t g_sched_lock_atomic_count[], g_sched_lock_wait_cycle[];
@@ -977,13 +983,15 @@ struct PTO2SchedulerState {
 #endif
         while (current != nullptr) {
             PTO2TaskSlotState &consumer_slot = *current->slot_state;
-#if PTO2_SCHED_PROFILING
             stats.fanout_edges++;
+#if PTO2_SCHED_PROFILING
             if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, local_bufs)) {
                 stats.tasks_enqueued++;
             }
 #else
-            release_fanin_and_check_ready(consumer_slot, local_bufs);
+            if (release_fanin_and_check_ready(consumer_slot, local_bufs)) {
+                stats.tasks_enqueued++;
+            }
 #endif
             current = current->next;
         }
@@ -992,8 +1000,19 @@ struct PTO2SchedulerState {
         g_sched_fanout_atomic_count[thread_idx] += fanout_atomics;
         g_sched_push_wait_cycle[thread_idx] += push_wait;
         PTO2_SCHED_CYCLE_LAP(g_sched_fanout_cycle[thread_idx]);
-        return stats;
 #endif
+        // Always-on cross-check counters (see pto_scheduler.cpp).
+        // One on_mixed_task_complete call = one TaskDone event; stats.tasks_enqueued
+        // counts the consumers this TaskDone transitioned to READY (the "unlocks").
+        extern std::atomic<uint64_t> g_runtime_taskdone_total;
+        extern std::atomic<uint64_t> g_runtime_unlock_total;
+        g_runtime_taskdone_total.fetch_add(1, std::memory_order_relaxed);
+        if (stats.tasks_enqueued > 0) {
+            g_runtime_unlock_total.fetch_add(
+                static_cast<uint64_t>(stats.tasks_enqueued), std::memory_order_relaxed
+            );
+        }
+        return stats;
     }
 
     /**

@@ -93,6 +93,18 @@ struct L2PerfRecord {
     // Dependency relationship (fanout only)
     uint64_t fanout[RUNTIME_MAX_FANOUT];  // Successor task task_id array
     int32_t fanout_count;                 // Number of successor tasks
+    // Two profiling counters packed into the same 4B alignment slot to keep
+    // L2PerfRecord at its original cache-line-aligned size.
+    //
+    // unlocked_count: number of fanout consumers whose fanin_refcount reached
+    //   fanin_count as a direct result of THIS task's completion. Sourced
+    //   from CompletionStats::tasks_enqueued in on_mixed_task_complete.
+    //
+    // early_finished_count: consumer-side; number of THIS task's upstream
+    //   producers that were already PTO2_TASK_COMPLETED when this task was
+    //   wired. True edge total = recorded_fanout + sum(early_finished_count).
+    int16_t unlocked_count;
+    int16_t early_finished_count;
 } __attribute__((aligned(64)));
 
 static_assert(sizeof(L2PerfRecord) % 64 == 0, "L2PerfRecord must be 64-byte aligned for optimal cache performance");

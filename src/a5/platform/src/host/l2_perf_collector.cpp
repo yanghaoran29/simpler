@@ -614,7 +614,9 @@ int L2PerfCollector::export_swimlane_json() {
             }
         }
         outfile << "],\n";
-        outfile << "      \"fanout_count\": " << record.fanout_count << "\n";
+        outfile << "      \"fanout_count\": " << record.fanout_count << ",\n";
+        outfile << "      \"unlocked_count\": " << record.unlocked_count << ",\n";
+        outfile << "      \"early_finished_count\": " << record.early_finished_count << "\n";
         outfile << "    }";
         if (i < tagged_records.size() - 1) {
             outfile << ",";
