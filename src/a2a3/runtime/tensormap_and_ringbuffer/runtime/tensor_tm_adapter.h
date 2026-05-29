@@ -16,11 +16,13 @@
 
 #pragma once
 
-#include "tensor.h"
-#include "tm_tensormap.h"
+#include <type_traits>
 
-inline tmap::TmRegion to_tm_region(const Tensor &t) {
-    tmap::TmRegion r{};
+#include "tensor.h"
+#include "tm_tensormap_c.h"
+
+inline TmRegion to_tm_region(const Tensor &t) {
+    TmRegion r{};
     r.base_addr = t.buffer.addr;
     r.start_offset = t.start_offset;
     r.extent_elem = t.extent_elem();
@@ -30,9 +32,21 @@ inline tmap::TmRegion to_tm_region(const Tensor &t) {
     r.ndims = t.ndims;
     r.version = t.version;
     r.is_contiguous = t.is_contiguous;
-    for (uint32_t i = 0; i < t.ndims && i < tmap::TM_MAX_DIMS; i++) {
+    for (uint32_t i = 0; i < t.ndims && i < TM_MAX_DIMS; i++) {
         r.shapes[i] = t.shapes[i];
         r.strides[i] = t.strides[i];
     }
     return r;
+}
+
+// C++ ergonomic wrapper over the C tm_lookup: forwards a callable
+// (TmEntry&, TmOverlap) -> bool to the function-pointer + context callback.
+// The callable may call tm_remove(&map, &entry) on the current entry.
+template <typename Fn>
+inline void tm_lookup_each(TmTensorMap &map, const TmRegion &region, Fn &&fn) {
+    TmRegion r = region;  // stable address for the C API
+    TmMatchFn cb = [](TmEntry *e, TmOverlap st, void *ctx) -> bool {
+        return (*static_cast<std::remove_reference_t<Fn> *>(ctx))(*e, st);
+    };
+    tm_lookup(&map, &r, cb, static_cast<void *>(&fn));
 }

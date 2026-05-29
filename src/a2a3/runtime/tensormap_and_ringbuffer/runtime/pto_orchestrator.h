@@ -36,7 +36,7 @@
 #include "scheduler/pto_scheduler.h"
 #include "pto_shared_memory.h"
 #include "pto_types.h"
-#include "tm_tensormap.h"
+#include "tm_tensormap_c.h"
 
 /**
  * Layout descriptor produced by PTO2OrchestratorState::reserve_layout(). Holds
@@ -48,7 +48,7 @@ struct PTO2OrchestratorLayout {
     size_t off_scope_tasks;
     size_t off_scope_begins;
     size_t off_tensor_map;   // arena offset of the tm_tensormap buffer region
-    tmap::TmConfig tm_cfg;   // sizing used to init/attach that region
+    TmConfig tm_cfg;         // sizing used to init/attach that region
     int32_t dep_pool_capacity;
     int32_t scope_tasks_cap;
     uint64_t scope_stack_capacity;
@@ -71,7 +71,7 @@ struct PTO2OrchestratorState {
     PTO2RingSet rings[PTO2_MAX_RING_DEPTH];
 
     // === TENSOR MAP (Private) ===
-    tmap::TensorMap tensor_map;  // Producer lookup
+    TmTensorMap tensor_map;  // Producer lookup
 
     // === SCOPE STACK (Private) ===
     // Single contiguous buffer of task IDs, partitioned by scope level.

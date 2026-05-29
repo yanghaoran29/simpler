@@ -77,7 +77,7 @@
 #include "tensor.h"
 #include "tensor_arg.h"
 #include "tensor_tm_adapter.h"
-#include "tm_tensormap.h"
+#include "tm_tensormap_c.h"
 
 namespace {
 
@@ -280,11 +280,11 @@ void fill_consumer(EdgeAnnot &e, const Tensor &t) {
 }
 
 // Convert the standalone map's overlap enum to the dep_gen annotation enum.
-inline OverlapStatus to_overlap_status(tmap::TmOverlap o) {
+inline OverlapStatus to_overlap_status(TmOverlap o) {
     switch (o) {
-    case tmap::TmOverlap::Covered:
+    case TM_OVERLAP_COVERED:
         return OverlapStatus::COVERED;
-    case tmap::TmOverlap::None:
+    case TM_OVERLAP_NONE:
         return OverlapStatus::NO_OVERLAP;
     default:
         return OverlapStatus::OTHER;
@@ -293,7 +293,7 @@ inline OverlapStatus to_overlap_status(tmap::TmOverlap o) {
 
 // Copy a TmEntry's slice description into an EdgeAnnot's producer_* fields.
 // Only called from the TENSORMAP emit path.
-void fill_producer(EdgeAnnot &e, const tmap::TmEntry &entry) {
+void fill_producer(EdgeAnnot &e, const TmEntry &entry) {
     e.producer_ndims = entry.ndims;
     e.producer_start_offset = entry.start_offset;
     for (uint32_t i = 0; i < entry.ndims && i < RUNTIME_MAX_TENSOR_DIMS; i++) {
@@ -412,7 +412,7 @@ bool write_deps_json(
 
 template <typename EmitTM, typename EmitCreator>
 void annot_pass(
-    const DepInputs &inputs, tmap::TensorMap &tensor_map, bool in_manual_scope, EmitCreator emit_creator,
+    const DepInputs &inputs, TmTensorMap &tensor_map, bool in_manual_scope, EmitCreator emit_creator,
     EmitTM emit_tensormap
 ) {
     if (in_manual_scope) {
@@ -439,10 +439,10 @@ void annot_pass(
             continue;
         }
 
-        tensor_map.lookup(to_tm_region(*tensor), [&](tmap::TmEntry &entry, tmap::TmOverlap overlap_status) -> bool {
+        tm_lookup_each(tensor_map, to_tm_region(*tensor), [&](TmEntry &entry, TmOverlap overlap_status) -> bool {
             emit_tensormap(PTO2TaskId{entry.producer_id}, i, *tensor, entry, to_overlap_status(overlap_status));
-            if (ptype == TensorArgType::INOUT && overlap_status == tmap::TmOverlap::Covered) {
-                tensor_map.remove(entry);
+            if (ptype == TensorArgType::INOUT && overlap_status == TM_OVERLAP_COVERED) {
+                tm_remove(&tensor_map, &entry);
             }
             return true;
         });
@@ -489,7 +489,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         pool_size = PTO2_TENSORMAP_POOL_SIZE;
     }
 
-    tmap::TmConfig tm_cfg{};
+    TmConfig tm_cfg{};
     tm_cfg.num_buckets = PTO2_TENSORMAP_NUM_BUCKETS;
     tm_cfg.pool_size = static_cast<uint32_t>(pool_size);
     tm_cfg.num_rings = PTO2_MAX_RING_DEPTH;
@@ -497,22 +497,22 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         tm_cfg.task_window[r] = static_cast<uint32_t>(task_window_sizes[r]);
     }
 
-    tmap::TensorMap tm_oracle;
-    tmap::TensorMap tm_annot;
+    TmTensorMap tm_oracle;
+    TmTensorMap tm_annot;
 
     // Libc-backed arena (default ctor) that owns both replay tensormaps'
     // storage. Released by the arena destructor when this function returns.
     DeviceArena replay_arena;
 
-    const size_t tm_bytes = tmap::TensorMap::bytes_required(tm_cfg);
+    const size_t tm_bytes = tm_bytes_required(&tm_cfg);
     size_t off_oracle = replay_arena.reserve(tm_bytes, 64);
     size_t off_annot = replay_arena.reserve(tm_bytes, 64);
     if (replay_arena.commit() == nullptr) {
         LOG_ERROR("dep_gen replay: tensormap arena commit failed (buckets=%d, pool=%d)", PTO2_TENSORMAP_NUM_BUCKETS, pool_size);
         return -3;
     }
-    tm_oracle.init(replay_arena.region_ptr(off_oracle), tm_cfg);
-    tm_annot.init(replay_arena.region_ptr(off_annot), tm_cfg);
+    tm_init(&tm_oracle, replay_arena.region_ptr(off_oracle), &tm_cfg);
+    tm_init(&tm_annot, replay_arena.region_ptr(off_annot), &tm_cfg);
 
     // JSON output accumulators.
     std::vector<TaskTableEntry> task_table;
@@ -727,7 +727,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 annot_edges.push_back(e);
             },
             // emit_tensormap(producer, arg_idx, consumer_tensor, entry, status)
-            [&](PTO2TaskId producer, int32_t arg_idx, const Tensor &consumer, const tmap::TmEntry &entry,
+            [&](PTO2TaskId producer, int32_t arg_idx, const Tensor &consumer, const TmEntry &entry,
                 OverlapStatus status) {
                 // Per-(succ, arg_idx, producer_buffer_addr, producer_version)
                 // dedup gives us "the same producer slice fired twice for the

@@ -173,7 +173,7 @@ static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wa
         }
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
-        orch.tensor_map.lookup(to_tm_region(tensor), [&](tmap::TmEntry &entry, tmap::TmOverlap) -> bool {
+        tm_lookup_each(orch.tensor_map, to_tm_region(tensor), [&](TmEntry &entry, TmOverlap) -> bool {
             PTO2TaskId pid{entry.producer_id};
             auto &s = orch.sm_header->rings[pid.ring()].get_slot_state_by_task_id(pid.local());
             try_push(s);

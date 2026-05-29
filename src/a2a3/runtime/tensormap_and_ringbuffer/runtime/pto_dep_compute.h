@@ -50,7 +50,7 @@
 #include "tensor.h"
 #include "tensor_arg.h"  // TensorArgType
 #include "tensor_tm_adapter.h"
-#include "tm_tensormap.h"
+#include "tm_tensormap_c.h"
 
 /**
  * View struct for inputs to compute_task_fanin / register_task_outputs.
@@ -73,15 +73,15 @@ struct DepInputs {
  *
  * For each non-OUTPUT tensor:
  *   - If owner_task_id is valid, emit(owner)
- *   - For INPUT/INOUT (and not manual_dep), tensor_map.lookup(*tensor) and emit
- *     each matching producer. INOUT+COVERED triggers tensor_map.remove_entry(entry).
+ *   - For INPUT/INOUT (and not manual_dep), tm_lookup_each(tensor_map, *tensor)
+ *     and emit each matching producer. INOUT+COVERED triggers tm_remove(entry).
  *
  * @return true on success (or producer-skipped-silently); false if emit signaled
  *         fatal — caller should propagate (after any fatal bookkeeping done by emit).
  */
 template <typename Emit>
 [[nodiscard]] inline bool
-compute_task_fanin(const DepInputs &inputs, tmap::TensorMap &tensor_map, bool in_manual_scope, Emit emit) {
+compute_task_fanin(const DepInputs &inputs, TmTensorMap &tensor_map, bool in_manual_scope, Emit emit) {
     if (in_manual_scope) {
         return true;
     }
@@ -113,13 +113,13 @@ compute_task_fanin(const DepInputs &inputs, tmap::TensorMap &tensor_map, bool in
         }
 
         bool fatal = false;
-        tensor_map.lookup(to_tm_region(*tensor), [&](tmap::TmEntry &entry, tmap::TmOverlap overlap_status) -> bool {
+        tm_lookup_each(tensor_map, to_tm_region(*tensor), [&](TmEntry &entry, TmOverlap overlap_status) -> bool {
             if (!emit(PTO2TaskId{entry.producer_id})) {
                 fatal = true;
                 return false;  // stop iteration
             }
-            if (ptype == TensorArgType::INOUT && overlap_status == tmap::TmOverlap::Covered) {
-                tensor_map.remove(entry);
+            if (ptype == TensorArgType::INOUT && overlap_status == TM_OVERLAP_COVERED) {
+                tm_remove(&tensor_map, &entry);
             }
             return true;
         });
@@ -139,7 +139,7 @@ compute_task_fanin(const DepInputs &inputs, tmap::TensorMap &tensor_map, bool in
  * No-op when in_manual_scope.
  */
 inline void
-register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, tmap::TensorMap &tensor_map, bool in_manual_scope) {
+register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, TmTensorMap &tensor_map, bool in_manual_scope) {
     if (in_manual_scope) {
         return;
     }
@@ -148,7 +148,8 @@ register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, tmap::TensorM
         if (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) {
             const Tensor *tensor = inputs.tensors[i].ptr;
             if (!tensor->manual_dep) {
-                tensor_map.insert(to_tm_region(*tensor), task_id.raw);
+                TmRegion reg = to_tm_region(*tensor);
+                tm_insert(&tensor_map, &reg, task_id.raw);
             }
         }
     }

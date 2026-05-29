@@ -27,7 +27,7 @@
 #include "pto_ring_buffer.h"
 #include "pto_shared_memory.h"
 #include "scheduler/pto_scheduler.h"
-#include "tm_tensormap.h"
+#include "tm_tensormap_c.h"
 
 // =============================================================================
 // Ready queue
@@ -202,7 +202,7 @@ PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(
     );
     layout.off_scope_begins =
         arena.reserve(static_cast<size_t>(layout.scope_stack_capacity) * sizeof(int32_t), alignof(int32_t));
-    tmap::TmConfig tm_cfg{};
+    TmConfig tm_cfg{};
     tm_cfg.num_buckets = PTO2_TENSORMAP_NUM_BUCKETS;
     tm_cfg.pool_size = PTO2_TENSORMAP_POOL_SIZE;
     tm_cfg.num_rings = PTO2_MAX_RING_DEPTH;
@@ -210,7 +210,7 @@ PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(
         tm_cfg.task_window[r] = static_cast<uint32_t>(task_window_sizes[r]);
     }
     layout.tm_cfg = tm_cfg;
-    layout.off_tensor_map = arena.reserve(tmap::TensorMap::bytes_required(tm_cfg), PTO2_ALIGN_SIZE);
+    layout.off_tensor_map = arena.reserve(tm_bytes_required(&tm_cfg), PTO2_ALIGN_SIZE);
     return layout;
 }
 
@@ -251,7 +251,7 @@ bool PTO2OrchestratorState::init_data_from_layout(
         orch->rings[r].fanin_pool.init(fanin_entries, layout.dep_pool_capacity, orch_err);
     }
 
-    orch->tensor_map.init(arena.region_ptr(layout.off_tensor_map), layout.tm_cfg);
+    tm_init(&orch->tensor_map, arena.region_ptr(layout.off_tensor_map), &layout.tm_cfg);
 
     orch->scope_tasks_size = 0;
     orch->scope_tasks_capacity = layout.scope_tasks_cap;
@@ -269,7 +269,7 @@ void PTO2OrchestratorState::wire_arena_pointers(
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         orch->rings[r].fanin_pool.base = static_cast<PTO2FaninSpillEntry *>(arena.region_ptr(layout.off_fanin_pool[r]));
     }
-    orch->tensor_map.attach(arena.region_ptr(layout.off_tensor_map));
+    tm_attach(&orch->tensor_map, arena.region_ptr(layout.off_tensor_map));
     orch->scope_tasks = static_cast<PTO2TaskSlotState **>(arena.region_ptr(layout.off_scope_tasks));
     orch->scope_begins = static_cast<int32_t *>(arena.region_ptr(layout.off_scope_begins));
     orch->scheduler = scheduler_arg;
@@ -277,7 +277,7 @@ void PTO2OrchestratorState::wire_arena_pointers(
 
 void PTO2OrchestratorState::destroy() {
     auto *orch = this;
-    orch->tensor_map.attach(nullptr);  // forget the arena region; the arena owns the backing buffer
+    tm_attach(&orch->tensor_map, nullptr);  // forget the arena region; the arena owns the backing buffer
 
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         orch->rings[r].fanin_pool.base = nullptr;

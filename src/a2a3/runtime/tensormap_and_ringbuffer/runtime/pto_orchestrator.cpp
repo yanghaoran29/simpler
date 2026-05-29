@@ -33,7 +33,7 @@
 #include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
 #include "pto_types.h"
-#include "tm_tensormap.h"
+#include "tm_tensormap_c.h"
 #include "tensor.h"
 
 extern "C" void set_dump_tensor_selective_mode(bool enable);
@@ -530,7 +530,7 @@ static TaskOutputTensors submit_task_common(
     // Read current last_task_alive from shared memory for this ring
     int32_t sm_last_task_alive = fc.last_task_alive.load(std::memory_order_acquire);
 
-    orch->tensor_map.sync_tensormap(task_id.ring(), sm_last_task_alive);
+    tm_sync_tensormap(&orch->tensor_map, task_id.ring(), sm_last_task_alive);
 
     CYCLE_COUNT_LAP(g_orch_sync_cycle);
 
