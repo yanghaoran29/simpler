@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 #include "common.h"
-#include "pto_orchestration_api.h"
+#include "common/unified_log.h"
 
 #ifdef __linux__
 #include <cxxabi.h>
@@ -21,24 +21,6 @@
 #include <cstring>
 #include <vector>
 #endif
-
-struct PTO2Runtime;
-
-namespace {
-// Plain global (not thread_local) to avoid glibc TLSDESC stale-resolution
-// crash (BZ #32412) when the orchestration SO is dlclose'd/re-dlopen'd
-// between execution rounds.  All orchestrator threads bind the same rt
-// value, so per-thread storage is unnecessary.
-PTO2Runtime *g_current_runtime = nullptr;
-}  // namespace
-
-extern "C" __attribute__((visibility("default"))) void framework_bind_runtime(PTO2Runtime *rt) {
-    g_current_runtime = rt;
-}
-
-// Keep current_runtime local to this .so so orchestration helpers do not
-// accidentally bind to the AICPU binary's same-named symbol.
-extern "C" __attribute__((visibility("hidden"))) PTO2Runtime *framework_current_runtime() { return g_current_runtime; }
 
 /**
  * Use addr2line to convert an address to file:line information.

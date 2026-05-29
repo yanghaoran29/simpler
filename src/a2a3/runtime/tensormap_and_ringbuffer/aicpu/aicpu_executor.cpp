@@ -612,25 +612,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 p.submit_count > 0 ? cycles_to_us(total) / p.submit_count : 0.0
             );
 
-#if PTO2_TENSORMAP_PROFILING
-            PTO2TensorMapProfilingData tp = pto2_tensormap_get_profiling();
-            LOG_INFO_V9("Thread %d: === TensorMap Lookup Stats ===", thread_idx);
-            LOG_INFO_V9(
-                "Thread %d:   lookups        : %" PRIu64 ", inserts: %" PRIu64 "", thread_idx,
-                static_cast<uint64_t>(tp.lookup_count), static_cast<uint64_t>(tp.insert_count)
-            );
-            LOG_INFO_V9(
-                "Thread %d:   chain walked   : total=%" PRIu64 ", avg=%.1f, max=%d", thread_idx,
-                static_cast<uint64_t>(tp.lookup_chain_total),
-                tp.lookup_count > 0 ? static_cast<double>(tp.lookup_chain_total) / tp.lookup_count : 0.0,
-                tp.lookup_chain_max
-            );
-            LOG_INFO_V9(
-                "Thread %d:   overlap checks : %" PRIu64 ", hits=%" PRIu64 " (%.1f%%)", thread_idx,
-                static_cast<uint64_t>(tp.overlap_checks), static_cast<uint64_t>(tp.overlap_hits),
-                tp.overlap_checks > 0 ? tp.overlap_hits * 100.0 / tp.overlap_checks : 0.0
-            );
-#endif
 #endif  // PTO2_ORCH_PROFILING
 
             // Latch task count from PTO2 shared memory to hand off to the

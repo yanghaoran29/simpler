@@ -89,7 +89,6 @@ add_library(a2a3_rt_objs OBJECT
     ${A2A3_RUNTIME_DIR}/pto_ring_buffer.cpp
     ${A2A3_RUNTIME_DIR}/shared/pto_shared_memory.cpp
     ${A2A3_RUNTIME_DIR}/scheduler/pto_scheduler.cpp
-    ${A2A3_RUNTIME_DIR}/shared/pto_tensormap.cpp
     ${A2A3_RUNTIME_DIR}/shared/pto_runtime2_init.cpp
     ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
 )
@@ -99,6 +98,8 @@ target_include_directories(a2a3_rt_objs PUBLIC
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/tensormap_and_ringbuffer/common
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/tensormap
+    ${CMAKE_SOURCE_DIR}/../../../src/common/base
     ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/device_comm
 )
@@ -163,6 +164,8 @@ function(add_a2a3_test name src)
         ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/tensormap_and_ringbuffer/common
         ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
         ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+        ${CMAKE_SOURCE_DIR}/../../../src/common/tensormap
+        ${CMAKE_SOURCE_DIR}/../../../src/common/base
         ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
     )
     target_compile_options(${name} PRIVATE -D_GLIBCXX_USE_CXX11_ABI=0)
@@ -310,6 +313,7 @@ set_tests_properties(test_chip_callable_upload_immutable PROPERTIES LABELS "no_h
 add_common_utils_test(test_elf_build_id common/test_elf_build_id.cpp)
 add_common_utils_test(test_runtime_orch_so common/test_runtime_orch_so.cpp)
 add_common_utils_test(test_device_arena common/test_device_arena.cpp)
+add_common_utils_test(test_tm_tensormap common/test_tm_tensormap.cpp)
 
 # Per-callable_id orch SO file naming regression (see rtStreamSynchronize
 # 507018 root cause). Compiles the a2a3 onboard `create_orch_so_file`
@@ -343,7 +347,6 @@ add_a2a3_runtime_test(test_scheduler_state  a2a3/test_scheduler_state.cpp)
 add_a2a3_runtime_test(test_task_state       a2a3/test_task_state.cpp)
 add_a2a3_runtime_test(test_ready_queue      a2a3/test_ready_queue.cpp)
 add_a2a3_runtime_test(test_shared_memory    a2a3/test_shared_memory.cpp)
-add_a2a3_runtime_test(test_a2a3_tensormap   a2a3/test_tensormap.cpp)
 add_a2a3_runtime_test(test_fanin_pool       a2a3/test_fanin_pool.cpp)
 add_a2a3_runtime_test(test_spsc_queue       a2a3/test_spsc_queue.cpp)
 add_a2a3_runtime_test(test_wiring           a2a3/test_wiring.cpp)

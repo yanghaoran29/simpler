@@ -20,6 +20,10 @@
 
 #include <cstdint>
 
+// Number of task-id ring layers. Scope depth maps to ring index via:
+// min(scope_depth, PTO2_MAX_RING_DEPTH - 1).
+#define PTO2_MAX_RING_DEPTH 4
+
 /**
  * TaskId: 64-bit encoding used across Runtime2.
  *

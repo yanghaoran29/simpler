@@ -119,7 +119,21 @@ class KernelCompiler:
         runtime_dir = str(self.project_root / "src" / arch / "runtime" / runtime_name / "runtime")
         runtime_common_dir = str(self.project_root / "src" / arch / "runtime" / runtime_name / "common")
         common_dir = str(self.project_root / "src" / "common" / "task_interface")
-        return [runtime_dir, runtime_common_dir, common_dir] + self.get_platform_include_dirs()
+        # base/ holds common.h (assert macros + stacktrace), tensormap/ holds
+        # pto_tensormap.h + its constants — both relocated out of the runtime
+        # tree into src/common but still pulled in transitively by tensor.h /
+        # pto_orchestration_api.h.
+        base_dir = str(self.project_root / "src" / "common" / "base")
+        tensormap_dir = str(self.project_root / "src" / "common" / "tensormap")
+        device_comm_dir = str(self.project_root / "src" / "common" / "device_comm")
+        return [
+            runtime_dir,
+            runtime_common_dir,
+            common_dir,
+            base_dir,
+            tensormap_dir,
+            device_comm_dir,
+        ] + self.get_platform_include_dirs()
 
     def get_incore_include_dirs(self) -> list[str]:
         """

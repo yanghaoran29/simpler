@@ -28,6 +28,7 @@
 
 #include "aicpu/device_time.h"
 #include "common/unified_log.h"
+#include "tensor_tm_adapter.h"
 
 // Weak fallback for HOST .so builds (never called, but satisfies linker).
 // The AICPU build links the strong symbol from platform/.../device_time.cpp.
@@ -172,8 +173,8 @@ static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wa
         }
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
-        orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
-            PTO2TaskId pid = entry.producer_task_id;
+        orch.tensor_map.lookup(to_tm_region(tensor), [&](tmap::TmEntry &entry, tmap::TmOverlap) -> bool {
+            PTO2TaskId pid{entry.producer_id};
             auto &s = orch.sm_header->rings[pid.ring()].get_slot_state_by_task_id(pid.local());
             try_push(s);
             return !failed;

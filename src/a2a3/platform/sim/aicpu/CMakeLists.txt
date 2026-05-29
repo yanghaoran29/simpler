@@ -23,6 +23,8 @@ set(CMAKE_CUSTOM_INCLUDE_DIRS "")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/task_interface")
+list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/tensormap")
+list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/base")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/log/include")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/device_comm")
 
@@ -43,6 +45,10 @@ list(APPEND AICPU_SOURCES ${PLATFORM_SOURCES})
 # Add common source list like 1) unified log device implementation; 2) platform register implementation
 file(GLOB COMMON_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../src/aicpu/*.cpp")
 list(APPEND AICPU_SOURCES ${COMMON_SOURCES})
+# Add common/base sources (relocated from the runtime tree)
+list(APPEND AICPU_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/base/common.cpp"
+)
 
 # Then, collect sources from CUSTOM_SOURCE_DIRS (runtime sources)
 if(DEFINED CUSTOM_SOURCE_DIRS)

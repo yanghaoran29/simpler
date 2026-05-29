@@ -96,15 +96,16 @@
 // Use pto2_task_slot(sched, task_id) for slot calculation.
 #define PTO2_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
 
-// Multi-ring: number of independent ring layers (HeapRing + TaskRing + DepPool per layer)
-// Scope depth maps to ring index via: min(scope_depth, PTO2_MAX_RING_DEPTH - 1)
-#define PTO2_MAX_RING_DEPTH 4
+// PTO2_MAX_RING_DEPTH (number of independent ring layers) is defined alongside
+// PTO2TaskId in pto_task_id.h and reaches this file via the include above.
 
 // Memory pools (per-ring defaults; total = value × PTO2_MAX_RING_DEPTH)
 #define PTO2_HEAP_SIZE (256 * 1024 * 1024)  // 256MB per ring (1GB total)
 #define PTO2_DEP_LIST_POOL_SIZE 16384       // Per-ring dependency list pool entries
-#define PTO2_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
-#define PTO2_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
+
+// TensorMap default sizing (fed into tmap::TmConfig at runtime init).
+#define PTO2_TENSORMAP_POOL_SIZE (65536)  // TensorMap entry pool
+#define PTO2_TENSORMAP_NUM_BUCKETS 4096   // Power of 2 for fast hash (4096×8B=32KB fits L1)
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
@@ -124,9 +125,9 @@
 // Fanin storage
 #define PTO2_FANIN_INLINE_CAP 64
 
-// TensorMap cleanup interval
-#define PTO2_TENSORMAP_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
-#define PTO2_DEP_POOL_CLEANUP_INTERVAL 64   // Cleanup every N retired tasks
+// Dep pool cleanup interval. (TensorMap reclaims retired entries eagerly in
+// tmap::TensorMap::sync_tensormap, so it needs no separate interval knob.)
+#define PTO2_DEP_POOL_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
 
 // get_tensor_data/set_tensor_data spin wait timeout in cycles.
 // ~10s on hardware (1.5 GHz counter), ~10s on simulation (chrono-based).

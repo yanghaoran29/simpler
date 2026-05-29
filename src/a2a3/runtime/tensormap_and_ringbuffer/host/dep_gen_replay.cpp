@@ -12,10 +12,10 @@
 /**
  * @file dep_gen_replay.cpp
  * @brief Replay in-memory DepGenRecord stream → deps.json (strided tensor
- *        representation, tensor-annotated) via a host-resident PTO2TensorMap,
+ *        representation, tensor-annotated) via a host-resident tm_tensormap,
  *        with a differential check against the runtime template `compute_task_fanin`.
  *
- * Two passes run per record against two parallel PTO2TensorMap instances that
+ * Two passes run per record against two parallel tm_tensormap instances that
  * evolve in lockstep:
  *
  *   ORACLE pass (read-only contract):
@@ -29,7 +29,7 @@
  *   ANNOT pass (this file's feature):
  *     Inlines the same STEP A (creator retention) + STEP B (tensormap lookup)
  *     against `tm_annot`, but the callback fires with the full
- *     `PTO2TensorMapEntry&` + the consumer Tensor* + the arg index, so the
+ *     `TmEntry&` + the consumer Tensor* + the arg index, so the
  *     replay can record per-edge tensor metadata (producer/consumer
  *     shape/offset, dtype, version).
  *
@@ -70,11 +70,14 @@
 #include "common/dep_gen.h"
 #include "common/unified_log.h"
 #include "data_type.h"
+#include "device_arena.h"
 #include "pto_dep_compute.h"
+#include "pto_runtime2_types.h"
 #include "pto_task_id.h"
-#include "pto_tensormap.h"
 #include "tensor.h"
 #include "tensor_arg.h"
+#include "tensor_tm_adapter.h"
+#include "tm_tensormap.h"
 
 namespace {
 
@@ -276,9 +279,21 @@ void fill_consumer(EdgeAnnot &e, const Tensor &t) {
     }
 }
 
-// Copy a PTO2TensorMapEntry's slice description into an EdgeAnnot's producer_*
-// fields. Only called from the TENSORMAP emit path.
-void fill_producer(EdgeAnnot &e, const PTO2TensorMapEntry &entry) {
+// Convert the standalone map's overlap enum to the dep_gen annotation enum.
+inline OverlapStatus to_overlap_status(tmap::TmOverlap o) {
+    switch (o) {
+    case tmap::TmOverlap::Covered:
+        return OverlapStatus::COVERED;
+    case tmap::TmOverlap::None:
+        return OverlapStatus::NO_OVERLAP;
+    default:
+        return OverlapStatus::OTHER;
+    }
+}
+
+// Copy a TmEntry's slice description into an EdgeAnnot's producer_* fields.
+// Only called from the TENSORMAP emit path.
+void fill_producer(EdgeAnnot &e, const tmap::TmEntry &entry) {
     e.producer_ndims = entry.ndims;
     e.producer_start_offset = entry.start_offset;
     for (uint32_t i = 0; i < entry.ndims && i < RUNTIME_MAX_TENSOR_DIMS; i++) {
@@ -397,7 +412,7 @@ bool write_deps_json(
 
 template <typename EmitTM, typename EmitCreator>
 void annot_pass(
-    const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_manual_scope, EmitCreator emit_creator,
+    const DepInputs &inputs, tmap::TensorMap &tensor_map, bool in_manual_scope, EmitCreator emit_creator,
     EmitTM emit_tensormap
 ) {
     if (in_manual_scope) {
@@ -424,10 +439,10 @@ void annot_pass(
             continue;
         }
 
-        tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
-            emit_tensormap(entry.producer_task_id, i, *tensor, entry, overlap_status);
-            if (ptype == TensorArgType::INOUT && overlap_status == OverlapStatus::COVERED) {
-                tensor_map.remove_entry(entry);
+        tensor_map.lookup(to_tm_region(*tensor), [&](tmap::TmEntry &entry, tmap::TmOverlap overlap_status) -> bool {
+            emit_tensormap(PTO2TaskId{entry.producer_id}, i, *tensor, entry, to_overlap_status(overlap_status));
+            if (ptype == TensorArgType::INOUT && overlap_status == tmap::TmOverlap::Covered) {
+                tensor_map.remove(entry);
             }
             return true;
         });
@@ -474,28 +489,30 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         pool_size = PTO2_TENSORMAP_POOL_SIZE;
     }
 
-    PTO2TensorMap tm_oracle;
-    PTO2TensorMap tm_annot;
-    std::memset(&tm_oracle, 0, sizeof(tm_oracle));
-    std::memset(&tm_annot, 0, sizeof(tm_annot));
+    tmap::TmConfig tm_cfg{};
+    tm_cfg.num_buckets = PTO2_TENSORMAP_NUM_BUCKETS;
+    tm_cfg.pool_size = static_cast<uint32_t>(pool_size);
+    tm_cfg.num_rings = PTO2_MAX_RING_DEPTH;
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        tm_cfg.task_window[r] = static_cast<uint32_t>(task_window_sizes[r]);
+    }
+
+    tmap::TensorMap tm_oracle;
+    tmap::TensorMap tm_annot;
 
     // Libc-backed arena (default ctor) that owns both replay tensormaps'
     // storage. Released by the arena destructor when this function returns.
     DeviceArena replay_arena;
 
-    auto oracle_layout =
-        PTO2TensorMap::reserve_layout(replay_arena, PTO2_TENSORMAP_NUM_BUCKETS, pool_size, task_window_sizes);
-    auto annot_layout =
-        PTO2TensorMap::reserve_layout(replay_arena, PTO2_TENSORMAP_NUM_BUCKETS, pool_size, task_window_sizes);
-    if (replay_arena.commit() == nullptr || !tm_oracle.init_data_from_layout(oracle_layout, replay_arena) ||
-        !tm_annot.init_data_from_layout(annot_layout, replay_arena)) {
-        LOG_ERROR("dep_gen replay: tensormap.init failed (buckets=%d, pool=%d)", PTO2_TENSORMAP_NUM_BUCKETS, pool_size);
+    const size_t tm_bytes = tmap::TensorMap::bytes_required(tm_cfg);
+    size_t off_oracle = replay_arena.reserve(tm_bytes, 64);
+    size_t off_annot = replay_arena.reserve(tm_bytes, 64);
+    if (replay_arena.commit() == nullptr) {
+        LOG_ERROR("dep_gen replay: tensormap arena commit failed (buckets=%d, pool=%d)", PTO2_TENSORMAP_NUM_BUCKETS, pool_size);
         return -3;
     }
-    // Replay tensormaps live entirely on host; only arena-internal pointer
-    // fields need wiring (no parent-orch back-reference exists anymore).
-    tm_oracle.wire_arena_pointers(oracle_layout, replay_arena);
-    tm_annot.wire_arena_pointers(annot_layout, replay_arena);
+    tm_oracle.init(replay_arena.region_ptr(off_oracle), tm_cfg);
+    tm_annot.init(replay_arena.region_ptr(off_annot), tm_cfg);
 
     // JSON output accumulators.
     std::vector<TaskTableEntry> task_table;
@@ -629,7 +646,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         // Register tasks[] entry (with per-arg slot info) and any unseen
         // tensors[] entries up-front. Tensors are registered from the
         // consumer-side blob so raw_shapes / dtype are populated (the
-        // producer-side PTO2TensorMapEntry drops raw_shapes to fit in two
+        // producer-side TmEntry drops raw_shapes to fit in two
         // cache lines).
         TaskTableEntry task_entry;
         task_entry.task_id = rec.task_id;
@@ -689,8 +706,6 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         });
         if (!ok) {
             LOG_ERROR("dep_gen replay: compute_task_fanin returned fatal at task_id=%" PRIu64, rec.task_id);
-            tm_oracle.destroy();
-            tm_annot.destroy();
             return -4;
         }
 
@@ -712,7 +727,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 annot_edges.push_back(e);
             },
             // emit_tensormap(producer, arg_idx, consumer_tensor, entry, status)
-            [&](PTO2TaskId producer, int32_t arg_idx, const Tensor &consumer, const PTO2TensorMapEntry &entry,
+            [&](PTO2TaskId producer, int32_t arg_idx, const Tensor &consumer, const tmap::TmEntry &entry,
                 OverlapStatus status) {
                 // Per-(succ, arg_idx, producer_buffer_addr, producer_version)
                 // dedup gives us "the same producer slice fired twice for the
@@ -728,7 +743,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 e.consumer_arg_idx = arg_idx;
                 e.source = EdgeSource::TENSORMAP;
                 e.overlap = status;
-                e.tensor_id = make_tensor_id(entry.buffer_addr, entry.version);
+                e.tensor_id = make_tensor_id(entry.base_addr, entry.version);
                 fill_consumer(e, consumer);
                 fill_producer(e, entry);
                 annot_edges.push_back(e);
@@ -752,8 +767,6 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                     LOG_ERROR("  only-in-annot  pred: %" PRIu64, p);
                 }
             }
-            tm_oracle.destroy();
-            tm_annot.destroy();
             return -6;
         }
 
@@ -761,9 +774,6 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         register_task_outputs(inputs, task_id, tm_oracle, in_manual_scope);
         register_task_outputs(inputs, task_id, tm_annot, in_manual_scope);
     }
-
-    tm_oracle.destroy();
-    tm_annot.destroy();
 
     if (!write_deps_json(deps_json_path, task_table, tensor_table, annot_edges)) {
         return -5;

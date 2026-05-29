@@ -46,10 +46,11 @@
 #include <cstdint>
 
 #include "pto_task_id.h"
-#include "pto_tensormap.h"
 #include "pto_types.h"  // TensorRef
 #include "tensor.h"
 #include "tensor_arg.h"  // TensorArgType
+#include "tensor_tm_adapter.h"
+#include "tm_tensormap.h"
 
 /**
  * View struct for inputs to compute_task_fanin / register_task_outputs.
@@ -80,7 +81,7 @@ struct DepInputs {
  */
 template <typename Emit>
 [[nodiscard]] inline bool
-compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_manual_scope, Emit emit) {
+compute_task_fanin(const DepInputs &inputs, tmap::TensorMap &tensor_map, bool in_manual_scope, Emit emit) {
     if (in_manual_scope) {
         return true;
     }
@@ -112,13 +113,13 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
         }
 
         bool fatal = false;
-        tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
-            if (!emit(entry.producer_task_id)) {
+        tensor_map.lookup(to_tm_region(*tensor), [&](tmap::TmEntry &entry, tmap::TmOverlap overlap_status) -> bool {
+            if (!emit(PTO2TaskId{entry.producer_id})) {
                 fatal = true;
                 return false;  // stop iteration
             }
-            if (ptype == TensorArgType::INOUT && overlap_status == OverlapStatus::COVERED) {
-                tensor_map.remove_entry(entry);
+            if (ptype == TensorArgType::INOUT && overlap_status == tmap::TmOverlap::Covered) {
+                tensor_map.remove(entry);
             }
             return true;
         });
@@ -138,7 +139,7 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
  * No-op when in_manual_scope.
  */
 inline void
-register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
+register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, tmap::TensorMap &tensor_map, bool in_manual_scope) {
     if (in_manual_scope) {
         return;
     }
@@ -147,7 +148,7 @@ register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, PTO2TensorMap
         if (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) {
             const Tensor *tensor = inputs.tensors[i].ptr;
             if (!tensor->manual_dep) {
-                tensor_map.insert(*tensor, task_id);
+                tensor_map.insert(to_tm_region(*tensor), task_id.raw);
             }
         }
     }
