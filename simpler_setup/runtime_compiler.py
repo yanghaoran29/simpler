@@ -102,8 +102,12 @@ class RuntimeCompiler:
             self.platform_dir = self.project_root / "src" / "a5" / "platform" / "onboard"
         elif platform == "a5sim":
             self.platform_dir = self.project_root / "src" / "a5" / "platform" / "sim"
+        elif platform == "1c1v":
+            self.platform_dir = self.project_root / "src" / "1c1v" / "platform" / "onboard"
+        elif platform == "1c1vsim":
+            self.platform_dir = self.project_root / "src" / "1c1v" / "platform" / "sim"
         else:
-            raise ValueError(f"Unknown platform: {platform}. Supported: a2a3, a2a3sim, a5, a5sim")
+            raise ValueError(f"Unknown platform: {platform}. Supported: a2a3, a2a3sim, a5, a5sim, 1c1v, 1c1vsim")
 
         if not self.platform_dir.is_dir():
             raise ValueError(f"Platform '{platform}' not found at {self.platform_dir}")
@@ -116,8 +120,14 @@ class RuntimeCompiler:
             self._init_a5()
         elif platform == "a5sim":
             self._init_a5sim()
+        elif platform == "1c1v":
+            # 1c1v targets the same A2/A3 silicon as a2a3; only the scheduling
+            # ratio differs, so the toolchain selection is identical.
+            self._init_a2a3()
+        elif platform == "1c1vsim":
+            self._init_a2a3sim()
         else:
-            raise ValueError(f"Unknown platform: {platform}. Supported: a2a3, a2a3sim, a5, a5sim")
+            raise ValueError(f"Unknown platform: {platform}. Supported: a2a3, a2a3sim, a5, a5sim, 1c1v, 1c1vsim")
 
     def _init_a2a3(self):
         """Initialize toolchains for real a2a3 hardware."""

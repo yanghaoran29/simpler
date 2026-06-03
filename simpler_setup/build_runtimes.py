@@ -54,7 +54,7 @@ def detect_buildable_platforms() -> list:
 
     # Sim platforms: only need gcc/g++
     if shutil.which("gcc") and shutil.which("g++"):
-        platforms.extend(["a2a3sim", "a5sim"])
+        platforms.extend(["a2a3sim", "a5sim", "1c1vsim"])
 
     # Onboard platforms: need ccec + cross-compiler from ASCEND_HOME_PATH.
     # a2a3 and a5 use the same toolchain and produce identical artifacts;
@@ -66,7 +66,7 @@ def detect_buildable_platforms() -> list:
     has_cross = os.path.isfile(cross_gxx)
 
     if has_cross and has_ccec:
-        platforms.extend(["a2a3", "a5"])
+        platforms.extend(["a2a3", "a5", "1c1v"])
 
     return platforms
 
@@ -121,7 +121,7 @@ def build_all(
     # CMakeLists invocation) is the one actually used, instead of relying on
     # the fallback in RuntimeCompiler._init_a2a3. No-ops when PTO_ISA_ROOT
     # is already set. Skipped when only sim platforms are being built.
-    if "a2a3" in platforms:
+    if "a2a3" in platforms or "1c1v" in platforms:
         from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
 
         os.environ["PTO_ISA_ROOT"] = ensure_pto_isa_root(clone_protocol=clone_protocol, verbose=True)

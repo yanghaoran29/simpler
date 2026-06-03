@@ -74,13 +74,16 @@ class KernelCompiler:
             self.platform_dir = self.project_root / "src" / "a2a3" / "platform"
         elif platform in ("a5", "a5sim"):
             self.platform_dir = self.project_root / "src" / "a5" / "platform"
+        elif platform in ("1c1v", "1c1vsim"):
+            self.platform_dir = self.project_root / "src" / "1c1v" / "platform"
         else:
             raise ValueError(f"Unknown platform: {platform}")
 
         # Create toolchain objects based on platform
-        if platform in ("a2a3", "a5"):
+        if platform in ("a2a3", "a5", "1c1v"):
             env_manager.ensure("ASCEND_HOME_PATH")
-            self.ccec = CCECToolchain(platform)
+            # 1c1v runs on A2/A3 silicon, so it uses the a2a3 CCE toolchain.
+            self.ccec = CCECToolchain("a2a3" if platform == "1c1v" else platform)
             self.aarch64 = Aarch64GxxToolchain()
             self.host_gxx = GxxToolchain()
         else:
@@ -137,6 +140,8 @@ class KernelCompiler:
             arch = "a2a3"
         elif self.platform in ("a5", "a5sim"):
             arch = "a5"  # Phase 2: A5 uses A5 runtime
+        elif self.platform in ("1c1v", "1c1vsim"):
+            arch = "1c1v"
         else:
             arch = "a2a3"
 
@@ -177,6 +182,8 @@ class KernelCompiler:
             arch = "a2a3"
         elif self.platform in ("a5", "a5sim"):
             arch = "a5"  # Phase 2: A5 uses A5 runtime
+        elif self.platform in ("1c1v", "1c1vsim"):
+            arch = "1c1v"
         else:
             arch = "a2a3"
 
@@ -326,6 +333,8 @@ class KernelCompiler:
                 "a2a3sim": ToolchainType.HOST_GXX_15,
                 "a5": ToolchainType.CCEC,  # Phase 1: A5 uses same as A2A3
                 "a5sim": ToolchainType.HOST_GXX_15,  # Phase 1: A5sim uses same as A2A3sim
+                "1c1v": ToolchainType.CCEC,
+                "1c1vsim": ToolchainType.HOST_GXX_15,
             },
         )
 
@@ -425,6 +434,8 @@ class KernelCompiler:
                 "a2a3sim": ToolchainType.HOST_GXX,
                 "a5": ToolchainType.AARCH64_GXX,
                 "a5sim": ToolchainType.HOST_GXX,
+                "1c1v": ToolchainType.AARCH64_GXX,
+                "1c1vsim": ToolchainType.HOST_GXX,
             },
         )
         toolchain: Union[GxxToolchain, Aarch64GxxToolchain]
