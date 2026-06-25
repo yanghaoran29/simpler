@@ -207,6 +207,11 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // never written by AICPU nor read by the kernel.
             invalidate_gm_range(exec_payload, sizeof(uint64_t) * (1u + exec_payload->valid_arg_count));
 
+            // Prefetch the head line (function_bin_addr) the invalidate just
+            // dropped, so its GM reload overlaps the ACK write + timestamp below
+            // instead of stalling execute_task's first read.
+            __builtin_prefetch(reinterpret_cast<const __gm__ void *>(exec_payload), 0, 3);
+
             // Speculative early-dispatch gate. A not-ready task was staged on
             // this core before its dependencies resolved; wait until AICPU rings
             // the doorbell (DATA_MAIN_BASE high 32 == task_id) before executing.
