@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
+
 #include "aicore/aicore.h"
 #include "aicore/aicore_profiling_state.h"
 #include "aicore/l2_swimlane_collector_aicore.h"
@@ -25,6 +27,31 @@
  * This enables simple, switch-free dispatch.
  */
 typedef void (*UnifiedKernelFunc)(__gm__ int64_t *);
+
+/** Data-cache line granularity for range invalidation (matches PTO2_ALIGN_SIZE). */
+static constexpr uintptr_t AICORE_CACHE_LINE = 64;
+
+/**
+ * Invalidate only [addr, addr+size_bytes) at cache-line granularity (acquire,
+ * no CACHELINE_OUT — AICPU writes, AICore reads).
+ *
+ * Used instead of dcci(ENTIRE_DATA_CACHE), which clean-invalidates the whole
+ * L1 every dispatch and thereby evicts the AICore working set the next kernel
+ * reuses. Scoping the invalidate to the bytes AICPU actually rewrote leaves
+ * that working set warm.
+ */
+__aicore__ __attribute__((always_inline)) static void
+invalidate_gm_range(volatile __gm__ void *addr, uintptr_t size_bytes) {
+    if (addr == nullptr || size_bytes == 0) {
+        return;
+    }
+    uintptr_t start = reinterpret_cast<uintptr_t>(addr) & ~(AICORE_CACHE_LINE - 1u);
+    uintptr_t end =
+        (reinterpret_cast<uintptr_t>(addr) + size_bytes + AICORE_CACHE_LINE - 1u) & ~(AICORE_CACHE_LINE - 1u);
+    for (uintptr_t p = start; p < end; p += AICORE_CACHE_LINE) {
+        dcci(reinterpret_cast<__gm__ int32_t *>(p), SINGLE_CACHE_LINE);
+    }
+}
 
 /**
  * Execute task from PTO2DispatchPayload.
@@ -161,8 +188,24 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // Select dual-buffer slot: same bit as AICPU used when writing payload
             __gm__ PTO2DispatchPayload *exec_payload = payload + (task_id & 1u);
 
-            // Invalidate payload buffer (AICPU updates its content each dispatch)
-            dcci(exec_payload, ENTIRE_DATA_CACHE);
+            // Invalidate only the bytes AICPU rewrote this dispatch, not the
+            // whole L1 (ENTIRE_DATA_CACHE), which would also evict the working
+            // set the next kernel reuses.
+            //
+            // Tail region [args[SPMD_LOCAL_CONTEXT_INDEX] .. end): the two
+            // context pointers, local/global context, not_ready, and the
+            // published valid_arg_count — all read every dispatch regardless of
+            // arg count. Invalidate it first so valid_arg_count is fresh.
+            constexpr uintptr_t tail_offset =
+                offsetof(PTO2DispatchPayload, args) + SPMD_LOCAL_CONTEXT_INDEX * sizeof(uint64_t);
+            invalidate_gm_range(
+                reinterpret_cast<volatile __gm__ char *>(exec_payload) + tail_offset,
+                sizeof(PTO2DispatchPayload) - tail_offset
+            );
+            // Head + populated args prefix: function_bin_addr followed by the
+            // valid_arg_count populated args[] slots. The trailing slots are
+            // never written by AICPU nor read by the kernel.
+            invalidate_gm_range(exec_payload, sizeof(uint64_t) * (1u + exec_payload->valid_arg_count));
 
             // Speculative early-dispatch gate. A not-ready task was staged on
             // this core before its dependencies resolved; wait until AICPU rings

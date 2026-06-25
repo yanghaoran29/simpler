@@ -85,7 +85,14 @@ struct alignas(64) PTO2DispatchPayload {
      *  1 = not-ready: AICore waits until AICPU rings the doorbell
      *  (DATA_MAIN_BASE high 32 == this dispatch's reg_task_id) before executing. */
     volatile uint32_t not_ready;
-    uint8_t reserved_payload_abi_pad[4];
+
+    /** Count of populated args[] entries (tensor_count + scalar_count), written
+     *  by build_payload() each dispatch. AICore reads it to invalidate only the
+     *  written args[] prefix instead of dcci-ing the whole L1 — the trailing
+     *  args[tc+sc .. MAX-1] slots are never written here nor read by the kernel.
+     *  Max is MAX_TENSOR_ARGS + MAX_SCALAR_ARGS = 48, so uint16 is ample. */
+    volatile uint16_t valid_arg_count;
+    uint8_t reserved_payload_abi_pad[2];
 
     static_assert(sizeof(args[0]) == 8);
     static_assert(

@@ -132,6 +132,9 @@ void SchedulerContext::build_payload(
     dispatch_payload.local_context.async_ctx = async_ctx;
     dispatch_payload.args[PAYLOAD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dispatch_payload.local_context);
     dispatch_payload.args[PAYLOAD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dispatch_payload.global_context);
+    // Publish how many args[] slots were populated (tensor + scalar) so AICore
+    // can invalidate just the written prefix rather than the whole L1 cache.
+    dispatch_payload.valid_arg_count = static_cast<uint16_t>(n);
     // Speculative early-dispatch: a task being staged (Hook 1 set spec_state to
     // STAGING before this call) is gated — the AICore must wait for the
     // DATA_MAIN_BASE high-32 doorbell. All other dispatches run on pickup.
@@ -1122,9 +1125,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 if (deferred_release_count >= PTO2_DEFERRED_RELEASE_CAP) {
                     while (deferred_release_count > 0) {
 #if PTO2_SCHED_PROFILING
-                        (void)sched_->on_task_release(
-                            *deferred_release_slot_states[--deferred_release_count], thread_idx
-                        );
+                        (void
+                        )sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
 #else
                         sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
