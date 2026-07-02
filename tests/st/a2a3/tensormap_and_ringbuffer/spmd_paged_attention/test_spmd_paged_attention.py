@@ -17,10 +17,13 @@ from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_
 from simpler_setup.goldens.paged_attention import compute_golden as _pa_compute_golden
 from simpler_setup.goldens.paged_attention import generate_inputs as _pa_generate_inputs
 
-# Case1 flakily aborts with AICore error 507018 on a2a3 (the st-onboard-a2a3 job
-# also flakes on main, independent of the pinned pto-isa). Skipped to keep the
-# pto-isa pin bump green; re-enable once the 507018 paged-attention flake is fixed.
-pytestmark = pytest.mark.skip(reason="paged-attention flakily aborts with AICore 507018 on a2a3 (known flake)")
+# 507018 repro branch: the module-level skip is removed so the Even/Odd parity
+# cases below are runnable directly (e.g. --case ...::Even2 --manual include).
+# Under a pto-isa containing 014920a8, the Even cases (and non-manual Case1/Case2,
+# which use n_blocks=64/128) FAIL with 507018; the Odd cases PASS. That is the
+# intended signal on this branch. Restore the skip (or mark Case1/Case2 manual)
+# before merging anywhere that must stay green.
+# pytestmark = pytest.mark.skip(reason="paged-attention flakily aborts with AICore 507018 on a2a3 (known flake)")
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -110,6 +113,79 @@ class TestPagedAttentionUnrollTpushPop(SceneTestCase):
                 "context_len": 8192,
                 "max_model_len": 32768,
                 "dtype": "bfloat16",
+            },
+        },
+        # ---- 014920a8 "Clean pending free signals during TPUSH" parity repro cases ----
+        # n_blocks = context_len / block_size. Under a pto-isa that contains commit
+        # 014920a8 (e.g. PR #186 / pin e722679b), the TPipe destructor's computed
+        # drainCount is off-by-one for EVEN prod.tileIndex -> the destructor's
+        # prod.allocate() (= wait_flag_dev) waits for a free flag that never arrives
+        # -> 507018 running-stalled. ODD push counts give drainCount=0 and pass.
+        # Verified empirically (a2a3 onboard, --manual include --skip-golden):
+        #   Even2/Even32/Even64 -> 507018 ; Odd3/Odd31/Odd63 -> PASS.
+        # Reverting 014920a8's TPush.hpp changes (constructor pre-free + fixed
+        # SyncPeriod destructor drain + shouldWaitFree) makes the Even cases PASS.
+        # These are manual; the module-level pytestmark skip keeps them out of CI.
+        # To run: temporarily comment out the pytestmark skip, then
+        #   --case TestPagedAttentionUnrollTpushPop::Even2 --manual include --skip-golden
+        {
+            "name": "Even2",
+            "platforms": ["a2a3"],
+            "manual": True,
+            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "params": {
+                "batch": 1, "num_heads": 16, "kv_head_num": 1, "head_dim": 128,
+                "block_size": 128, "context_len": 256, "max_model_len": 32768, "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "Odd3",
+            "platforms": ["a2a3"],
+            "manual": True,
+            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "params": {
+                "batch": 1, "num_heads": 16, "kv_head_num": 1, "head_dim": 128,
+                "block_size": 128, "context_len": 384, "max_model_len": 32768, "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "Even32",
+            "platforms": ["a2a3"],
+            "manual": True,
+            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "params": {
+                "batch": 1, "num_heads": 16, "kv_head_num": 1, "head_dim": 128,
+                "block_size": 128, "context_len": 4096, "max_model_len": 32768, "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "Odd31",
+            "platforms": ["a2a3"],
+            "manual": True,
+            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "params": {
+                "batch": 1, "num_heads": 16, "kv_head_num": 1, "head_dim": 128,
+                "block_size": 128, "context_len": 3968, "max_model_len": 32768, "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "Even64",
+            "platforms": ["a2a3"],
+            "manual": True,
+            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "params": {
+                "batch": 1, "num_heads": 16, "kv_head_num": 1, "head_dim": 128,
+                "block_size": 128, "context_len": 8192, "max_model_len": 32768, "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "Odd63",
+            "platforms": ["a2a3"],
+            "manual": True,
+            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "params": {
+                "batch": 1, "num_heads": 16, "kv_head_num": 1, "head_dim": 128,
+                "block_size": 128, "context_len": 8064, "max_model_len": 32768, "dtype": "bfloat16",
             },
         },
     ]
