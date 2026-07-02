@@ -238,6 +238,75 @@ struct alignas(64) PTO2TensorMapEntry {
             return OverlapStatus::OTHER;
         }
 
+        // -------- 2-D fast path: qwen3 / paged-attention style 2-D views --------
+        // Specialised O(1) path when both sides are 2-D row-major views over
+        // the same buffer. Unrolls the per-dim loop + ref_shapes[] setup of the
+        // general L2 path. Falls through to the general path for non-2-D tensors.
+        // Semantically identical to the general path for ndims==2.
+        if (input.ndims == 2u && ndims == 2u) {
+            const uint64_t in_extent = input.extent_elem();
+            const uint64_t ent_extent = effective_extent_elem();
+            const uint64_t in_end = input.start_offset + in_extent;
+            const uint64_t ent_end = start_offset + ent_extent;
+            // L1: element-range intersection (fast reject)
+            if (!(in_end > start_offset && ent_end > input.start_offset)) {
+                return OverlapStatus::NO_OVERLAP;
+            }
+            // L2 prereqs: same dtype / strides / canonical row-major
+            if (input.dtype != dtype) return OverlapStatus::OTHER;
+            if (input.strides[0] != strides[0] || input.strides[1] != strides[1]) {
+                return OverlapStatus::OTHER;
+            }
+            if (strides[1] != 1u) return OverlapStatus::OTHER;
+            if (strides[0] % strides[1] != 0u) return OverlapStatus::OTHER;
+
+            const uint32_t ref_shape1 = strides[0] / strides[1];
+            const uint32_t stride0 = strides[0];
+            const uint64_t elem_size = get_element_size(dtype);
+            if (elem_size == 0) return OverlapStatus::OTHER;
+            const uint64_t numel_storage = input.buffer.size / elem_size;
+            if (stride0 == 0u || numel_storage % stride0 != 0u) return OverlapStatus::OTHER;
+            const uint32_t ref_shape0 = static_cast<uint32_t>(numel_storage / stride0);
+
+            // Decompose start_offset into 2-D offsets via row-major strides.
+            const uint32_t s0 = strides[0];
+            const uint32_t s1 = strides[1];
+            uint64_t in_remain = input.start_offset;
+            uint64_t ent_remain = start_offset;
+            const uint32_t in_off0 = static_cast<uint32_t>(in_remain / s0);
+            in_remain %= s0;
+            const uint32_t in_off1 = static_cast<uint32_t>(in_remain / s1);
+            in_remain %= s1;
+            const uint32_t ent_off0 = static_cast<uint32_t>(ent_remain / s0);
+            ent_remain %= s0;
+            const uint32_t ent_off1 = static_cast<uint32_t>(ent_remain / s1);
+            ent_remain %= s1;
+            if (in_remain != 0u || ent_remain != 0u) return OverlapStatus::OTHER;
+
+            // in-bounds check against ref_shapes (defense in depth)
+            if (static_cast<uint64_t>(in_off0) + input.shapes[0] > ref_shape0 ||
+                static_cast<uint64_t>(ent_off0) + shapes[0] > ref_shape0) {
+                return OverlapStatus::OTHER;
+            }
+            if (static_cast<uint64_t>(in_off1) + input.shapes[1] > ref_shape1 ||
+                static_cast<uint64_t>(ent_off1) + shapes[1] > ref_shape1) {
+                return OverlapStatus::OTHER;
+            }
+
+            // L2 core: per-dim line-segment intersection (unrolled for 2 dims)
+            const Segment in_seg0{in_off0, static_cast<uint64_t>(in_off0) + input.shapes[0]};
+            const Segment ent_seg0{ent_off0, static_cast<uint64_t>(ent_off0) + shapes[0]};
+            if (!in_seg0.line_segment_intersection(ent_seg0)) return OverlapStatus::NO_OVERLAP;
+            bool input_contains_entry = in_seg0.contains(ent_seg0);
+
+            const Segment in_seg1{in_off1, static_cast<uint64_t>(in_off1) + input.shapes[1]};
+            const Segment ent_seg1{ent_off1, static_cast<uint64_t>(ent_off1) + shapes[1]};
+            if (!in_seg1.line_segment_intersection(ent_seg1)) return OverlapStatus::NO_OVERLAP;
+            if (!in_seg1.contains(ent_seg1)) input_contains_entry = false;
+
+            return input_contains_entry ? OverlapStatus::COVERED : OverlapStatus::OTHER;
+        }
+
         // -------- L1: byte-range intersection (O(1) fast reject) --------
         const uint64_t in_begin = input.start_offset;
         const uint64_t in_end = input.start_offset + input.extent_elem();
