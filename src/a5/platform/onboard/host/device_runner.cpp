@@ -641,25 +641,9 @@ int DeviceRunner::finalize() {
     }
 
     // Cleanup all profiling subsystems (free shm + per-buffer dev/host
-    // shadows). All four shared collectors use the same alloc/free shape
-    // on a5: no unregister callback (a5 doesn't use halHostRegister) +
-    // prof_free_cb (rtFree directly).
-    if (l2_swimlane_collector_.is_initialized()) {
-        l2_swimlane_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
-    }
-    if (dump_collector_.is_initialized()) {
-        dump_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
-    }
-    if (pmu_collector_.is_initialized()) {
-        pmu_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
-    }
-    if (dep_gen_collector_.is_initialized()) {
-        dep_gen_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
-    }
-    if (scope_stats_collector_.is_initialized()) {
-        scope_stats_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
-        kernel_args_.args.scope_stats_data_base = 0;
-    }
+    // shadows). Normally already done by run()'s exit path; this is the
+    // backstop for the no-run-since-init case.
+    finalize_collectors();
 
     // Shared cleanup body — streams, kernel_args, callable/orch maps,
     // chip-callable buffer pool, the three arenas, device_wall,
@@ -748,17 +732,26 @@ int DeviceRunner::finalize() {
 // `launch_aicpu_kernel` and `launch_aicore_kernel` live on `DeviceRunnerBase`.
 
 void DeviceRunner::finalize_collectors() {
+    // On any exit from run() — success or early error — release the diagnostics
+    // collectors' shared memory. They are only re-initialized per run(), so a
+    // Worker reused across runs (e.g. a pytest session-scoped worker pool) would
+    // otherwise re-enter init_l2_swimlane() with stale state still allocated.
+    // Matches a2a3's finalize_collectors().
     if (l2_swimlane_collector_.is_initialized()) {
-        l2_swimlane_collector_.stop();
+        l2_swimlane_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
     }
     if (dump_collector_.is_initialized()) {
-        dump_collector_.stop();
+        dump_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
     }
     if (pmu_collector_.is_initialized()) {
-        pmu_collector_.stop();
+        pmu_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
     }
     if (dep_gen_collector_.is_initialized()) {
-        dep_gen_collector_.stop();
+        dep_gen_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+    }
+    if (scope_stats_collector_.is_initialized()) {
+        scope_stats_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+        kernel_args_.args.scope_stats_data_base = 0;
     }
 }
 
