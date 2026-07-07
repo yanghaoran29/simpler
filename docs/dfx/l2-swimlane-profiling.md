@@ -471,6 +471,16 @@ For each logical `(pred, succ)` edge from `deps.json`, the converter
 emits flows between the Cartesian product of pred/succ anchor rows
 (`|pred_anchors| × |succ_anchors|`), not a per-subtask crossbar.
 
+The Scheduler View (pid=3) mirrors these arrows on AICPU timestamps.
+Because it only renders subtasks with captured AICPU dispatch/finish, the
+literal min-`core_id` anchor may have no bar to bind to (its completion was
+never captured — e.g. a tail task whose finish arrived after the window).
+The mirror then falls back to the first same-`core_type` sibling that does
+carry the needed timestamp, so the arrow lands on the first *visible*
+subtask instead of vanishing — Worker-View parity. The inbound endpoint
+only needs a `dispatch` (where it lands), not a `finish`, so a successor
+that dispatched but never recorded completion still shows its dependency.
+
 **SPMD lane labels.** Logical SPMD tasks append `_spmd` before the
 `(rXtY)` suffix unless the function name already contains `spmd`
 (case-insensitive), e.g. `v_proj_spmd(r2t10)` vs `SPMD_WRITE_AIV(t0)`.

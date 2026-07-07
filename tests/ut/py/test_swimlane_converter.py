@@ -172,6 +172,53 @@ def test_spmd_to_spmd_one_edge_on_min_core_subtask(tmp_path):
     assert flow[0]["input_task_count"] == 4
 
 
+def test_spmd_succ_missing_finish_still_gets_scheduler_arrow(tmp_path):
+    # A tail/terminal successor dispatched but its completion was never
+    # captured (finish_time_us <= 0). The inbound dependency arrow lands at
+    # the successor's dispatch, so the Scheduler View must still draw it —
+    # matching the Worker View, which keeps the arrow (AICore end_time is
+    # always present). Regression for the dropped SPMD Scheduler-View arrow.
+    pred_id = 100
+    succ_id = 200
+    tasks = [_task_row(pred_id, 0)]
+    succ_rows = [
+        _task_row(succ_id, core_id, dispatch=20.0 + core_id, start=21.0 + core_id, end=30.0 + core_id)
+        for core_id in range(4)
+    ]
+    for r in succ_rows:
+        r["finish_time_us"] = 0.0  # completion not captured
+    tasks.extend(succ_rows)
+    deps_edges = {pred_id: [succ_id]}
+    deps_block_map = {pred_id: 1, succ_id: 4}
+
+    out = _generate_trace(tasks, deps_edges, deps_block_map, tmp_path)
+    assert _count_dependency_flow_starts(out, pid=4) == 1
+    assert _count_dependency_flow_starts(out, pid=3) == 1
+
+
+def test_spmd_pred_missing_finish_on_min_core_falls_back_to_sibling(tmp_path):
+    # The literal min-core anchor subtask has no captured finish, but a
+    # sibling subtask of the same logical SPMD task does. The Scheduler View
+    # anchors the outbound arrow on the first *visible* subtask instead of
+    # dropping the edge.
+    pred_id = 100
+    succ_id = 200
+    pred_rows = [_task_row(pred_id, core_id, dispatch=10.0 + core_id) for core_id in range(4)]
+    pred_rows[0]["finish_time_us"] = 0.0  # min-core subtask's completion not captured
+    tasks = list(pred_rows)
+    tasks.append(_task_row(succ_id, 10))
+    deps_edges = {pred_id: [succ_id]}
+    deps_block_map = {pred_id: 4, succ_id: 1}
+
+    out = _generate_trace(tasks, deps_edges, deps_block_map, tmp_path)
+    assert _count_dependency_flow_starts(out, pid=4) == 1
+    assert _count_dependency_flow_starts(out, pid=3) == 1
+    sched_flow = _first_scheduler_dependency_flow(out)
+    # Anchored on the first sibling that has a captured finish (core 1).
+    assert sched_flow[0]["tid"] == _core_tid(1)
+    assert sched_flow[0]["ts"] == tasks[1]["finish_time_us"] - 0.01
+
+
 def test_spmd_mix_to_mix_uses_anchor_cartesian_product(tmp_path):
     pred_id = 100
     succ_id = 200

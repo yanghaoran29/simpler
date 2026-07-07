@@ -550,6 +550,40 @@ def _dependency_flow_row_pairs(pred_id, succ_id, task_map, spmd_task_ids):
     return [(pred_row, succ_row) for pred_row in pred_rows for succ_row in succ_rows]
 
 
+def _scheduler_anchor_row(anchor_row, task_map, spmd_task_ids, *, need_finish):
+    """Subtask the Scheduler View should bind a dependency arrow endpoint to.
+
+    The Worker View anchors an SPMD arrow on the min core_id subtask, which
+    always has an AICore bar. The Scheduler View only renders subtasks with
+    captured AICPU timestamps, so that literal min-core subtask may have no
+    bar to land on — its dispatch/finish wasn't captured (e.g. a tail task
+    whose completion arrived after the capture window). For an SPMD task,
+    fall back to the first (next min core_id) same-core_type sibling that
+    does carry the needed timestamp, so the arrow still lands on the first
+    *visible* subtask instead of vanishing — matching the Worker View, which
+    keeps the arrow because AICore end_time is always present.
+
+    ``need_finish`` gates on the source side (its ts is the pred finish); the
+    dest side only needs a dispatch (that's where the inbound arrow lands),
+    so a successor that dispatched but whose own finish wasn't captured still
+    receives its dependency arrow. Returns ``None`` only when no sibling of
+    that core_type carries the needed timestamp.
+    """
+
+    def _ok(row):
+        if row.get("dispatch_time_us", 0) < 0:
+            return False
+        return not need_finish or row.get("finish_time_us", 0) > 0
+
+    if _ok(anchor_row):
+        return anchor_row
+    if anchor_row["task_id"] not in spmd_task_ids:
+        return None
+    core_type = anchor_row.get("core_type")
+    siblings = [r for r in task_map.get(anchor_row["task_id"], []) if r.get("core_type") == core_type and _ok(r)]
+    return min(siblings, key=lambda r: r["core_id"]) if siblings else None
+
+
 def _dependency_task_fan_count(task_id, spmd_task_ids, task_map, deps_block_map=None):
     """Logical subtask count for dependency metadata (SPMD block_num, else 1)."""
     if task_id in spmd_task_ids:
@@ -1802,32 +1836,33 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 output_task_count = _dependency_task_fan_count(pred_id, spmd_task_ids, task_map, deps_block_map)
                 input_task_count = _dependency_task_fan_count(succ_id, spmd_task_ids, task_map, deps_block_map)
                 for pred_row, succ_row in row_pairs:
-                    src_finish_us = pred_row.get("finish_time_us", 0)
-                    dst_dispatch_us = succ_row.get("dispatch_time_us", 0)
-                    dst_finish_us = succ_row.get("finish_time_us", 0)
-                    # Skip when AICPU timestamps are missing or zero (matches Scheduler
-                    # View bar emission, which rejects finish_us <= 0).
-                    if src_finish_us <= 0 or dst_dispatch_us < 0 or dst_finish_us <= 0:
+                    # Resolve each endpoint to the first subtask the Scheduler View
+                    # can actually bind to (Worker-View parity: connect the first
+                    # visible subtask rather than drop the arrow). The source ts is
+                    # the pred finish; the dest only needs a dispatch to land on.
+                    src_row = _scheduler_anchor_row(pred_row, task_map, spmd_task_ids, need_finish=True)
+                    dst_row = _scheduler_anchor_row(succ_row, task_map, spmd_task_ids, need_finish=False)
+                    if src_row is None or dst_row is None:
                         continue
+                    src_finish_us = src_row["finish_time_us"]
+                    dst_dispatch_us = dst_row["dispatch_time_us"]
                     src_ts = src_finish_us - flow_epsilon
                     aicpu_hb_violated = (src_ts + flow_epsilon) > dst_dispatch_us
                     aicpu_flow_name = "hb_violation" if aicpu_hb_violated else "dependency"
+                    src_key = (src_row["task_id"], src_row["core_id"])
+                    dst_key = (dst_row["task_id"], dst_row["core_id"])
                     _append_dependency_flow_pair(
                         events,
                         flow_id,
                         aicpu_flow_name,
                         3,
-                        task_to_aicpu_tid.get(
-                            (pred_row["task_id"], pred_row["core_id"]), core_to_tid[pred_row["core_id"]]
-                        ),
+                        task_to_aicpu_tid.get(src_key, core_to_tid[src_row["core_id"]]),
                         src_ts,
-                        task_to_aicpu_event_id.get((pred_row["task_id"], pred_row["core_id"])),
+                        task_to_aicpu_event_id.get(src_key),
                         3,
-                        task_to_aicpu_tid.get(
-                            (succ_row["task_id"], succ_row["core_id"]), core_to_tid[succ_row["core_id"]]
-                        ),
+                        task_to_aicpu_tid.get(dst_key, core_to_tid[dst_row["core_id"]]),
                         dst_dispatch_us,
-                        task_to_aicpu_event_id.get((succ_row["task_id"], succ_row["core_id"])),
+                        task_to_aicpu_event_id.get(dst_key),
                         input_task_count=input_task_count,
                         output_task_count=output_task_count,
                     )
