@@ -96,6 +96,10 @@
 // Fanin storage
 #define PTO2_FANIN_INLINE_CAP 64
 
+// Dependency-degree diagnostic: warn once per new high-water above this fanin/
+// fanout degree so dense dependency graphs surface without hot-path log flood.
+#define PTO2_DEP_DEGREE_WARN_THRESHOLD 16
+
 // TensorMap cleanup interval
 #define PTO2_TENSORMAP_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
 #define PTO2_DEP_POOL_CLEANUP_INTERVAL 64   // Cleanup every N retired tasks

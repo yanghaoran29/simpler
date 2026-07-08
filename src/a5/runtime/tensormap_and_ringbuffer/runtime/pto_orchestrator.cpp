@@ -161,6 +161,11 @@ static uint32_t g_orch_submit_idx = 0;
 #define CYCLE_COUNT_ORCH_SUBMIT_RECORD(tid)
 #endif
 
+// Dense-fanout diagnostic — unconditional (not profiling-gated). Single
+// orchestrator thread → plain ints, no atomics.
+static int32_t g_orch_fanout_high_water = 0;  // max producer fanout seen (immediate-warn gate)
+static int32_t g_orch_fanout_over_count = 0;  // # producers with fanout > threshold (summary)
+
 static int32_t orch_mark_fatal(PTO2OrchestratorState *orch, int32_t error_code) {
     always_assert(orch != nullptr);
     orch->fatal = true;
@@ -295,6 +300,7 @@ static bool append_fanin_or_fail(
     bool gone = prod_state->task == nullptr || prod_state->task->task_id.local() != producer_task_id.local() ||
                 prod_state->task_state.load(std::memory_order_acquire) == PTO2_TASK_CONSUMED;
     bool claim = !gone && !fanin_builder->mark_seen(prod_ring, prod_slot);
+    int32_t fanout_now = -1;
     if (claim) {
         // Low bits hold the consumer count; bit31 is the scope ref. The consumer
         // count must never carry into bit31 (would corrupt the scope-release
@@ -304,12 +310,29 @@ static bool append_fanin_or_fail(
             "fanout consumer count overflow into scope bit"
         );
         prod_state->fanout_count++;
+        fanout_now = static_cast<int32_t>(prod_state->fanout_count & ~PTO2_FANOUT_SCOPE_BIT);
     }
     prod_state->unlock_fanout();
 #if PTO2_ORCH_PROFILING
     // lock + unlock always; one fanout_count store when we actually claim.
     g_orch_args_atomic_count += claim ? 3 : 2;
 #endif
+    // Dense-fanout diagnostic, done outside the fanout_lock (no logging under the
+    // spinlock). Immediate WARN only on a new high-water; count each producer once
+    // at the threshold crossing so the end-of-run summary in mark_done() is exact.
+    if (fanout_now > PTO2_DEP_DEGREE_WARN_THRESHOLD) {
+        if (fanout_now == PTO2_DEP_DEGREE_WARN_THRESHOLD + 1) {
+            g_orch_fanout_over_count++;
+        }
+        if (fanout_now > g_orch_fanout_high_water) {
+            g_orch_fanout_high_water = fanout_now;
+            LOG_WARN(
+                "dense dependency: task ring=%u id=%u fanout=%d (>%d) [orch submit]",
+                static_cast<unsigned>(producer_task_id.ring()), producer_task_id.local(), fanout_now,
+                PTO2_DEP_DEGREE_WARN_THRESHOLD
+            );
+        }
+    }
     // gone (stale/consumed) or an already-seen duplicate live producer: no new
     // fanin edge either way.
     if (!claim) {
@@ -1114,6 +1137,13 @@ void PTO2OrchestratorState::mark_done() {
             );
         }
     }
+    if (g_orch_fanout_over_count > 0) {
+        LOG_INFO_V0(
+            "=== [Orchestrator] tasks with fanout>%d: %d ===", PTO2_DEP_DEGREE_WARN_THRESHOLD, g_orch_fanout_over_count
+        );
+    }
+    g_orch_fanout_over_count = 0;  // reset for the next run on this loaded .so
+    g_orch_fanout_high_water = 0;
     orch->sm_header->orchestrator_done.store(1, std::memory_order_release);
     orch->scope_tasks_size = 0;
     orch->scope_stack_top = -1;

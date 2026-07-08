@@ -664,6 +664,15 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
             LOG_ERROR("Thread %d: Core %d has invalid register address", thread_idx, core_id);
         }
     }
+    if (thread_idx == 0 && sched_ != nullptr) {
+        int32_t fanin_over = 0;
+        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+            fanin_over += sched_->ring_sched_states[r].fanin_over_count;
+        }
+        if (fanin_over > 0) {
+            LOG_INFO_V0("=== [Scheduler] tasks with fanin>%d: %d ===", PTO2_DEP_DEGREE_WARN_THRESHOLD, fanin_over);
+        }
+    }
     LOG_INFO_V0("Thread %d: Shutdown complete", thread_idx);
     return rc;
 }

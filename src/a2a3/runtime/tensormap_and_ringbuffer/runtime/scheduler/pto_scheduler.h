@@ -565,6 +565,9 @@ struct PTO2SchedulerState {
         // the drain breaks on dep_pool exhaustion every call while wedged, so
         // the tier-1 structural diagnostic is emitted once, not per call.
         bool dep_deadlock_reported = false;
+        // Dense-fanin diagnostic (thread 0 only → plain ints, no atomics).
+        int32_t fanin_high_water = 0;  // max fanin seen (immediate-warn gate)
+        int32_t fanin_over_count = 0;  // # tasks with fanin > threshold (summary)
 #if PTO2_PROFILING
         // Published only for scope_stats; orchestrator must not read dep_pool's non-atomic counters directly.
         alignas(64) std::atomic<int32_t> dep_pool_snapshot_tail;
@@ -816,6 +819,20 @@ struct PTO2SchedulerState {
     void wire_task(RingSchedState &rss, PTO2TaskSlotState *ws, int32_t wfanin) {
         PTO2TaskPayload *wp = ws->payload;
         ws->fanin_count = wfanin + 1;
+
+        // Dense-fanin diagnostic: each task is wired exactly once, so count once;
+        // immediate WARN only on a new high-water to avoid hot-path log flood.
+        if (wfanin > PTO2_DEP_DEGREE_WARN_THRESHOLD) {
+            rss.fanin_over_count++;
+            if (wfanin > rss.fanin_high_water) {
+                rss.fanin_high_water = wfanin;
+                LOG_WARN(
+                    "dense dependency: task ring=%u id=%u fanin=%d (>%d) [scheduler wiring]",
+                    static_cast<unsigned>(ws->task->task_id.ring()), ws->task->task_id.local(), wfanin,
+                    PTO2_DEP_DEGREE_WARN_THRESHOLD
+                );
+            }
+        }
 
         if (wfanin != 0) {
             int32_t early_finished = 0;

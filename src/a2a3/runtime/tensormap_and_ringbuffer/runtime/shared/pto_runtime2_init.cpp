@@ -111,6 +111,8 @@ void PTO2SchedulerState::RingSchedState::reset_for_reuse(
     last_task_alive = 0;
     advance_lock.store(0, std::memory_order_relaxed);
     dep_deadlock_reported = false;
+    fanin_high_water = 0;
+    fanin_over_count = 0;
     dep_pool.reset_for_reuse(orch_err);
 #if PTO2_PROFILING
     dep_pool_snapshot_tail.store(1, std::memory_order_relaxed);
