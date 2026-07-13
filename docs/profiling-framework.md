@@ -162,9 +162,10 @@ Provides:
   before advancing `queue_heads`. On an empty scan, split drain does a short
   busy-poll window before falling back to the 10 us sleep, so micro-bursts
   are less likely to miss AICPU's bounded wait window.
-- Optional collector sharding (`Module::kCollectorThreadCount`) — each
-  collector drains one host ready shard and returns finished buffers through
-  the matching done shard.
+- Optional collector sharding (`Module::kMaxCollectorThreads` caps the shard
+  arrays; the live shard count is the runtime `min(aicpu_thread_num,
+  kMaxCollectorThreads)`) — each collector drains one host ready shard and
+  returns finished buffers through the matching done shard.
 - `poll_and_collect_loop` — per-shard `wait_pop_ready` with a 100 ms cv
   tick, dispatches to `Derived::on_buffer_collected`, then calls
   `manager_.notify_copy_done(...)` itself; idle-timeout hang detector.
@@ -215,10 +216,9 @@ the required members are:
 | `kHostPoolQueueSize` | Optional host done ring depth |
 | `kHostRecycledQueueSize` | Optional per-kind, per-shard recycled ring depth; defaults to `kHostPoolQueueSize` |
 | `kSubsystemName` | Tag used in framework log lines |
-| `kMgmtDrainThreadCount` | Optional; number of mgmt drain shards (defaults to 1) |
-| `kCollectorThreadCount` | Optional number of collector / host ready-queue shards |
+| `kMaxCollectorThreads` | Optional compile-time CAPACITY of the drain / collector shard arrays (defaults to 1); live shard count is the runtime `min(aicpu_thread_num, kMaxCollectorThreads)` set via `set_aicpu_thread_num()` |
 | `refresh_replenish_metadata(mgr, header)` | Optional hook to refresh cached queue metadata before a replenish pass |
-| `recycled_warm_target(kind[, shard]) → int` | Optional startup/runtime low-water mark for shard-local recycled lanes |
+| `recycled_warm_target(kind[, shard_count]) → int` | Optional startup/runtime low-water mark for shard-local recycled lanes; the two-arg form scales the mark with the live shard count |
 | `header_from_shm(void*) → DataHeader*` | Cast shared-memory base to header |
 | `batch_size(int kind) → int` | Per-kind batch-alloc count |
 | `resolve_entry(shm, header, q, entry) → optional<EntrySite>` | Map a popped ready entry to (kind, free_queue, buffer_size, partial info); return `nullopt` to drop |

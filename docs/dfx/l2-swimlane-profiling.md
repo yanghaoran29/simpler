@@ -767,8 +767,10 @@ framework reference.
 a5's `L2SwimlaneCollector` derives from
 `ProfilerBase<L2SwimlaneCollector, L2SwimlaneModule>` and uses the same
 framework abstractions as a2a3, including the same split mgmt +
-collector shard shape (`kMgmtDrainThreadCount` = `kCollectorThreadCount`
-= `PLATFORM_MAX_AICPU_THREADS`, i.e. 7 on a5 vs 4 on a2a3). The
+collector shard shape (`kMaxCollectorThreads` =
+`PLATFORM_MAX_AICPU_THREADS`, i.e. 7 on a5 vs 4 on a2a3, capping the
+shard arrays; the live drain/collector count is
+`min(aicpu_thread_num, kMaxCollectorThreads)`). The
 behavioral deviation from §5.2 is the **transport channel**: a5 has no
 `halHostRegister`, so each device buffer is paired with a
 host-shadow `malloc()` and the mgmt loop synchronizes the two via

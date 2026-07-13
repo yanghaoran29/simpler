@@ -326,8 +326,9 @@ a2a3). At shutdown, AICPU flushes any partially-filled buffers via
 a5's `PmuCollector` derives from
 `ProfilerBase<PmuCollector, PmuModule>` and uses the same framework
 abstractions as a2a3, including the same split mgmt + collector shard
-shape (`kMgmtDrainThreadCount` = `kCollectorThreadCount` =
-`PLATFORM_MAX_AICPU_THREADS`, i.e. 7 on a5 vs 4 on a2a3). The
+shape (`kMaxCollectorThreads` = `PLATFORM_MAX_AICPU_THREADS`, i.e. 7 on
+a5 vs 4 on a2a3, capping the shard arrays; the live drain/collector
+count is `min(aicpu_thread_num, kMaxCollectorThreads)`). The
 behavioral deviation from §5.2 is the **transport channel**: a5 has no
 `halHostRegister`, so
 each device buffer is paired with a host-shadow `malloc()` and the

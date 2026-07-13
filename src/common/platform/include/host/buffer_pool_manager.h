@@ -142,13 +142,13 @@ struct DoneInfo {
 };
 
 template <typename Module, typename = void>
-struct ProfilerModuleCollectorThreadCount {
+struct ProfilerModuleMaxCollectorThreads {
     static constexpr int value = 1;
 };
 
 template <typename Module>
-struct ProfilerModuleCollectorThreadCount<Module, std::void_t<decltype(Module::kCollectorThreadCount)>> {
-    static constexpr int value = Module::kCollectorThreadCount;
+struct ProfilerModuleMaxCollectorThreads<Module, std::void_t<decltype(Module::kMaxCollectorThreads)>> {
+    static constexpr int value = Module::kMaxCollectorThreads;
 };
 
 template <typename Module, typename = void>
@@ -284,8 +284,10 @@ class BufferPoolManager {
 
 public:
     using ReadyBufferInfo = typename Module::ReadyBufferInfo;
-    static constexpr int kCollectorShardCount = ProfilerModuleCollectorThreadCount<Module>::value;
-    static_assert(kCollectorShardCount >= 1, "Module::kCollectorThreadCount must be >= 1");
+    // Compile-time CAPACITY of the shard arrays. The number of shards actually
+    // in use is the runtime `shard_count_` (<= this), set via set_shard_count().
+    static constexpr int kMaxCollectorShards = ProfilerModuleMaxCollectorThreads<Module>::value;
+    static_assert(kMaxCollectorShards >= 1, "Module::kMaxCollectorThreads must be >= 1");
     static constexpr size_t kReadyQueueCapacity = ProfilerModuleHostQueueCapacity<Module>::value;
     static constexpr size_t kPoolQueueCapacity = ProfilerModuleHostPoolQueueCapacity<Module>::value;
     static constexpr size_t kRecycledQueueCapacity = ProfilerModuleHostRecycledQueueCapacity<Module>::value;
@@ -318,6 +320,22 @@ public:
         shm_size_ = shm_size;
         device_id_ = device_id;
     }
+
+    /**
+     * Set how many of the kMaxCollectorShards shards are live for this run.
+     * Every shard-indexed method folds its argument modulo this value, so it
+     * must be set before the first push_recycled() — collectors seed their
+     * recycled lanes during init(), ahead of ProfilerBase::start().
+     */
+    void set_shard_count(int n) {
+        if (n < 1 || n > kMaxCollectorShards) {
+            LOG_ERROR("BufferPoolManager: shard_count %d out of range [1, %d]; clamping", n, kMaxCollectorShards);
+            n = n < 1 ? 1 : kMaxCollectorShards;
+        }
+        shard_count_ = n;
+    }
+
+    int shard_count() const { return shard_count_; }
 
     /**
      * Release every device buffer the framework currently owns: recycled
@@ -784,8 +802,8 @@ public:
     }
 
     void *pop_recycled_for_startup(int kind) {
-        for (size_t shard = 0; shard < recycled_.size(); shard++) {
-            if (void *p = pop_recycled(kind, static_cast<int>(shard)); p != nullptr) return p;
+        for (int shard = 0; shard < shard_count_; shard++) {
+            if (void *p = pop_recycled(kind, shard); p != nullptr) return p;
         }
         return nullptr;
     }
@@ -821,16 +839,16 @@ public:
 
     size_t recycled_count(int kind) const {
         size_t total = 0;
-        for (size_t shard = 0; shard < recycled_.size(); shard++) {
-            total += recycled_[shard][kind].size();
+        for (int shard = 0; shard < shard_count_; shard++) {
+            total += recycled_[static_cast<size_t>(shard)][kind].size();
         }
         return total;
     }
 
     bool recycled_empty() const {
-        for (size_t shard = 0; shard < recycled_.size(); shard++) {
+        for (int shard = 0; shard < shard_count_; shard++) {
             for (int kind = 0; kind < Module::kBufferKinds; kind++) {
-                if (!recycled_[shard][kind].empty()) return false;
+                if (!recycled_[static_cast<size_t>(shard)][kind].empty()) return false;
             }
         }
         return true;
@@ -856,8 +874,8 @@ public:
 
     size_t drain_done_into_recycled() {
         size_t drained = 0;
-        for (size_t shard = 0; shard < done_shards_.size(); shard++) {
-            drained += drain_done_into_recycled(static_cast<int>(shard));
+        for (int shard = 0; shard < shard_count_; shard++) {
+            drained += drain_done_into_recycled(shard);
         }
         return drained;
     }
@@ -919,9 +937,9 @@ private:
         DoneRing queue;
     };
 
-    static size_t normalize_shard(int shard_index) {
+    size_t normalize_shard(int shard_index) const {
         if (shard_index < 0) return 0;
-        return static_cast<size_t>(shard_index) % static_cast<size_t>(kCollectorShardCount);
+        return static_cast<size_t>(shard_index) % static_cast<size_t>(shard_count_);
     }
 
     static size_t align_up(size_t value, size_t alignment) {
@@ -973,11 +991,18 @@ private:
     int device_id_{-1};
     MemoryOps ops_;
 
+    // Live shard count for this run; <= kMaxCollectorShards. Written once by
+    // set_shard_count() during the collector's init(), read by the drain,
+    // replenish and collector threads that start() spawns afterwards — the
+    // std::thread constructor is the synchronization point, so a plain int
+    // needs no atomic.
+    int shard_count_{kMaxCollectorShards};
+
     // mgmt → collector
-    std::array<ReadyQueueShard, kCollectorShardCount> ready_shards_;
+    std::array<ReadyQueueShard, kMaxCollectorShards> ready_shards_;
 
     // collector → mgmt
-    std::array<DoneQueueShard, kCollectorShardCount> done_shards_;
+    std::array<DoneQueueShard, kMaxCollectorShards> done_shards_;
 
     // Host-side pointer mappings are shared across all collector shards.
     mutable std::mutex mapping_mutex_;
@@ -994,11 +1019,11 @@ private:
     std::unordered_set<void *> malloc_shadows_;
 
     // Local recycled buffer pools indexed by collector shard, then Module-defined kind id.
-    std::array<std::array<RecycledRing, Module::kBufferKinds>, kCollectorShardCount> recycled_;
+    std::array<std::array<RecycledRing, Module::kBufferKinds>, kMaxCollectorShards> recycled_;
 
     // Error-path holding pools for buffers removed from recycled_ or popped
     // from device ready queues but not published to a collector/free_queue.
-    std::array<std::array<RetiredPool, Module::kBufferKinds>, kCollectorShardCount> retired_;
+    std::array<std::array<RetiredPool, Module::kBufferKinds>, kMaxCollectorShards> retired_;
 };
 
 }  // namespace profiling_common

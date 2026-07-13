@@ -97,13 +97,11 @@ struct PmuModule {
     static constexpr int kBufferKinds = 1;
     static constexpr uint32_t kReadyQueueSize = PLATFORM_PMU_READYQUEUE_SIZE;
     static constexpr uint32_t kHostPoolQueueSize = PLATFORM_MAX_CORES * PLATFORM_PMU_BUFFERS_PER_CORE;
-    static constexpr uint32_t kMaxCoresPerCollectorShard =
-        (PLATFORM_MAX_CORES + PLATFORM_MAX_AICPU_THREADS - 1) / PLATFORM_MAX_AICPU_THREADS;
     static constexpr uint32_t kHostRecycledQueueSize = PLATFORM_MAX_CORES * PLATFORM_PMU_BUFFERS_PER_CORE;
     static constexpr uint32_t kSlotCount = PLATFORM_PMU_SLOT_COUNT;
     static constexpr const char *kSubsystemName = "PmuModule";
-    static constexpr int kMgmtDrainThreadCount = PLATFORM_MAX_AICPU_THREADS;
-    static constexpr int kCollectorThreadCount = PLATFORM_MAX_AICPU_THREADS;
+    // Producers are the scheduler threads that own each core, one per AICPU thread.
+    static constexpr int kMaxCollectorThreads = PLATFORM_MAX_AICPU_THREADS;
 
     /**
      * Buffers grown by proactive_replenish are batch-allocated up to the
@@ -115,15 +113,16 @@ struct PmuModule {
         return kBatch < 1 ? 1 : kBatch;
     }
 
-    static constexpr int recycled_warm_target(int /*kind*/) {
-        // Keep half of the init-seeded surplus per shard as the steady-state
-        // low-water mark. PMU normally has no init surplus, so retain one
-        // minimal reserve batch instead of scaling by core count.
+    // Each live collector shard owns ceil(cores / shard_count) cores, so the
+    // watermark grows as the shard count shrinks.
+    static constexpr int recycled_warm_target(int /*kind*/, int shard_count) {
         constexpr int kSurplusPerCore = (PLATFORM_PMU_BUFFERS_PER_CORE > PLATFORM_PMU_SLOT_COUNT) ?
                                             (PLATFORM_PMU_BUFFERS_PER_CORE - PLATFORM_PMU_SLOT_COUNT) :
                                             0;
-        constexpr int kInitialSurplus = kSurplusPerCore * static_cast<int>(kMaxCoresPerCollectorShard);
-        return kInitialSurplus > 0 ? (kInitialSurplus + 1) / 2 : 1;
+        int cores_per_shard =
+            shard_count > 0 ? (PLATFORM_MAX_CORES + shard_count - 1) / shard_count : PLATFORM_MAX_CORES;
+        int initial_surplus = kSurplusPerCore * cores_per_shard;
+        return initial_surplus > 0 ? (initial_surplus + 1) / 2 : 1;
     }
 
     static DataHeader *header_from_shm(void *shm) { return get_pmu_header(shm); }

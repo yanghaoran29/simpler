@@ -88,8 +88,8 @@ struct DumpModule {
     static constexpr uint32_t kHostPoolQueueSize = PLATFORM_MAX_AICPU_THREADS * PLATFORM_DUMP_BUFFERS_PER_THREAD;
     static constexpr uint32_t kSlotCount = PLATFORM_DUMP_SLOT_COUNT;
     static constexpr const char *kSubsystemName = "DumpModule";
-    static constexpr int kMgmtDrainThreadCount = PLATFORM_MAX_AICPU_THREADS;
-    static constexpr int kCollectorThreadCount = PLATFORM_MAX_AICPU_THREADS;
+    // Producers are the scheduler threads, one per AICPU thread.
+    static constexpr int kMaxCollectorThreads = PLATFORM_MAX_AICPU_THREADS;
 
     /**
      * Args-dump bursts can be very large; this is the startup-only batch

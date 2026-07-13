@@ -55,6 +55,17 @@ int ArgsDumpCollector::initialize(
         LOG_ERROR("ArgsDumpCollector already initialized");
         return -1;
     }
+    if (num_dump_threads <= 0 || num_dump_threads > PLATFORM_MAX_AICPU_THREADS) {
+        LOG_ERROR(
+            "ArgsDumpCollector::initialize: invalid num_dump_threads=%d (valid range: 1-%d)", num_dump_threads,
+            PLATFORM_MAX_AICPU_THREADS
+        );
+        return -1;
+    }
+
+    // Must precede the recycled-lane seeding below: push_recycled() folds its
+    // shard argument modulo the manager's shard count.
+    set_aicpu_thread_num(num_dump_threads);
 
     num_dump_threads_ = num_dump_threads;
     output_prefix_ = output_prefix;

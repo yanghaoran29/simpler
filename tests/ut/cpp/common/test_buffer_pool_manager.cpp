@@ -39,7 +39,7 @@ struct TestModule {
     using ReadyBufferInfo = TestReadyBufferInfo;
 
     static constexpr int kBufferKinds = 2;
-    static constexpr int kCollectorThreadCount = 4;
+    static constexpr int kMaxCollectorThreads = 4;
     static constexpr uint32_t kReadyQueueSize = 4;
 };
 
@@ -49,7 +49,7 @@ struct SplitCapacityModule {
     using ReadyBufferInfo = TestReadyBufferInfo;
 
     static constexpr int kBufferKinds = 1;
-    static constexpr int kCollectorThreadCount = 1;
+    static constexpr int kMaxCollectorThreads = 1;
     static constexpr uint32_t kReadyQueueSize = 2;
     static constexpr uint32_t kHostPoolQueueSize = 5;
 };
@@ -60,7 +60,7 @@ struct SplitDoneRecycledCapacityModule {
     using ReadyBufferInfo = TestReadyBufferInfo;
 
     static constexpr int kBufferKinds = 1;
-    static constexpr int kCollectorThreadCount = 1;
+    static constexpr int kMaxCollectorThreads = 1;
     static constexpr uint32_t kReadyQueueSize = 2;
     static constexpr uint32_t kHostPoolQueueSize = 5;
     static constexpr uint32_t kHostRecycledQueueSize = 3;
@@ -92,7 +92,7 @@ struct AlgorithmModule {
     using FreeQueue = AlgorithmFreeQueue;
 
     static constexpr int kBufferKinds = 1;
-    static constexpr int kCollectorThreadCount = 1;
+    static constexpr int kMaxCollectorThreads = 1;
     static constexpr uint32_t kReadyQueueSize = 1;
     static constexpr uint32_t kHostPoolQueueSize = 4;
     static constexpr uint32_t kSlotCount = 1;
@@ -125,7 +125,7 @@ struct WarmRecycledModule {
     using FreeQueue = AlgorithmFreeQueue;
 
     static constexpr int kBufferKinds = 1;
-    static constexpr int kCollectorThreadCount = 2;
+    static constexpr int kMaxCollectorThreads = 2;
     static constexpr uint32_t kReadyQueueSize = 1;
     static constexpr uint32_t kHostPoolQueueSize = 8;
     static constexpr uint32_t kHostRecycledQueueSize = 3;
@@ -136,7 +136,9 @@ struct WarmRecycledModule {
 
     static int batch_size(int /*kind*/) { return 1; }
 
-    static int recycled_warm_target(int /*kind*/, int shard) { return shard + 1; }
+    // Two-arg form: the watermark scales with the number of live shards, the
+    // way L2Swimlane/PMU size theirs against ceil(cores / shard_count).
+    static int recycled_warm_target(int /*kind*/, int shard_count) { return shard_count; }
 
     static std::optional<profiling_common::EntrySite<WarmRecycledModule>>
     resolve_entry(void * /*shm_host*/, DataHeader *header, int /*q*/, const ReadyEntry &entry) {
@@ -161,7 +163,7 @@ struct WarmBatchModule {
     using FreeQueue = AlgorithmFreeQueue;
 
     static constexpr int kBufferKinds = 1;
-    static constexpr int kCollectorThreadCount = 1;
+    static constexpr int kMaxCollectorThreads = 1;
     static constexpr uint32_t kReadyQueueSize = 1;
     static constexpr uint32_t kHostPoolQueueSize = 16;
     static constexpr uint32_t kHostRecycledQueueSize = 16;
@@ -226,7 +228,7 @@ TEST(SpscRingTest, ConcurrentProducerConsumerPreservesFifo) {
 
 TEST(BufferPoolManagerShardingTest, ReadyShardsAreIndependent) {
     using Manager = profiling_common::BufferPoolManager<TestModule>;
-    static_assert(Manager::kCollectorShardCount == 4);
+    static_assert(Manager::kMaxCollectorShards == 4);
 
     Manager manager;
     ASSERT_TRUE(manager.push_to_ready(TestReadyBufferInfo{ptr(0x1000), 0}, 0));
@@ -398,10 +400,52 @@ TEST(BufferPoolManagerShardingTest, ReplenishRecycledPoolsAllocatesToRuntimeWate
     };
     manager.set_memory_context(std::move(ops), nullptr, &header, sizeof(header), 0);
 
-    EXPECT_EQ(profiling_common::ProfilerAlgorithms<WarmRecycledModule>::replenish_recycled_pools(manager, &header), 3u);
-    EXPECT_EQ(manager.recycled_count(0, 0), 1u);
+    // Default shard count is the compile-time max (2), so the module's
+    // shard_count-derived target is 2 and both lanes fill to it.
+    EXPECT_EQ(manager.shard_count(), 2);
+    EXPECT_EQ(profiling_common::ProfilerAlgorithms<WarmRecycledModule>::replenish_recycled_pools(manager, &header), 4u);
+    EXPECT_EQ(manager.recycled_count(0, 0), 2u);
     EXPECT_EQ(manager.recycled_count(0, 1), 2u);
     EXPECT_EQ(profiling_common::ProfilerAlgorithms<WarmRecycledModule>::replenish_recycled_pools(manager, &header), 0u);
+
+    manager.release_owned_buffers([](void *p) {
+        std::free(p);
+    });
+    manager.clear_mappings();
+}
+
+// Shrinking the shard count must (a) leave the unused lanes untouched and
+// (b) raise the per-lane watermark, since the surviving lane now serves the
+// work the retired ones used to. Getting (b) wrong starves the drain thread's
+// recycled lane and silently drops device records.
+TEST(BufferPoolManagerShardingTest, ReplenishRecycledPoolsFollowsRuntimeShardCount) {
+    using Manager = profiling_common::BufferPoolManager<WarmRecycledModule>;
+
+    Manager manager;
+    AlgorithmHeader header{};
+    profiling_common::MemoryOps ops;
+    ops.alloc = [](size_t size) {
+        return std::malloc(size);
+    };
+    ops.reg = [](void *dev_ptr, size_t /*size*/, int /*device_id*/, void **host_ptr_out) {
+        *host_ptr_out = dev_ptr;
+        return 0;
+    };
+    ops.free_ = [](void *dev_ptr) {
+        std::free(dev_ptr);
+        return 0;
+    };
+    manager.set_memory_context(std::move(ops), nullptr, &header, sizeof(header), 0);
+
+    manager.set_shard_count(1);
+    EXPECT_EQ(manager.shard_count(), 1);
+
+    // One live lane, and the module's target is now 1 (== shard_count). The
+    // summing overload only walks the live lanes, so it equals lane 0 exactly —
+    // nothing was allocated into the lane the shrink retired.
+    EXPECT_EQ(profiling_common::ProfilerAlgorithms<WarmRecycledModule>::replenish_recycled_pools(manager, &header), 1u);
+    EXPECT_EQ(manager.recycled_count(0, 0), 1u);
+    EXPECT_EQ(manager.recycled_count(0), 1u);
 
     manager.release_owned_buffers([](void *p) {
         std::free(p);

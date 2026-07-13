@@ -82,6 +82,10 @@ int PmuCollector::init(
         return -1;
     }
 
+    // Must precede the recycled-lane seeding below: push_recycled() folds its
+    // shard argument modulo the manager's shard count.
+    set_aicpu_thread_num(num_threads);
+
     num_cores_ = num_cores;
     num_threads_ = num_threads;
     event_type_ = event_type;

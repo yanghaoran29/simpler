@@ -45,10 +45,15 @@
  *   static constexpr uint32_t kHostRecycledQueueSize;
  *   static constexpr uint32_t kSlotCount;      // FreeQueue::buffer_ptrs[] length.
  *   static constexpr const char* kSubsystemName; // "PMU" / "L2Swimlane" / "Dump".
- *   // Optional: number of mgmt drain shards (defaults to 1).
- *   static constexpr int      kMgmtDrainThreadCount;
- *   // Optional: number of collector threads / host ready-queue shards.
- *   static constexpr int      kCollectorThreadCount;
+ *   // Optional: CAPACITY of the drain / collector shard arrays (defaults to
+ *   // 1). Bounds the shard arrays at compile time; the number of threads
+ *   // actually started is the runtime min(aicpu_thread_num,
+ *   // kMaxCollectorThreads), latched by ProfilerBase::set_aicpu_thread_num().
+ *   // Subsystems whose only device-side producer is the orchestrator (DepGen,
+ *   // ScopeStats) set this to 1: one drain thread scans every AICPU ready
+ *   // queue and finds the single producer's, so extra shards would only ever
+ *   // be empty.
+ *   static constexpr int      kMaxCollectorThreads;
  *   // Optional: refresh cached queue metadata before a replenish pass.
  *   template <typename Mgr>
  *   static void refresh_replenish_metadata(Mgr&, DataHeader*);
@@ -58,6 +63,15 @@
  *
  *   // Per-kind alloc batch size for proactive_replenish's free-queue fallback.
  *   static int batch_size(int kind);
+ *
+ *   // Optional: steady-state low-water mark for a shard-local recycled lane.
+ *   // Two forms; the two-arg one wins if both are present:
+ *   //   static int recycled_warm_target(int kind);
+ *   //   static int recycled_warm_target(int kind, int shard_count);
+ *   // Take the two-arg form when the target depends on how many shards share
+ *   // the device's cores — with `shard_count` live shards each one owns
+ *   // ceil(cores / shard_count) cores, so the target must grow as shards
+ *   // shrink. Omitting both means no watermark (0).
  *
  *   // Required only when kBufferKinds > 1: discriminate which recycled bin
  *   // a finished buffer belongs to. Single-kind modules omit this method;
@@ -191,16 +205,6 @@
 #include "host/profiling_copy.h"
 
 namespace profiling_common {
-
-template <typename Module, typename = void>
-struct ProfilerModuleDrainThreadCount {
-    static constexpr int value = 1;
-};
-
-template <typename Module>
-struct ProfilerModuleDrainThreadCount<Module, std::void_t<decltype(Module::kMgmtDrainThreadCount)>> {
-    static constexpr int value = Module::kMgmtDrainThreadCount;
-};
 
 template <typename Derived, typename ReadyBufferInfo, typename = void>
 struct ProfilerDerivedShardAwareCollector {
@@ -468,11 +472,12 @@ struct ProfilerAlgorithms {
             }
         });
 
+        const int shard_count = mgr.shard_count();
         uint64_t pushed = 0;
         for (int kind = 0; kind < Module::kBufferKinds; kind++) {
             if (buffer_sizes[static_cast<size_t>(kind)] == 0) continue;
-            for (int shard = 0; shard < static_cast<int>(Mgr::kCollectorShardCount); shard++) {
-                size_t target = clamped_recycled_warm_target<Mgr>(kind, shard);
+            for (int shard = 0; shard < shard_count; shard++) {
+                size_t target = clamped_recycled_warm_target<Mgr>(kind, shard, shard_count);
                 if (target == 0) continue;
                 size_t current = mgr.recycled_count(kind, shard);
                 if (current >= target) continue;
@@ -488,11 +493,17 @@ struct ProfilerAlgorithms {
     }
 
 private:
-    static int recycled_warm_target(int kind, int shard) { return recycled_warm_target_impl(kind, shard, 0); }
+    // Modules that scale their watermark with the number of live shards (the
+    // per-shard core load is ceil(cores / shard_count)) implement the two-arg
+    // form; shard-count-independent modules implement the one-arg form.
+    static int recycled_warm_target(int kind, int shard_count) {
+        return recycled_warm_target_impl(kind, shard_count, 0);
+    }
 
     template <typename M = Module>
-    static auto recycled_warm_target_impl(int kind, int shard, int) -> decltype(M::recycled_warm_target(kind, shard)) {
-        return M::recycled_warm_target(kind, shard);
+    static auto recycled_warm_target_impl(int kind, int shard_count, int)
+        -> decltype(M::recycled_warm_target(kind, shard_count)) {
+        return M::recycled_warm_target(kind, shard_count);
     }
 
     template <typename M = Module>
@@ -503,8 +514,8 @@ private:
     static int recycled_warm_target_impl(int, int, ...) { return 0; }
 
     template <typename Mgr>
-    static size_t clamped_recycled_warm_target(int kind, int shard) {
-        int target = recycled_warm_target(kind, shard);
+    static size_t clamped_recycled_warm_target(int kind, int shard, int shard_count) {
+        int target = recycled_warm_target(kind, shard_count);
         if (target <= 0) return 0;
         size_t requested = static_cast<size_t>(target);
         if (requested > Mgr::kRecycledQueueCapacity) {
@@ -631,6 +642,34 @@ private:
 
 public:
     /**
+     * Latch the runtime AICPU thread count. Must be the FIRST thing
+     * Derived::init() does after validating its thread-count argument —
+     * collectors seed their recycled lanes later in init() (via
+     * manager_.push_recycled), and those calls already fold their shard
+     * argument modulo the manager's shard count.
+     *
+     * Two distinct quantities come out of this:
+     *
+     *   queue_count_ — how many DEVICE ready queues exist, i.e. how many AICPU
+     *                  threads can produce. Always `aicpu_thread_num`.
+     *   shard_count_ — how many drain/collector threads (== host shards) to
+     *                  run. Capped by Module::kMaxCollectorThreads, which is 1
+     *                  for the orchestrator-only subsystems (DepGen,
+     *                  ScopeStats): they have a single device-side producer, so
+     *                  one drain thread scanning all `queue_count_` queues is
+     *                  the whole job.
+     *
+     * The two are equal for the subsystems whose producers are the scheduler
+     * threads (L2Swimlane, ArgsDump, PMU).
+     */
+    void set_aicpu_thread_num(int aicpu_thread_num) {
+        queue_count_ = aicpu_thread_num;
+        shard_count_ = std::min(aicpu_thread_num, Manager::kMaxCollectorShards);
+        manager_.set_shard_count(shard_count_);
+        thread_num_set_ = true;
+    }
+
+    /**
      * Stash the memory context produced by Derived::init(). Must be called
      * on the init() success path; if init aborts before this, start(tf) is
      * a no-op.
@@ -697,6 +736,21 @@ public:
     void start(const ThreadFactory &thread_factory) {
         if (shm_host_ == nullptr) return;
 
+        if (!thread_num_set_) {
+            LOG_WARN(
+                "%s: set_aicpu_thread_num() never called; falling back to %d shards", Derived::kSubsystemName,
+                shard_count_
+            );
+        }
+        if (shard_count_ < 1 || shard_count_ > Manager::kMaxCollectorShards || queue_count_ < 1 ||
+            queue_count_ > PLATFORM_MAX_AICPU_THREADS) {
+            LOG_ERROR(
+                "%s: invalid thread counts (shards=%d max=%d, queues=%d max=%d); not starting", Derived::kSubsystemName,
+                shard_count_, Manager::kMaxCollectorShards, queue_count_, PLATFORM_MAX_AICPU_THREADS
+            );
+            return;
+        }
+
         MemoryOps ops;
         ops.alloc = alloc_cb_;
         ops.free_ = free_cb_;
@@ -745,64 +799,38 @@ public:
             (void)ProfilerAlgorithms<Module>::proactive_replenish(manager_, header);
         }
 
-        constexpr int kDrainThreads = ProfilerModuleDrainThreadCount<Module>::value;
-        constexpr int kCollectorThreads = ProfilerModuleCollectorThreadCount<Module>::value;
-        static_assert(kDrainThreads >= 1, "kMgmtDrainThreadCount must be >= 1");
-        static_assert(kCollectorThreads >= 1, "kCollectorThreadCount must be >= 1");
-        static_assert(
-            kCollectorThreads % kDrainThreads == 0,
-            "SPSC host queues require each collector shard to be fed by one drain thread"
-        );
+        // Drain and collector counts are the same value, so every ready shard
+        // has exactly one drain-thread producer — the SPSC invariant the host
+        // queues rely on.
+        const int n = shard_count_;
 
         mgmt_running_.store(true, std::memory_order_release);
-        {
-            if constexpr (kDrainThreads == 1) {
-                if (thread_factory) {
-                    mgmt_thread_ = thread_factory([this]() {
-                        mgmt_drain_loop(0, 1);
-                    });
-                } else {
-                    mgmt_thread_ = std::thread(&ProfilerBase::mgmt_drain_loop, this, 0, 1);
-                }
-            } else {
-                mgmt_drain_threads_.reserve(kDrainThreads);
-                for (int i = 0; i < kDrainThreads; i++) {
-                    if (thread_factory) {
-                        mgmt_drain_threads_.push_back(thread_factory([this, i]() {
-                            mgmt_drain_loop(i, kDrainThreads);
-                        }));
-                    } else {
-                        mgmt_drain_threads_.emplace_back(&ProfilerBase::mgmt_drain_loop, this, i, kDrainThreads);
-                    }
-                }
-            }
+        mgmt_drain_threads_.reserve(n);
+        for (int i = 0; i < n; i++) {
             if (thread_factory) {
-                mgmt_replenish_thread_ = thread_factory([this]() {
-                    mgmt_replenish_loop();
-                });
+                mgmt_drain_threads_.push_back(thread_factory([this, i, n]() {
+                    mgmt_drain_loop(i, n);
+                }));
             } else {
-                mgmt_replenish_thread_ = std::thread(&ProfilerBase::mgmt_replenish_loop, this);
+                mgmt_drain_threads_.emplace_back(&ProfilerBase::mgmt_drain_loop, this, i, n);
             }
         }
-
-        if constexpr (kCollectorThreads == 1) {
-            if (thread_factory) {
-                collector_thread_ = thread_factory([this]() {
-                    poll_and_collect_loop(0, 1);
-                });
-            } else {
-                collector_thread_ = std::thread(&ProfilerBase::poll_and_collect_loop, this, 0, 1);
-            }
+        if (thread_factory) {
+            mgmt_replenish_thread_ = thread_factory([this]() {
+                mgmt_replenish_loop();
+            });
         } else {
-            collector_threads_.reserve(kCollectorThreads);
-            for (int i = 0; i < kCollectorThreads; i++) {
-                if (thread_factory) {
-                    collector_threads_.push_back(thread_factory([this, i]() {
-                        poll_and_collect_loop(i, kCollectorThreads);
-                    }));
-                } else {
-                    collector_threads_.emplace_back(&ProfilerBase::poll_and_collect_loop, this, i, kCollectorThreads);
-                }
+            mgmt_replenish_thread_ = std::thread(&ProfilerBase::mgmt_replenish_loop, this);
+        }
+
+        collector_threads_.reserve(n);
+        for (int i = 0; i < n; i++) {
+            if (thread_factory) {
+                collector_threads_.push_back(thread_factory([this, i]() {
+                    poll_and_collect_loop(i);
+                }));
+            } else {
+                collector_threads_.emplace_back(&ProfilerBase::poll_and_collect_loop, this, i);
             }
         }
     }
@@ -821,9 +849,6 @@ public:
      */
     void stop() {
         mgmt_running_.store(false, std::memory_order_release);
-        if (mgmt_thread_.joinable()) {
-            mgmt_thread_.join();
-        }
         for (auto &thread : mgmt_drain_threads_) {
             if (thread.joinable()) {
                 thread.join();
@@ -834,9 +859,6 @@ public:
             mgmt_replenish_thread_.join();
         }
         execution_complete_.store(true, std::memory_order_release);
-        if (collector_thread_.joinable()) {
-            collector_thread_.join();
-        }
         for (auto &thread : collector_threads_) {
             if (thread.joinable()) {
                 thread.join();
@@ -851,8 +873,14 @@ public:
 protected:
     Manager manager_;
     std::atomic<bool> execution_complete_{false};
-    std::thread collector_thread_;
     std::vector<std::thread> collector_threads_;
+
+    // Latched by set_aicpu_thread_num() during Derived::init(); read by the
+    // threads start() spawns. The std::thread constructor is the
+    // synchronization point, so plain ints need no atomic.
+    int queue_count_{PLATFORM_MAX_AICPU_THREADS};
+    int shard_count_{Manager::kMaxCollectorShards};
+    bool thread_num_set_{false};
 
     // Memory context stashed by Derived::init() via set_memory_context().
     // Derived may read these from finalize() / alloc helpers via the
@@ -970,7 +998,7 @@ private:
 
         while (mgmt_running_.load(std::memory_order_relaxed)) {
             bool found_any = false;
-            for (int q = queue_start; q < PLATFORM_MAX_AICPU_THREADS; q += queue_stride) {
+            for (int q = queue_start; q < queue_count_; q += queue_stride) {
                 ReadyEntry entry;
                 while (Alg::try_pop_aicpu_entry(manager_, header, q, entry, true)) {
                     Alg::process_entry(manager_, header, q, entry);
@@ -990,7 +1018,7 @@ private:
             }
         }
 
-        for (int q = queue_start; q < PLATFORM_MAX_AICPU_THREADS; q += queue_stride) {
+        for (int q = queue_start; q < queue_count_; q += queue_stride) {
             ReadyEntry entry;
             while (Alg::try_pop_aicpu_entry(manager_, header, q, entry, true)) {
                 Alg::process_entry(manager_, header, q, entry);
@@ -1024,7 +1052,7 @@ private:
      *      collectors arm this only after a shard has seen traffic, because
      *      an empty shard can be a valid run shape.
      */
-    void poll_and_collect_loop(int shard_index, int shard_count) {
+    void poll_and_collect_loop(int shard_index) {
         const auto wait_tick = std::chrono::milliseconds(100);
         const auto idle_timeout = std::chrono::seconds(Derived::kIdleTimeoutSec);
         std::optional<std::chrono::steady_clock::time_point> idle_start;
@@ -1045,7 +1073,12 @@ private:
                 }
                 break;
             }
-            if (shard_count > 1 && !has_seen_buffer) {
+            // A shard that has never seen a buffer is a valid run shape at any
+            // shard count — a subsystem can legitimately emit nothing for a
+            // whole run. execution_complete_ above is the exit path for that
+            // case; the idle timeout below only guards a shard that saw traffic
+            // and then stalled.
+            if (!has_seen_buffer) {
                 continue;
             }
             if (!idle_start.has_value()) {
@@ -1074,7 +1107,6 @@ private:
         }
     }
 
-    std::thread mgmt_thread_;
     std::vector<std::thread> mgmt_drain_threads_;
     std::thread mgmt_replenish_thread_;
     std::atomic<bool> mgmt_running_{false};
