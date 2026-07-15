@@ -167,7 +167,7 @@ class CCECToolchain(Toolchain):
         else:
             raise ValueError(f"Unknown platform: {self.platform}. Supported: a2a3, a2a3sim, a5, a5sim")
 
-        return [
+        flags = [
             "-c",
             "-O3",
             "-g",
@@ -189,6 +189,11 @@ class CCECToolchain(Toolchain):
             "-cce-aicore-dcci-insert-for-scalar=false",
             "-DMEMORY_BASE",
         ]
+        # A5: VF fusion can reorder same-V ops across expand/abs/sinkhorn and
+        # break DeepSeek-V4 correctness; keep it off by default for a5/a5sim.
+        if self.platform in ("a5", "a5sim"):
+            flags.append("--cce-simd-vf-fusion=false")
+        return flags
 
     def get_cmake_args(self) -> list[str]:
         return [
