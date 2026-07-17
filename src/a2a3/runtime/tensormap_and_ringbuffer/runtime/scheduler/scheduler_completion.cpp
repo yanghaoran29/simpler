@@ -199,6 +199,14 @@ void SchedulerContext::complete_slot_task(
         // profiling-flags-smoke build path where SIMPLER_DFX is OFF and
         // the Resolve emit below is excluded.
         [[maybe_unused]] uint32_t consumers_resolved = 0;
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+        // 修改理由：仅在 on_task_complete 扇出窗口内启用 route_ready_once 的直挂钩子；
+        // 传入本线程 idx 与 SchedulerContext，把新就绪 AIC 写入本线程 defer。
+        sched_->fanout_direct_aic_thread_idx_ = thread_idx;
+        sched_->fanout_direct_aic_sched_ctx_ = this;
+        sched_->fanout_direct_aic_made_progress_ = nullptr;
+        sched_->fanout_direct_aic_try_pushed_ = nullptr;
+#endif
 #if SIMPLER_SCHED_PROFILING
         // SCHED_PROFILING variant takes thread_idx for its per-thread atomic
         // counter side-effects (g_sched_*_atomic_count[thread_idx], consumed
@@ -207,6 +215,13 @@ void SchedulerContext::complete_slot_task(
         consumers_resolved = sched_->on_task_complete(slot_state, thread_idx).fanout_edges;
 #else
         consumers_resolved = sched_->on_task_complete(slot_state);
+#endif
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+        // 修改理由：扇出结束必须清 scope，避免后续非 fanout 的 route_ready_once 误走直挂。
+        sched_->fanout_direct_aic_thread_idx_ = -1;
+        sched_->fanout_direct_aic_sched_ctx_ = nullptr;
+        sched_->fanout_direct_aic_made_progress_ = nullptr;
+        sched_->fanout_direct_aic_try_pushed_ = nullptr;
 #endif
 #if SIMPLER_DFX
         if (resolve_t0 != 0) {

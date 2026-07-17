@@ -19,17 +19,6 @@
 #include "pto_runtime2_types.h"
 #include "spin_hint.h"
 
-// host_build_graph host-orch build: PTO2Runtime embeds PTO2SchedulerState by
-// value, so this header is compiled into the host libhost_runtime.so. The AICPU
-// spin_hint.h that defines PLATFORM_SCHEDULER_TIMEOUT_MS is not on the host
-// include path; supply it here. The value only sizes an on-device scheduler
-// timeout and is never consumed host-side (the scheduler does not run on the
-// host). host_runtime_EXPORTS is CMake's auto-define for the host shared-lib
-// target, so the AICPU/AICore builds keep the real platform constant.
-#ifdef host_runtime_EXPORTS
-constexpr int32_t PLATFORM_SCHEDULER_TIMEOUT_MS = 2000;
-#endif
-
 // =============================================================================
 // Profiling macros (compile-time gated)
 // =============================================================================
@@ -124,7 +113,7 @@ struct alignas(64) CoreExecState {
     uint64_t pending_dispatch_timestamp;  // offset 56: AICPU dispatch timestamp for pending task
 #else
     // --- Cold fields (init/diagnostics only, never in hot path) ---
-    int32_t worker_id;          // offset 48: index in runtime.workers[]
+    int32_t worker_id;          // offset 48: index in runtime.dev.workers[]
     uint32_t physical_core_id;  // offset 52: hardware physical core ID
     CoreType core_type;         // offset 56: AIC or AIV (enum class : int32_t)
     uint8_t pad2_[4];           // offset 60: pad to 64 bytes
@@ -487,6 +476,18 @@ struct SlotTransition {
     bool pending_freed = false;  // pending_occupied can be cleared
     bool matched = false;        // some case was hit (otherwise skip apply)
 };
+
+#ifndef SIMPLER_SCHED_FANOUT_DIRECT_AIC
+// 修改理由：编译开关默认开启 fanout 直挂 AIC；关闭后行为与 main 一致。
+#define SIMPLER_SCHED_FANOUT_DIRECT_AIC 1
+#endif
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+// 修改理由：对外钩子声明——仅单块 AIC（logical_block_num==1、!sync_start、谓词通过、
+// ED==NONE）可在 complete 扇出时 defer，跳过 ready_queues；AIV/MIX/SPMD/已 early-stage
+// 的任务永不进入。实现见 SchedulerContext::enqueue_fanout_direct_aic。
+bool pto2_try_fanout_direct_aic_enqueue(void *sched_ctx, int32_t thread_idx, PTO2TaskSlotState &slot_state);
+#endif
 
 // =============================================================================
 // Profiling counters (compile-time gated)

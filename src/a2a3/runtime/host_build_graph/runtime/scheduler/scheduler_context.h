@@ -94,13 +94,24 @@ public:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
     //  - latches submitted task count from PTO2 shared memory
     //  - folds inline_completed_tasks into completed_tasks_
+    //  - flips orchestrator_done_ and triggers core transition
     //    (skipped on fatal error — emergency_shutdown runs instead)
     // Callers must invoke rt_orchestration_done(rt) before this — that
     // step belongs to the orchestrator lifecycle, not the scheduler.
     void on_orchestration_done(Runtime *runtime, PTO2Runtime *rt, int32_t thread_idx, int32_t total_tasks);
 
-    // Bind the PTO2Runtime scheduler pointer.
+    // Bind the PTO2Runtime scheduler pointer. Required in device-orchestration
+    // mode where rt is created by the orchestrator thread after init().
     void bind_runtime(PTO2Runtime *rt);
+
+    // Serial orch->sched mode pre-dispatch wait. No AICore dispatch happens
+    // before orchestrator_done_.
+    void wait_for_orchestration_done_before_dispatch(Runtime *runtime, int32_t thread_idx);
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：header 内联的 route_ready_once 经 C 钩子调私有 enqueue，需 friend。
+    friend bool pto2_try_fanout_direct_aic_enqueue(void *sched_ctx, int32_t thread_idx, PTO2TaskSlotState &slot_state);
+#endif
 
     // =========================================================================
     // State queries / external synchronization points
@@ -110,6 +121,7 @@ public:
     int32_t aiv_count() const { return aiv_count_; }
     bool is_completed() const { return completed_.load(std::memory_order_acquire); }
     int32_t completed_tasks_count() const { return completed_tasks_.load(std::memory_order_acquire); }
+    bool orchestration_done() const { return orchestrator_done_.load(std::memory_order_relaxed); }
 
 private:
     // =========================================================================
@@ -139,6 +151,14 @@ private:
     // sync_start drain coordination
     SyncStartDrainState drain_state_;
 
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：每调度线程一份线程本地 defer 缓冲——complete 扇出时写入、
+    // dispatch_ready_tasks 在 sync_start 层之后 drain；避免 claim 后只停在 defer 里导致 S3。
+    static constexpr int32_t kFanoutDirectAicPendingCap = 512;
+    PTO2TaskSlotState *fanout_direct_aic_pending_[MAX_AICPU_THREADS][kFanoutDirectAicPendingCap];
+    int32_t fanout_direct_aic_pending_n_[MAX_AICPU_THREADS]{0};
+#endif
+
 #if SIMPLER_DFX
     SchedL2SwimlaneCounters sched_l2_swimlane_[MAX_AICPU_THREADS];
     // Cached once at init() from get_l2_swimlane_level(), AFTER
@@ -149,6 +169,8 @@ private:
     // --- Task-execution tracking ---
     std::atomic<int32_t> completed_tasks_{0};
     int32_t total_tasks_{0};
+    // Device orchestration: set by last orchestrator when graph is built; schedulers poll it.
+    std::atomic<bool> orchestrator_done_{false};
     std::atomic<bool> completed_{false};
     uint64_t *func_id_to_addr_{nullptr};
 
@@ -343,6 +365,26 @@ private:
         int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
     );
 
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：fanout 直挂 AIC 的核心 API——enqueue 做资格/admit/claim+CAS；
+    // drain 在 sync_start 层之后清空 defer（entered_drain 时 flush_to_ready_only，
+    // 保证 claim 后必上核或进 readyQ）；stage 目前仅 idle（pending 另开，勿与 idle 相加）。
+    bool enqueue_fanout_direct_aic(int32_t thread_idx, PTO2TaskSlotState &slot_state);
+    void drain_fanout_direct_aic_pending(
+        int32_t thread_idx, bool &made_progress, bool &try_pushed, bool flush_to_ready_only = false,
+        bool pmu_active = false
+    );
+    bool try_fanout_direct_dispatch_aic(
+        int32_t thread_idx, PTO2TaskSlotState &slot_state, bool *made_progress, bool *try_pushed,
+        bool pmu_active = false
+    );
+    // 修改理由：对齐 run_staging_order 的 AIC-PENDING 门控（无残留 MIX、无对端空闲 AIC、
+    // 且存在安全本地 pending 核）；供后续启用 pending 挂核时复用，避免 Case-3.1。
+    bool fanout_aic_pending_gate_ok(int32_t thread_idx) const;
+    // 修改理由：筛掉已有 pending_slot_state 或 ED 门控中的 running 核，防止错误挂 pending。
+    CoreTracker::BitStates fanout_aic_safe_pending_cores(int32_t thread_idx) const;
+#endif
+
     // Shared staging order for both dispatch sources (normal ready + speculative early):
     // MIX strict priority, IDLE stage before PENDING stage, cross-thread idle gating
     // (MIX-IDLE ▶ c/v-IDLE ▶ MIX-PEND ▶ c/v-PEND). `stage(shape, phase)` stages that
@@ -457,6 +499,27 @@ private:
     // pre-dispatch / WAIT-only deadlock (e.g. dependency cycle) and the
     // ownerless idle threads are the only observers — let one of them latch.
     bool no_thread_owns_running_task() const;
+
+    // One-glance classification of a no-progress timeout, derived from state the
+    // scheduler already holds at the stall. Reduces the multi-state snapshot to a
+    // dominant PTO2_STALL_DETAIL_* sub-class plus a few locator fields, which
+    // handle_timeout_exit propagates to host alongside the unchanged code 100.
+    struct StallClassification {
+        int32_t detail;         // PTO2_STALL_DETAIL_*
+        int32_t cnt_running;    // tasks observed RUNNING (on a core)
+        int32_t cnt_ready;      // fanin-satisfied but not dispatched
+        int32_t cnt_waiting;    // still waiting on fanin
+        int32_t completed;      // completed_tasks_ snapshot
+        int32_t total;          // total_tasks_ snapshot
+        int32_t orch_done;      // orchestrator_done flag (0/1)
+        int64_t stuck_task_id;  // S1: first RUNNING task's id (-1 if none)
+        int32_t stuck_core;     // S1: core hosting it (-1 if none)
+    };
+
+    // Scan the rings once (same ground truth as log_stall_diagnostics: a slot is
+    // RUNNING iff a core holds it as running_slot_state) and reduce to a
+    // StallClassification. Pure reads — safe to call from any scheduler thread.
+    __attribute__((noinline, cold)) StallClassification classify_stall_reason() const;
 
     __attribute__((noinline, cold)) int32_t handle_timeout_exit(
         int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime, int32_t idle_iterations,

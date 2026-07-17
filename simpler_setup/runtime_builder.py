@@ -339,6 +339,26 @@ class RuntimeBuilder:
         build_pto_isa_commit = self._resolve_build_pto_isa_commit()
         cache_stamp = self._build_cache_stamp(build_pto_isa_commit)
 
+        def _scheduler_cmake_defines() -> dict[str, str]:
+            # 修改理由：把环境变量 SIMPLER_SCHED_FANOUT_DIRECT_AIC 传入 aicpu cmake，
+            # 便于不改源码即可开关 fanout 直挂做 A/B 与回退（默认由头文件宏开启）。
+            defines: dict[str, str] = {}
+            if os.environ.get("SIMPLER_SCHED_FANOUT_DIRECT_AIC", "").upper() in {
+                "0",
+                "OFF",
+                "FALSE",
+                "NO",
+            }:
+                defines["SIMPLER_SCHED_FANOUT_DIRECT_AIC"] = "0"
+            elif os.environ.get("SIMPLER_SCHED_FANOUT_DIRECT_AIC", "").upper() in {
+                "1",
+                "ON",
+                "TRUE",
+                "YES",
+            }:
+                defines["SIMPLER_SCHED_FANOUT_DIRECT_AIC"] = "1"
+            return defines
+
         def _compile_target(target: str) -> Path:
             include_dirs, source_dirs = self._resolve_target_dirs(config_dir, build_config, target)
             cmake_defines = None
@@ -357,6 +377,10 @@ class RuntimeBuilder:
                 }:
                     defines["SIMPLER_ENABLE_PTO_SDMA_WORKSPACE"] = "ON"
                 cmake_defines = defines or None
+            elif target == "aicpu":
+                # 修改理由：仅 aicpu 目标注入 fanout 宏；host/aicore 不需要该调度路径。
+                sched_defines = _scheduler_cmake_defines()
+                cmake_defines = sched_defines or None
             # compile() adds a {target}/ subdirectory inside build_dir
             cache_dir = self._CACHE_DIR / arch / variant / name
             cache_dir.mkdir(parents=True, exist_ok=True)

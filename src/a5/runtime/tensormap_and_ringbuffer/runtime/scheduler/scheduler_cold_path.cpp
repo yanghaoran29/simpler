@@ -186,8 +186,11 @@ void format_core_status(
         );
     } else {
         snprintf(
-            buf, buf_size, "core%d(busy kernel=%d task=%" PRId64 " cond_reg_state=%s ANOMALY)", core_id, kernel,
-            task_id_raw, cond_reg_state_str
+            buf, buf_size,
+            "core%d(busy kernel=%d task=%" PRId64
+            " cond_reg_state=%s ANOMALY cond_tok=%d running_tok=%d pending_tok=%d)",
+            core_id, kernel, task_id_raw, cond_reg_state_str, EXTRACT_TASK_ID(cond_reg),
+            core_state->running_reg_task_id, core_state->pending_reg_task_id
         );
     }
 }
@@ -323,7 +326,7 @@ void SchedulerContext::log_stall_diagnostics(
         bool aiv0_idle = tracker.is_aiv0_core_idle(offset);
         bool aiv1_idle = tracker.is_aiv1_core_idle(offset);
         int32_t cluster_id = cli * ast + thread_idx;
-        char aic_buf[128], aiv0_buf[128], aiv1_buf[128];
+        char aic_buf[192], aiv0_buf[192], aiv1_buf[192];
         format_core_status(
             aic_buf, sizeof(aic_buf), aic_id, aic_idle, &core_exec_states_[aic_id], core_exec_states_[aic_id].reg_addr
         );
@@ -396,6 +399,24 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
                     PTO2TaskDescriptor *task_ptr = slot_state.task;
                     cls.stuck_task_id = (task_ptr != nullptr) ? static_cast<int64_t>(task_ptr->task_id.raw) : -1;
                     cls.stuck_core = run_core;
+                }
+                cnt_running++;
+                continue;
+            }
+            // 修改理由：仅挂在 pending_slot_state 上的任务不得计为 READY——否则“有
+            // pending、核全空闲”会被误判成 S3:ready-but-all-idle，掩盖真实挂起。
+            int32_t pend_core = -1;
+            for (int32_t cid = 0; cid < cores_total_num_; cid++) {
+                if (core_exec_states_[cid].pending_slot_state == &slot_state) {
+                    pend_core = cid;
+                    break;
+                }
+            }
+            if (pend_core >= 0) {
+                if (cnt_running == 0) {
+                    PTO2TaskDescriptor *task_ptr = slot_state.task;
+                    cls.stuck_task_id = (task_ptr != nullptr) ? static_cast<int64_t>(task_ptr->task_id.raw) : -1;
+                    cls.stuck_core = pend_core;
                 }
                 cnt_running++;
                 continue;
@@ -504,8 +525,8 @@ void SchedulerContext::log_l2_swimlane_summary(int32_t thread_idx, [[maybe_unuse
         cycles_to_us(sched_end_ts - l2_swimlane.sched_start_ts)
     );
 
-    uint64_t sched_total = l2_swimlane.sched_complete_cycle + l2_swimlane.sched_scan_cycle +
-                           l2_swimlane.sched_dispatch_cycle + l2_swimlane.sched_idle_cycle;
+    uint64_t sched_total =
+        l2_swimlane.sched_complete_cycle + l2_swimlane.sched_dispatch_cycle + l2_swimlane.sched_idle_cycle;
     if (sched_total == 0) sched_total = 1;
 
     {
@@ -598,11 +619,6 @@ void SchedulerContext::log_l2_swimlane_summary(int32_t thread_idx, [[maybe_unuse
         );
 
         LOG_INFO_V9(
-            "Thread %d:   scan           : %.3fus (%.1f%%)", thread_idx, cycles_to_us(l2_swimlane.sched_scan_cycle),
-            l2_swimlane.sched_scan_cycle * 100.0 / sched_total
-        );
-
-        LOG_INFO_V9(
             "Thread %d:   idle           : %.3fus (%.1f%%)", thread_idx, cycles_to_us(l2_swimlane.sched_idle_cycle),
             l2_swimlane.sched_idle_cycle * 100.0 / sched_total
         );
@@ -623,7 +639,7 @@ void SchedulerContext::log_l2_swimlane_summary(int32_t thread_idx, [[maybe_unuse
 #endif
 
 // =============================================================================
-// Shutdown: deinit AICore regs for this thread's cores.
+// Shutdown: deinit AICore regs for this thread's cores (and PMU finalize if enabled).
 // Orchestrator threads have core_trackers_[thread_idx].core_num() == 0 -> no-op.
 // platform_deinit_aicore_regs is idempotent; safe to call after early completion.
 // =============================================================================
@@ -633,7 +649,6 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
     if (core_num == 0) return 0;
 
 #if SIMPLER_DFX
-    // Restore PMU CTRL registers for this thread's cores before AICore shutdown
     if (is_pmu_enabled()) {
         pmu_aicpu_finalize(cores, core_num);
     }
@@ -891,31 +906,27 @@ int32_t SchedulerContext::pre_handshake_init(
 
 #if SIMPLER_DFX
     // l2_swimlane_aicpu_init promotes g_l2_swimlane_level from the shared-memory
-    // header — must be called BEFORE the orchestrator thread caches the level
-    // via rt->orchestrator.l2_swimlane_level = get_l2_swimlane_level() in
-    // AicpuExecutor::run(). Otherwise the cached value would still be DISABLED
-    // (only the binary enable bit has been seeded by kernel.cpp at this point),
-    // and the CYCLE_COUNT_START() gate in pto_orchestrator.cpp would suppress
-    // all ORCH_PHASES records. Reset the cached level on disabled runs so a
+    // header — must be called BEFORE caching the level, otherwise the cached
+    // value would still be 0 (only the binary enable bit has been seeded by
+    // kernel.cpp at this point). Reset the cached level on disabled runs so a
     // prior enabled launch's level can't leak into the phase-record gates in
-    // scheduler_dispatch (`>= SCHED_PHASES`). This runs on the leader before it
-    // publishes hs_setup_done_, so it happens-before every thread's
-    // handshake_partition (and therefore before any aicpu_ready=1 write).
+    // scheduler_dispatch. This runs on the leader before it publishes
+    // hs_setup_done_, so it happens-before every thread's handshake_partition
+    // (and therefore before any aicpu_ready=1 write).
     if (is_l2_swimlane_enabled()) {
         l2_swimlane_aicpu_init(runtime->dev.worker_count);
         l2_swimlane_level_ = get_l2_swimlane_level();
         if (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES) {
-            // Sched phase pool count = number of scheduler threads.
-            // This block runs before assign_cores_to_threads, so the
+            // Sched-phase pool count must match the dump_args_init thread count
+            // below. This block runs before assign_cores_to_threads, so the
             // active_sched_threads_ member isn't set yet — recompute the same
-            // normalization locally: sched_thread_num_ <= 0 is the "use all
-            // AICPU threads as scheduler threads" sentinel (see
-            // assign_cores_to_threads' active_sched_threads_). Without this
-            // normalization here, init_phase would prime zero sched pools
-            // and all sched_phase emits would silently drop.
+            // normalization locally: sched_thread_num_ <= 0 means "use all AICPU
+            // threads as scheduler threads" (see assign_cores_to_threads'
+            // active_sched_threads_). Without it, init_phase would prime zero
+            // sched pools and all sched_phase emits would silently drop.
             const int sched_phase_threads = (sched_thread_num_ > 0) ? sched_thread_num_ : aicpu_thread_num_;
-            // Orch phase is a single instance (PR #971 design), so the orch
-            // pool count is always 1.
+            // Orchestration is always single-threaded, so orch-phase is one pool
+            // (ordinal 0) — see record_orch_phase.
             const int orch_phase_threads = 1;
             l2_swimlane_aicpu_init_phase(runtime->dev.worker_count, sched_phase_threads, orch_phase_threads);
         }
@@ -1004,12 +1015,12 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
         // more than the scope cap. This rejects any garbage pattern (negative
         // or positive), so uninitialized rings contribute 0 (the correct boot
         // count) while valid counts still add up, with no signed overflow.
-        int64_t task_count = 0;
+        int64_t pto2_count = 0;
         for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
             int32_t ring_tasks = header->rings[r].fc.current_task_index.load(std::memory_order_acquire);
-            if (ring_tasks > 0 && ring_tasks <= PTO2_SCOPE_TASKS_CAP) task_count += ring_tasks;
+            if (ring_tasks > 0 && ring_tasks <= PTO2_SCOPE_TASKS_CAP) pto2_count += ring_tasks;
         }
-        total_tasks_ = static_cast<int32_t>(task_count);
+        total_tasks_ = static_cast<int32_t>(pto2_count);
     } else {
         total_tasks_ = 0;
     }
@@ -1040,6 +1051,35 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
         }
     }
 
+    // Prefill the per-dispatch AsyncCtx constant fields once. Of AsyncCtx's five
+    // fields, four are constant for a given (core, buf_idx): the three pointers
+    // target the fixed deferred_slab_per_core_[core][buf] members, and capacity is
+    // MAX_COMPLETIONS_PER_TASK. Only task_token varies per dispatch, so build_payload
+    // writes just that; these constants survive across dispatches because the
+    // payload buffer is never zeroed between them.
+    // The two context-pointer args are also per-(core, buf_idx) constants — they
+    // target this buffer's own local_context / global_context — so prefill them
+    // here too and drop them from the per-dispatch build_payload writes. This keeps
+    // the per-dispatch write footprint on the CL0 control block only (args[48]/[49]
+    // live on a later line).
+    for (int32_t core_id = 0; core_id < RUNTIME_MAX_WORKER; core_id++) {
+        for (int32_t buf = 0; buf < 2; buf++) {
+            PTO2DispatchPayload &dp = payload_per_core_[core_id][buf];
+            AsyncCtx &ac = dp.local_context.async_ctx;
+            volatile DeferredCompletionSlab *slab = &deferred_slab_per_core_[core_id][buf];
+            ac.completion_count = &slab->count;
+            ac.completion_error_code = &slab->error_code;
+            ac.completion_entries = &slab->entries[0];
+            ac.completion_capacity = MAX_COMPLETIONS_PER_TASK;
+            // Clear the slab once here; thereafter only the completion path re-clears
+            // count (and only when a deferred task dirtied it), never per dispatch.
+            slab->count = 0;
+            slab->error_code = PTO2_ERROR_NONE;
+            dp.args[PAYLOAD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.local_context);
+            dp.args[PAYLOAD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.global_context);
+        }
+    }
+
     func_id_to_addr_ = runtime->dev.func_id_to_addr_;
 
     return 0;
@@ -1054,11 +1094,14 @@ void SchedulerContext::deinit() {
     }
 
     // No per-core memset of payload_per_core_ / deferred_slab_per_core_ here
-    // (~300 KB across all cores). Both are fully re-initialized at dispatch
-    // before they can be read: dispatch_task sets deferred_slab->count = 0 /
-    // error_code = NONE and build_payload() overwrites every payload field
-    // (function addr, args[], contexts, not_ready) on the exact [core][buf_idx]
-    // about to run. The consumer side cannot reach a stale slot either: the
+    // (~300 KB across all cores). They are re-initialized before they can be read:
+    // build_payload() overwrites the per-dispatch payload fields (function addr,
+    // args[0..num_args) or src_payload, block_idx/block_num, async_ctx.task_token)
+    // on the exact [core][buf_idx] about to run; the async_ctx slab pointers +
+    // capacity, the two context-pointer args, and the deferred slab (count = 0 /
+    // error_code = NONE) are all cleared once per run in init() — the slab is
+    // thereafter re-cleared only by the completion path after a deferred task.
+    // The consumer side cannot reach a stale slot either: the
     // drain only services a core's running_reg_task_id, and the loop above
     // already reset every core_exec_states_[].running/pending_reg_task_id to
     // AICPU_TASK_INVALID — so no FIN for an undispatched slot is processed, and
@@ -1069,6 +1112,9 @@ void SchedulerContext::deinit() {
     drain_state_.sync_start_pending.store(0, std::memory_order_release);
     drain_state_.drain_worker_elected.store(0, std::memory_order_release);
     drain_state_.drain_ack_mask.store(0, std::memory_order_release);
+    drain_state_.drain_stage_go.store(0, std::memory_order_release);
+    drain_state_.drain_stage_done_mask.store(0, std::memory_order_release);
+    drain_state_.drain_running_staged.store(0, std::memory_order_release);
     drain_state_.pending_task.store(nullptr, std::memory_order_release);
 
     // Reset task counters and orchestrator state
@@ -1119,7 +1165,9 @@ void SchedulerContext::on_orchestration_done(
 ) {
 #if SIMPLER_DFX
     if (l2_swimlane_level_ >= L2SwimlaneLevel::ORCH_PHASES) {
-        // Flush orchestrator's phase record buffer (orch pool, ordinal 0)
+        // Flush the orchestrator's orch-phase buffer (single instance, pool 0).
+        // The orchestrator has no scheduler-phase pool of its own — those belong
+        // to the scheduler threads and are flushed in scheduler_dispatch.
         l2_swimlane_aicpu_flush_orch_phase_buffer(thread_idx);
     }
 #endif

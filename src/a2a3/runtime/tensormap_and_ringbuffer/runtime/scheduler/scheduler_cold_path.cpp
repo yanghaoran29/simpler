@@ -403,6 +403,24 @@ SchedulerContext::StallClassification SchedulerContext::classify_stall_reason() 
                 cnt_running++;
                 continue;
             }
+            // 修改理由：仅挂在 pending_slot_state 上的任务不得计为 READY——否则“有
+            // pending、核全空闲”会被误判成 S3:ready-but-all-idle，掩盖真实挂起。
+            int32_t pend_core = -1;
+            for (int32_t cid = 0; cid < cores_total_num_; cid++) {
+                if (core_exec_states_[cid].pending_slot_state == &slot_state) {
+                    pend_core = cid;
+                    break;
+                }
+            }
+            if (pend_core >= 0) {
+                if (cnt_running == 0) {
+                    PTO2TaskDescriptor *task_ptr = slot_state.task;
+                    cls.stuck_task_id = (task_ptr != nullptr) ? static_cast<int64_t>(task_ptr->task_id.raw) : -1;
+                    cls.stuck_core = pend_core;
+                }
+                cnt_running++;
+                continue;
+            }
             int32_t rc = slot_state.fanin_refcount.load(std::memory_order_relaxed);
             int32_t fi = slot_state.fanin_count;
             if (rc >= fi) {

@@ -11,6 +11,7 @@
 #ifndef SCHEDULER_CONTEXT_H
 #define SCHEDULER_CONTEXT_H
 
+#include "aicpu/platform_regs.h"
 #include "common/l2_swimlane_profiling.h"
 #include "common/unified_log.h"
 #include "scheduler_types.h"
@@ -18,12 +19,13 @@
 #include "scheduler/pto_scheduler.h"
 
 #include "aicore_completion_mailbox.h"
+#include "pto2_dispatch_payload.h"
 
 // These macros are defined in runtime.h, but we cannot include it here
 // (it pulls in Handshake which we only forward-declare).  Mirror the
 // authoritative values so the class layout compiles standalone.
 #ifndef RUNTIME_MAX_WORKER
-#define RUNTIME_MAX_WORKER 108
+#define RUNTIME_MAX_WORKER 72
 #endif
 #ifndef RUNTIME_MAX_FUNC_ID
 #define RUNTIME_MAX_FUNC_ID 1024
@@ -106,6 +108,11 @@ public:
     // before orchestrator_done_.
     void wait_for_orchestration_done_before_dispatch(Runtime *runtime, int32_t thread_idx);
 
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：header 内联的 route_ready_once 经 C 钩子调私有 enqueue，需 friend。
+    friend bool pto2_try_fanout_direct_aic_enqueue(void *sched_ctx, int32_t thread_idx, PTO2TaskSlotState &slot_state);
+#endif
+
     // =========================================================================
     // State queries / external synchronization points
     // =========================================================================
@@ -144,6 +151,14 @@ private:
     // sync_start drain coordination
     SyncStartDrainState drain_state_;
 
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：每调度线程一份线程本地 defer 缓冲——complete 扇出时写入、
+    // dispatch_ready_tasks 在 sync_start 层之后 drain；避免 claim 后只停在 defer 里导致 S3。
+    static constexpr int32_t kFanoutDirectAicPendingCap = 512;
+    PTO2TaskSlotState *fanout_direct_aic_pending_[MAX_AICPU_THREADS][kFanoutDirectAicPendingCap];
+    int32_t fanout_direct_aic_pending_n_[MAX_AICPU_THREADS]{0};
+#endif
+
 #if SIMPLER_DFX
     SchedL2SwimlaneCounters sched_l2_swimlane_[MAX_AICPU_THREADS];
     // Cached once at init() from get_l2_swimlane_level(), AFTER
@@ -181,17 +196,15 @@ private:
     // handshake_partition; checked by the leader in post_handshake_init.
     std::atomic<bool> handshake_failed_{false};
 
-#if SIMPLER_DFX
-    // Physical core ids keyed by logical worker id. Populated by
-    // handshake_all_cores() and handed to pmu_aicpu_init() so the platform
-    // can resolve per-core PMU MMIO bases. Only needed when SIMPLER_DFX=1
-    // — without it, PMU is compiled out and core_exec_states_ already
-    // carries the field.
-    uint32_t physical_core_ids_[RUNTIME_MAX_WORKER]{};
-#endif
-
     // Platform AICore-register base array (set by AicpuExecutor before init()).
     uint64_t regs_{0};
+
+#if SIMPLER_DFX
+    // PMU profiling: physical core IDs for PMU MMIO base resolution.
+    // Separate storage because CoreExecState's 64-byte budget has no room for
+    // physical_core_id when SIMPLER_DFX=1.
+    uint32_t physical_core_ids_[RUNTIME_MAX_WORKER]{};
+#endif
 
     // =========================================================================
     // Core management (scheduler_cold_path.cpp)
@@ -225,32 +238,116 @@ private:
         return "?";
     }
 
-    int pop_ready_tasks_batch(PTO2ResourceShape shape, int32_t thread_idx, PTO2TaskSlotState **out, int max_count);
+    int pop_ready_tasks_batch(
+        PTO2ReadyQueue *queues, PTO2ResourceShape shape, int32_t thread_idx, PTO2TaskSlotState **out, int max_count
+    );
 
     void build_payload(
         PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
-        const AsyncCtx &async_ctx, int32_t block_idx
+        int32_t block_idx, bool force_gate
     );
 
-    void dispatch_subtask_to_core(
-        Runtime *runtime, int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state,
-        PTO2SubtaskSlot subslot, bool to_pending, int32_t block_idx
+    // Batched-dispatch primitives. prepare_* builds the payload and per-core
+    // state; publish_* issues the MMIO register write. Callers must wmb()
+    // between the prepare batch and the publish batch, then sample
+    // get_sys_cnt_aicpu() once and pass it to publish_* for every handle.
+    //
+    // dispatch_timestamp_slot points to the CoreExecState slot
+    // (pending_dispatch_timestamp / running_dispatch_timestamp) selected at
+    // prepare time, or nullptr when L2 swimlane is below AICPU_TIMING and no
+    // dispatch timestamp is being recorded.
+    struct PublishHandle {
+        uint64_t reg_addr;
+        uint32_t reg_task_id;
+        int32_t core_offset;
+        uint64_t *dispatch_timestamp_slot;
+    };
+
+    PublishHandle prepare_subtask_to_core(
+        int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
+        bool to_pending, int32_t block_idx, bool force_gate
     );
 
-    void dispatch_mix_block_to_cluster(
-        Runtime *runtime, int32_t thread_idx, int32_t cluster_offset, PTO2TaskSlotState &slot_state, bool to_pending,
-        int32_t block_idx
-    );
+    inline void publish_subtask_to_core(const PublishHandle &h, uint64_t dispatch_ts) {
+        if (h.dispatch_timestamp_slot != nullptr) {
+            *h.dispatch_timestamp_slot = dispatch_ts;
+        }
+        write_reg(h.reg_addr, RegId::DATA_MAIN_BASE, static_cast<uint64_t>(h.reg_task_id));
+    }
 
-    void dispatch_block(
-        Runtime *runtime, int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state,
-        PTO2ResourceShape shape, bool to_pending, int32_t block_idx
+    // Prefetch the cold per-core structures the next block's prepare touches.
+    // Ordering is load-bearing: issue the STALLING LOAD first — CoreExecState,
+    // read by dispatch_seq++ whose value feeds reg_task_id -> buf_idx -> the whole
+    // dispatch — for every core of the block, BEFORE the store-target prefetches.
+    // MSHRs saturate (a MIX block warms 3 cores); issuing the read prefetches
+    // first keeps them from being the ones dropped. The dispatch-buffer writes
+    // still get prefetched (measured to help ~30% on this shallow-store-buffer
+    // control core), just after the reads. rw=1 on CoreExecState (read AND
+    // written) gives Exclusive, serving both without a Shared->Exclusive upgrade.
+    inline void prefetch_block_dst(int32_t thread_idx, int32_t core_offset, bool is_mix) {
+        CoreTracker &tracker = core_trackers_[thread_idx];
+        int32_t cids[3] = {};
+        int32_t nc = 0;
+        if (is_mix) {
+            cids[nc++] = tracker.get_core_id_by_offset(tracker.get_aic_core_offset(core_offset));
+            cids[nc++] = tracker.get_core_id_by_offset(tracker.get_aiv0_core_offset(core_offset));
+            cids[nc++] = tracker.get_core_id_by_offset(tracker.get_aiv1_core_offset(core_offset));
+        } else {
+            cids[nc++] = tracker.get_core_id_by_offset(core_offset);
+        }
+        // Stalling loads first.
+        for (int32_t i = 0; i < nc; i++)
+            __builtin_prefetch(&core_exec_states_[cids[i]], 1, 3);
+        // Store targets after (dispatch buffer CL0 control + CL1 args, both bufs).
+        for (int32_t i = 0; i < nc; i++) {
+            for (int32_t buf = 0; buf < 2; buf++) {
+                const char *dp = reinterpret_cast<const char *>(&payload_per_core_[cids[i]][buf]);
+                __builtin_prefetch(dp, 1, 3);
+                __builtin_prefetch(dp + 64, 1, 3);
+            }
+        }
+    }
+
+    // Fan out one block's subtasks (1 for AIC/AIV, 1-3 for MIX) into the
+    // caller-supplied handles buffer. Returns the number of handles written.
+    int prepare_block_for_dispatch(
+        int32_t thread_idx, int32_t core_offset, PTO2TaskSlotState &slot_state, PTO2ResourceShape shape,
+        bool to_pending, int32_t block_idx, PublishHandle *out_handles, bool force_gate = false
     );
 
     void dispatch_shape(
-        Runtime *runtime, int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
+        int32_t thread_idx, PTO2ReadyQueue *disp_queues, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
         CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
     );
+
+    // Early-dispatch (Hook 1). Mirrors dispatch_ready_tasks: owns its
+    // own gating (off-PMU, this thread has a spare slot, and no normal ready work
+    // is queued) and sets made_progress / try_pushed when it stages, so the caller
+    // is a single unconditional call like normal dispatch. After normal dispatch
+    // leaves idle cores spare, pre-stage the consumers of any RUNNING flagged
+    // producer onto those cores with a non-zero src_payload (gated). Touches no dependency
+    // state — the task is released by the doorbell at its normal ready-pop (Hook 2).
+    int32_t try_early_dispatch(
+        int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
+    );
+
+    // Stage the already-claimed range [start, start+count) of consumer `c` onto
+    // thread_idx's idle (RUNNING slot) then pending (gated-pending, promote-on-FIN)
+    // cores from the provided free-core sets. The caller claims next_block_idx and
+    // re-pushes `c` BEFORE calling, so this expensive prepare+publish runs
+    // concurrently with peers (mirrors the normal SPMD dispatch path). Returns the
+    // number of blocks staged.
+    int32_t stage_consumer_blocks(
+        int32_t thread_idx, PTO2TaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
+        CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
+    );
+
+    // Early-dispatch analog of dispatch_shape: drain early_dispatch_queues[shape] and
+    // pre-stage claimed block ranges onto this thread's free cores of `shape` for the
+    // given phase (IDLE -> onto idle cores in the RUNNING slot; PENDING -> onto a
+    // running core's gated pending slot). Pop is sized to the shape's capacity exactly
+    // as dispatch_shape sizes normal dispatch. Returns the number of blocks staged.
+    int32_t early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase);
 
     // One pass of "Phase 4" in the resolve_and_dispatch loop: IDLE-stage dispatch
     // for MIX then (if no mix residual) AIC/AIV; then PENDING-stage dispatch with
@@ -265,9 +362,38 @@ private:
     // not unbounded — once mix completes on at least one cluster, the next
     // pass either drains the residual or admits AIC/AIV.
     void dispatch_ready_tasks(
-        Runtime *runtime, int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress,
-        bool &try_pushed
+        int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
     );
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：fanout 直挂 AIC 的核心 API——enqueue 做资格/admit/claim+CAS；
+    // drain 在 sync_start 层之后清空 defer（entered_drain 时 flush_to_ready_only，
+    // 保证 claim 后必上核或进 readyQ）；stage 目前仅 idle（pending 另开，勿与 idle 相加）。
+    bool enqueue_fanout_direct_aic(int32_t thread_idx, PTO2TaskSlotState &slot_state);
+    void drain_fanout_direct_aic_pending(
+        int32_t thread_idx, bool &made_progress, bool &try_pushed, bool flush_to_ready_only = false,
+        bool pmu_active = false
+    );
+    bool try_fanout_direct_dispatch_aic(
+        int32_t thread_idx, PTO2TaskSlotState &slot_state, bool *made_progress, bool *try_pushed,
+        bool pmu_active = false
+    );
+    // 修改理由：对齐 run_staging_order 的 AIC-PENDING 门控（无残留 MIX、无对端空闲 AIC、
+    // 且存在安全本地 pending 核）；供后续启用 pending 挂核时复用，避免 Case-3.1。
+    bool fanout_aic_pending_gate_ok(int32_t thread_idx) const;
+    // 修改理由：筛掉已有 pending_slot_state 或 ED 门控中的 running 核，防止错误挂 pending。
+    CoreTracker::BitStates fanout_aic_safe_pending_cores(int32_t thread_idx) const;
+#endif
+
+    // Shared staging order for both dispatch sources (normal ready + speculative early):
+    // MIX strict priority, IDLE stage before PENDING stage, cross-thread idle gating
+    // (MIX-IDLE ▶ c/v-IDLE ▶ MIX-PEND ▶ c/v-PEND). `stage(shape, phase)` stages that
+    // shape+phase bucket for the source and returns true to STOP the pass (normal returns
+    // true when it enters drain mode; early always returns false). `residual_mix()` reports
+    // whether MIX work remains queued for the source (normal reads ready_queues[MIX], early
+    // reads early_dispatch_queues[MIX]). IDLE runs under PMU; PENDING is withheld under PMU.
+    template <typename StageFn, typename ResidualMixFn>
+    void run_staging_order(int32_t thread_idx, bool pmu_active, StageFn &&stage, ResidualMixFn &&residual_mix);
 
     // Returns true if any *other* scheduler thread currently has an idle core
     // matching `shape`. Used as a scheduling hint on the PENDING dispatch path
@@ -284,12 +410,29 @@ private:
         return sched_->ready_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
     }
 
+    // Tier-0 analog of has_residual_mix for the ready sync_start lane: true if MIX
+    // sync_start cohorts remain queued, so the Tier-0 pass keeps MIX strict priority
+    // over its own AIC/AIV sync work. Same relaxed-size snapshot caveat.
+    bool has_residual_sync_mix() const {
+        return sched_->ready_sync_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
+    }
+
+    // Early-dispatch analog of has_residual_mix: true if MIX early-dispatch candidates
+    // remain queued. has_residual_mix reads the normal MIX ready queue, which is empty
+    // whenever the Phase-4b early pass runs (it is gated on all ready_queues being
+    // empty), so early-dispatch MIX priority needs its own residual check against
+    // early_dispatch_queues[MIX]. Same relaxed-size snapshot caveat as has_residual_mix.
+    bool has_residual_early_mix() const {
+        return sched_->early_dispatch_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
+    }
+
     // =========================================================================
     // Completion & drain (scheduler_completion.cpp)
     // =========================================================================
 
-    static SlotTransition
-    decide_slot_transition(int32_t reg_task_id, int32_t reg_state, int32_t running_id, int32_t pending_id);
+    static SlotTransition decide_slot_transition(
+        int32_t reg_task_id, int32_t reg_state, int32_t running_id, int32_t pending_id, bool pending_gated = false
+    );
 
     void complete_slot_task(
         PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, PTO2SubtaskSlot subslot, int32_t thread_idx,
@@ -310,9 +453,15 @@ private:
     );
 
     bool enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num);
-    int32_t count_global_available(PTO2ResourceShape shape, uint8_t core_mask);
-    void drain_worker_dispatch(Runtime *runtime, int32_t block_num);
-    void handle_drain_mode(Runtime *runtime, int32_t thread_idx);
+    int32_t count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending = false);
+    // One thread's share of the drain: CAS-claim block indices and stage them onto THIS
+    // thread's own cores (parallel with peers), returning the number of running-slot cores
+    // staged (the rendezvous seed contribution).
+    int32_t drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated);
+    // out_stage_wall_cycles (profiling only): cycles this thread spent in drain_stage_cores
+    // (prepare + publish), set ONLY on threads that actually staged. Lets the caller isolate
+    // the pure stage wall from the ack-barrier + finalize spans in the Drain bar.
+    void handle_drain_mode(int32_t thread_idx, uint64_t *out_stage_wall_cycles = nullptr);
 
     // =========================================================================
     // Cold path: exit checks, stall diagnostics, profiling (scheduler_cold_path.cpp)

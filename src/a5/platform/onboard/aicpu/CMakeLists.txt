@@ -84,6 +84,12 @@ target_compile_options(aicpu_kernel
         $<$<COMPILE_LANGUAGE:C>:-std=gnu11>
 )
 
+if(DEFINED SIMPLER_SCHED_FANOUT_DIRECT_AIC)
+    # 修改理由：允许 runtime_builder / 手动 cmake -D 覆盖默认宏，开关 fanout 直挂 AIC。
+    target_compile_definitions(aicpu_kernel PRIVATE
+        SIMPLER_SCHED_FANOUT_DIRECT_AIC=${SIMPLER_SCHED_FANOUT_DIRECT_AIC})
+endif()
+
 target_include_directories(aicpu_kernel
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

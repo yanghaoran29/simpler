@@ -31,6 +31,11 @@
 
 #include <atomic>
 
+#ifndef SIMPLER_SCHED_FANOUT_DIRECT_AIC
+// 修改理由：默认开启 fanout 直挂 AIC；可用 cmake/环境变量关掉，便于 A/B 与回退。
+#define SIMPLER_SCHED_FANOUT_DIRECT_AIC 1
+#endif
+
 #include "common/core_type.h"
 #include "common/memory_barrier.h"
 #include "utils/device_arena.h"
@@ -41,6 +46,10 @@
 #include "pto_shared_memory.h"
 
 #include "aicpu/device_time.h"  // get_sys_cnt_aicpu (weak; used by early-dispatch doorbell timing too)
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+// 修改理由：route_ready_once 在 header 内联，需前向声明 enqueue，实现放在 dispatch.cpp。
+bool pto2_try_fanout_direct_aic_enqueue(void *sched_ctx, int32_t thread_idx, PTO2TaskSlotState &slot_state);
+#endif
 #if SIMPLER_SCHED_PROFILING
 #define PTO2_SCHED_CYCLE_START() uint64_t _st0 = get_sys_cnt_aicpu(), _st1
 #define PTO2_SCHED_CYCLE_LAP(acc)   \
@@ -514,6 +523,16 @@ struct PTO2SchedulerState {
     // Dependency-only tasks (active_mask is empty, shape == DUMMY). Drained by
     // the dispatch loop and completed inline -- never goes to AICore.
     PTO2ReadyQueue dummy_ready_queue;
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：仅在 on_task_complete 的 fanout 游走期间有效；把 SchedulerContext
+    // 与本线程 idx 传给 route_ready_once，以便把新就绪的 AIC 记入本线程 defer，
+    // 而不是立刻 push 进共享 ready_queues（缩短 ready 往返）。
+    int32_t fanout_direct_aic_thread_idx_{-1};
+    void *fanout_direct_aic_sched_ctx_{nullptr};
+    bool *fanout_direct_aic_made_progress_{nullptr};
+    bool *fanout_direct_aic_try_pushed_{nullptr};
+#endif
 
     alignas(64) AsyncWaitList async_wait_list;
 
@@ -1008,6 +1027,22 @@ struct PTO2SchedulerState {
     }
 
     bool route_ready_once(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+        // 修改理由：shape 提前取出，供 fanout 钩子与后续入队共用，避免重复 to_shape()。
+        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+        // 修改理由：complete 扇出解锁的单块 AIC，若本线程有空闲核则走 defer 直挂，
+        // 跳过 readyQ；失败则回落原 claim+入队路径。勿抢 early-dispatch STAGING
+        // 消费者（由 enqueue 内 ED 检查保证），否则门铃不响会 S1。
+        if (shape == PTO2ResourceShape::AIC && slot_state.logical_block_num == 1 &&
+            fanout_direct_aic_sched_ctx_ != nullptr && fanout_direct_aic_thread_idx_ >= 0) {
+            if (pto2_try_fanout_direct_aic_enqueue(
+                    fanout_direct_aic_sched_ctx_, fanout_direct_aic_thread_idx_, slot_state
+                )) {
+                return true;
+            }
+        }
+#endif
+
         if (!try_claim_ready_once(slot_state)) return false;
 
         // Early-dispatch: pre-staged tasks are released by doorbell
@@ -1020,7 +1055,6 @@ struct PTO2SchedulerState {
             return true;
         }
 
-        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
         if (shape == PTO2ResourceShape::DUMMY ||
             (slot_state.active_mask.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state);
@@ -1037,6 +1071,20 @@ struct PTO2SchedulerState {
         PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
         EarlyDispatchReleaseSink *sink = nullptr
     ) {
+        // 修改理由：与非 profiling 重载一致——先取 shape，再尝试 fanout 直挂钩子。
+        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+        // 修改理由：SCHED_PROFILING 重载同样需要钩子，否则开 profiling 时路径不一致。
+        if (shape == PTO2ResourceShape::AIC && slot_state.logical_block_num == 1 &&
+            fanout_direct_aic_sched_ctx_ != nullptr && fanout_direct_aic_thread_idx_ >= 0) {
+            if (pto2_try_fanout_direct_aic_enqueue(
+                    fanout_direct_aic_sched_ctx_, fanout_direct_aic_thread_idx_, slot_state
+                )) {
+                return true;
+            }
+        }
+#endif
+
         uint8_t state = slot_state.ready_state.load(std::memory_order_acquire);
         atomic_count += 1;  // ready_state load
         for (;;) {
@@ -1061,7 +1109,6 @@ struct PTO2SchedulerState {
             return true;
         }
 
-        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
         if (shape == PTO2ResourceShape::DUMMY ||
             (slot_state.active_mask.has_predicate() && !slot_state.payload->predicate.pass())) {
             dummy_ready_queue.push(&slot_state, atomic_count, push_wait);

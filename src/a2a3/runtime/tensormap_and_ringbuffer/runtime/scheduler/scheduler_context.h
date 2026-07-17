@@ -108,6 +108,11 @@ public:
     // before orchestrator_done_.
     void wait_for_orchestration_done_before_dispatch(Runtime *runtime, int32_t thread_idx);
 
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：header 内联的 route_ready_once 经 C 钩子调私有 enqueue，需 friend。
+    friend bool pto2_try_fanout_direct_aic_enqueue(void *sched_ctx, int32_t thread_idx, PTO2TaskSlotState &slot_state);
+#endif
+
     // =========================================================================
     // State queries / external synchronization points
     // =========================================================================
@@ -145,6 +150,14 @@ private:
 
     // sync_start drain coordination
     SyncStartDrainState drain_state_;
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：每调度线程一份线程本地 defer 缓冲——complete 扇出时写入、
+    // dispatch_ready_tasks 在 sync_start 层之后 drain；避免 claim 后只停在 defer 里导致 S3。
+    static constexpr int32_t kFanoutDirectAicPendingCap = 512;
+    PTO2TaskSlotState *fanout_direct_aic_pending_[MAX_AICPU_THREADS][kFanoutDirectAicPendingCap];
+    int32_t fanout_direct_aic_pending_n_[MAX_AICPU_THREADS]{0};
+#endif
 
 #if SIMPLER_DFX
     SchedL2SwimlaneCounters sched_l2_swimlane_[MAX_AICPU_THREADS];
@@ -351,6 +364,26 @@ private:
     void dispatch_ready_tasks(
         int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
     );
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：fanout 直挂 AIC 的核心 API——enqueue 做资格/admit/claim+CAS；
+    // drain 在 sync_start 层之后清空 defer（entered_drain 时 flush_to_ready_only，
+    // 保证 claim 后必上核或进 readyQ）；stage 目前仅 idle（pending 另开，勿与 idle 相加）。
+    bool enqueue_fanout_direct_aic(int32_t thread_idx, PTO2TaskSlotState &slot_state);
+    void drain_fanout_direct_aic_pending(
+        int32_t thread_idx, bool &made_progress, bool &try_pushed, bool flush_to_ready_only = false,
+        bool pmu_active = false
+    );
+    bool try_fanout_direct_dispatch_aic(
+        int32_t thread_idx, PTO2TaskSlotState &slot_state, bool *made_progress, bool *try_pushed,
+        bool pmu_active = false
+    );
+    // 修改理由：对齐 run_staging_order 的 AIC-PENDING 门控（无残留 MIX、无对端空闲 AIC、
+    // 且存在安全本地 pending 核）；供后续启用 pending 挂核时复用，避免 Case-3.1。
+    bool fanout_aic_pending_gate_ok(int32_t thread_idx) const;
+    // 修改理由：筛掉已有 pending_slot_state 或 ED 门控中的 running 核，防止错误挂 pending。
+    CoreTracker::BitStates fanout_aic_safe_pending_cores(int32_t thread_idx) const;
+#endif
 
     // Shared staging order for both dispatch sources (normal ready + speculative early):
     // MIX strict priority, IDLE stage before PENDING stage, cross-thread idle gating

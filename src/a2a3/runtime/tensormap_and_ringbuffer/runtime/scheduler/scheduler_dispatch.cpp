@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
 #include <limits>
 
 #include "common.h"  // debug_assert
@@ -556,6 +557,233 @@ void SchedulerContext::run_staging_order(
     }
 }
 
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+
+// 修改理由：C 钩子转调 SchedulerContext，供 pto_scheduler.h 内联的 route_ready_once 使用。
+bool pto2_try_fanout_direct_aic_enqueue(void *sched_ctx, int32_t thread_idx, PTO2TaskSlotState &slot_state) {
+    return static_cast<SchedulerContext *>(sched_ctx)->enqueue_fanout_direct_aic(thread_idx, slot_state);
+}
+
+CoreTracker::BitStates SchedulerContext::fanout_aic_safe_pending_cores(int32_t thread_idx) const {
+    // 修改理由：挂正常 pending 时排除已有 pending 的核，以及 ED=STAGING /
+    // sync_start+DISPATCHED 的 running 核，否则易 Case-3.1 死锁。
+    CoreTracker::BitStates safe(0ULL);
+    CoreTracker::BitStates cand =
+        core_trackers_[thread_idx].get_pending_core_offset_states(PTO2ResourceShape::AIC);
+    while (cand.has_value()) {
+        const int32_t core_offset = cand.pop_first();
+        const int32_t core_id = core_trackers_[thread_idx].get_core_id_by_offset(core_offset);
+        const CoreExecState &core = core_exec_states_[core_id];
+        if (core.pending_slot_state != nullptr) {
+            continue;
+        }
+        const PTO2TaskSlotState *rs = core.running_slot_state;
+        if (rs != nullptr && rs->payload != nullptr) {
+            const uint8_t ed = rs->payload->early_dispatch_state.load(std::memory_order_relaxed);
+            if (ed == PTO2_EARLY_DISPATCH_STAGING) {
+                continue;
+            }
+            if (ed == PTO2_EARLY_DISPATCH_DISPATCHED && rs->active_mask.requires_sync_start()) {
+                continue;
+            }
+        }
+        safe |= CoreTracker::BitStates(1ULL << core_offset);
+    }
+    return safe;
+}
+
+bool SchedulerContext::fanout_aic_pending_gate_ok(int32_t thread_idx) const {
+    // 修改理由：与 run_staging_order AIC-PENDING 同门控——有 MIX 残留则让路；
+    // 对端有空闲则本线程不挂 pending；且本地须有安全 pending 核。
+    if (has_residual_mix()) {
+        return false;
+    }
+    if (has_idle_in_other_threads(thread_idx, PTO2ResourceShape::AIC)) {
+        return false;
+    }
+    return fanout_aic_safe_pending_cores(thread_idx).has_value();
+}
+
+bool SchedulerContext::enqueue_fanout_direct_aic(int32_t thread_idx, PTO2TaskSlotState &slot_state) {
+#if defined(SIMPLER_PMU) && SIMPLER_PMU
+    // 修改理由：PMU 路径下不走直挂，与正常 PENDING 抑制一致。
+    if (is_pmu_enabled()) {
+        return false;
+    }
+#endif
+    // 修改理由：资格——仅 AIC + 单逻辑块 + 非 sync_start + 谓词通过；
+    // AIV / MIX / SPMD(block_num!=1) 永不进入，避免打乱既有调度语义。
+    if (slot_state.active_mask.to_shape() != PTO2ResourceShape::AIC) {
+        return false;
+    }
+    if (slot_state.logical_block_num != 1) {
+        return false;
+    }
+    if (slot_state.active_mask.requires_sync_start()) {
+        return false;
+    }
+    if (slot_state.active_mask.has_predicate() && !slot_state.payload->predicate.pass()) {
+        return false;
+    }
+    // 修改理由：不得抢 early-dispatch 消费者——否则会跳过 try_early_dispatch_release，
+    // 门铃不响导致 gated 核 S1。
+    if (slot_state.payload->early_dispatch_state.load(std::memory_order_acquire) !=
+        PTO2_EARLY_DISPATCH_NONE) {
+        return false;
+    }
+
+    // 修改理由：对齐 run_staging_order——有 MIX 残留时本轮不直挂 AIC，回落 readyQ，
+    // 保持 MIX 严格优先。
+    if (has_residual_mix()) {
+        return false;
+    }
+
+    // 修改理由：admit 仅本线程空闲 AIC（A/B 基线）；勿把 idle+pending 相加，
+    // 否则过 defer 易 orphan 致 S3。pending 挂核另开。
+    CoreTracker &tracker = core_trackers_[thread_idx];
+    const int32_t admit_cap = tracker.get_idle_core_offset_states(PTO2ResourceShape::AIC).count();
+    if (admit_cap <= 0) {
+        return false;
+    }
+
+    int32_t &n = fanout_direct_aic_pending_n_[thread_idx];
+    if (n >= admit_cap || n >= kFanoutDirectAicPendingCap) {
+        return false;
+    }
+
+    // 修改理由：defer 窗口内用 CAS 把 ED NONE→DISPATCHED，占住槽位，防止并发 early-dispatch
+    // 再标 STAGING 与直挂冲突。
+    uint8_t expect = PTO2_EARLY_DISPATCH_NONE;
+    if (!slot_state.payload->early_dispatch_state.compare_exchange_strong(
+            expect, PTO2_EARLY_DISPATCH_DISPATCHED, std::memory_order_seq_cst, std::memory_order_seq_cst
+        )) {
+        return false;
+    }
+
+    // 修改理由：与 route_ready_once 同样先 claim；若对端已 claim，返回 true 表示已处理，
+    // 避免回落第二次 claim 失败导致就绪丢失。
+    if (!sched_->try_claim_ready_once(slot_state)) {
+        return true;
+    }
+
+    fanout_direct_aic_pending_[thread_idx][n++] = &slot_state;
+    return true;
+}
+
+void SchedulerContext::drain_fanout_direct_aic_pending(
+    int32_t thread_idx, bool &made_progress, bool &try_pushed, bool flush_to_ready_only, bool pmu_active
+) {
+    int32_t &n = fanout_direct_aic_pending_n_[thread_idx];
+    auto push_ready = [&](PTO2TaskSlotState *slot) {
+        // 修改理由：不变量——每个已 claim 的 fanout 槽最终必须上核或进 ready_queues。
+        sched_->ready_queues[static_cast<int32_t>(PTO2ResourceShape::AIC)].push(slot);
+    };
+
+    // 修改理由：sync_start stop-the-world 占用核时禁止在此 stage，只把已 claim 槽推进
+    // readyQ，保证 drain 后仍可达。有 MIX 残留时同 skip_aic_aiv，不抢 AIC。
+    const bool force_ready = flush_to_ready_only || has_residual_mix();
+
+    for (int32_t i = 0; i < n; i++) {
+        PTO2TaskSlotState *slot = fanout_direct_aic_pending_[thread_idx][i];
+        if (force_ready) {
+            push_ready(slot);
+            continue;
+        }
+        if (!try_fanout_direct_dispatch_aic(thread_idx, *slot, &made_progress, &try_pushed, pmu_active)) {
+            push_ready(slot);
+        }
+    }
+    n = 0;
+}
+
+bool SchedulerContext::try_fanout_direct_dispatch_aic(
+    int32_t thread_idx, PTO2TaskSlotState &slot_state, bool *made_progress, bool *try_pushed, bool pmu_active
+) {
+#if defined(SIMPLER_PMU) && SIMPLER_PMU
+    if (is_pmu_enabled()) {
+        return false;
+    }
+#endif
+    if (slot_state.active_mask.to_shape() != PTO2ResourceShape::AIC) {
+        return false;
+    }
+    if (slot_state.logical_block_num != 1) {
+        return false;
+    }
+    if (slot_state.active_mask.requires_sync_start()) {
+        return false;
+    }
+    if (slot_state.active_mask.has_predicate() && !slot_state.payload->predicate.pass()) {
+        return false;
+    }
+    // 修改理由：enqueue 已 CAS 为 DISPATCHED；若仍见 STAGING 则拒绝 stage，防协议破坏。
+    const uint8_t ed = slot_state.payload->early_dispatch_state.load(std::memory_order_acquire);
+    if (ed == PTO2_EARLY_DISPATCH_STAGING) {
+        return false;
+    }
+    // 修改理由：stage 时再查 MIX 残留（enqueue 后可能出现），与正常 staging 一致。
+    if (has_residual_mix()) {
+        return false;
+    }
+
+    CoreTracker &tracker = core_trackers_[thread_idx];
+    CoreTracker::BitStates cores(0ULL);
+    bool to_pending = false;
+
+    // 修改理由：当前仅 idle stage（A/B 基线）；pending 挂核路径单独启用前不上核。
+    cores = tracker.get_idle_core_offset_states(PTO2ResourceShape::AIC);
+    if (!cores.has_value()) {
+        (void)pmu_active;
+        return false;
+    }
+
+    const int32_t available = cores.count();
+    int32_t start = 0;
+    const int32_t claim = slot_state.claim_block_range(slot_state.logical_block_num, available, start);
+    if (claim == 0) {
+        return false;
+    }
+
+    // 修改理由：单块任务 claim!=0 即整任务；无余块需再 push。
+
+    PublishHandle handles[CoreTracker::MAX_CLUSTERS];
+    int handle_count = 0;
+    for (int32_t b = 0; b < claim; b++) {
+        const int32_t core_offset = cores.pop_first();
+        handle_count += prepare_block_for_dispatch(
+            thread_idx, core_offset, slot_state, PTO2ResourceShape::AIC, to_pending, start + b,
+            &handles[handle_count]
+        );
+    }
+    // 修改理由：AIC prepare 每块恒返回 1；claim_block_range 已推进 next_block_idx 后
+    // 不可再 return false（readyQ 回落会见 claim==0 而丢任务）。
+    debug_assert(handle_count > 0);
+
+    wmb();
+    uint64_t dispatch_ts = 0;
+#if SIMPLER_DFX
+    if (l2_swimlane_level_ >= L2SwimlaneLevel::AICPU_TIMING) {
+        dispatch_ts = get_sys_cnt_aicpu();
+    }
+#endif
+    for (int i = 0; i < handle_count; i++) {
+        publish_subtask_to_core(handles[i], dispatch_ts);
+    }
+
+    sched_->record_published_blocks(slot_state, claim);
+    sched_->propagate_dispatch_fanin(slot_state);
+
+    if (made_progress != nullptr) {
+        *made_progress = true;
+    }
+    if (try_pushed != nullptr) {
+        *try_pushed = true;
+    }
+    return true;
+}
+
+#endif  // SIMPLER_SCHED_FANOUT_DIRECT_AIC
+
 void SchedulerContext::dispatch_ready_tasks(
     int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
 ) {
@@ -579,6 +807,15 @@ void SchedulerContext::dispatch_ready_tasks(
             return has_residual_sync_mix();
         }
     );
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+    // 修改理由：任何提前 return（含 entered_drain）前必须清空 fanout defer——
+    // 已 claim 槽只能上核或进 readyQ，不能只留在线程本地缓冲；否则会 S3。
+    // sync_start drain 占用机器时 flush_to_ready_only=true。
+    drain_fanout_direct_aic_pending(
+        thread_idx, made_progress, try_pushed, /*flush_to_ready_only=*/entered_drain, pmu_active
+    );
+#endif
     if (entered_drain) return;
 
     // Tier 1: regular ready work.

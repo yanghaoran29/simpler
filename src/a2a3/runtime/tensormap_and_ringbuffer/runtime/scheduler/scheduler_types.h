@@ -477,6 +477,18 @@ struct SlotTransition {
     bool matched = false;        // some case was hit (otherwise skip apply)
 };
 
+#ifndef SIMPLER_SCHED_FANOUT_DIRECT_AIC
+// 修改理由：编译开关默认开启 fanout 直挂 AIC；关闭后行为与 main 一致。
+#define SIMPLER_SCHED_FANOUT_DIRECT_AIC 1
+#endif
+
+#if SIMPLER_SCHED_FANOUT_DIRECT_AIC
+// 修改理由：对外钩子声明——仅单块 AIC（logical_block_num==1、!sync_start、谓词通过、
+// ED==NONE）可在 complete 扇出时 defer，跳过 ready_queues；AIV/MIX/SPMD/已 early-stage
+// 的任务永不进入。实现见 SchedulerContext::enqueue_fanout_direct_aic。
+bool pto2_try_fanout_direct_aic_enqueue(void *sched_ctx, int32_t thread_idx, PTO2TaskSlotState &slot_state);
+#endif
+
 // =============================================================================
 // Profiling counters (compile-time gated)
 // =============================================================================
