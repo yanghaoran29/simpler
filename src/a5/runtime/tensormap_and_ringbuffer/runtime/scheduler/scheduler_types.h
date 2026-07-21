@@ -232,6 +232,12 @@ public:
     BitStates get_all_running_cores() const { return (~core_states_) & (aic_mask_ | aiv_mask_); }
     BitStates get_cluster_offset_states() const { return aic_mask_; }
 
+    // Free capacity for early-dispatch staging: any core whose pending slot is
+    // not occupied (idle RUNNING or dual-issue PENDING). Matches a2a3 #1288-ish
+    // spare-slot gate (not full-idle-only).
+    BitStates get_free_slot_states() const { return (~pending_occupied_) & (aic_mask_ | aiv_mask_); }
+    bool has_any_free_slot() const { return get_free_slot_states().has_value(); }
+
     // --- Cluster matching ---
 
     BitStates get_valid_cluster_offset_states(PTO2ResourceShape shape) const {
@@ -352,6 +358,43 @@ public:
         return get_mix_running_cluster_offset_states(core_mask).count();
     }
 
+    // Gated MIX split placement (#1304): each used core independently takes
+    // running-if-idle / pending-if-busy while every used core waits on the doorbell.
+    BitStates mix_used_cores(int32_t cluster_offset, uint8_t core_mask) const {
+        BitStates used(0ULL);
+        if (core_mask & PTO2_SUBTASK_MASK_AIC) used |= BitStates(1ULL << cluster_offset);
+        if (core_mask & PTO2_SUBTASK_MASK_AIV0) used |= BitStates(1ULL << (cluster_offset + 1));
+        if (core_mask & PTO2_SUBTASK_MASK_AIV1) used |= BitStates(1ULL << (cluster_offset + 2));
+        return used;
+    }
+
+    bool mix_cluster_all_slots(int32_t cluster_offset, uint8_t core_mask) const {
+        BitStates used = mix_used_cores(cluster_offset, core_mask);
+        if (!used.has_value()) return false;
+        BitStates no_slot = (~core_states_) & pending_occupied_;
+        return !(used & no_slot).has_value();
+    }
+
+    int32_t mix_cluster_idle_core_count(int32_t cluster_offset, uint8_t core_mask) const {
+        return (mix_used_cores(cluster_offset, core_mask) & core_states_).count();
+    }
+
+    BitStates get_mix_split_cluster_offset_states(uint8_t core_mask) const {
+        BitStates result(0ULL);
+        BitStates candidates = get_cluster_offset_states();
+        while (candidates.has_value()) {
+            int32_t off = candidates.pop_first();
+            if (mix_cluster_all_slots(off, core_mask)) {
+                result |= BitStates(1ULL << off);
+            }
+        }
+        return result;
+    }
+
+    int32_t count_mix_split_clusters(uint8_t core_mask) const {
+        return get_mix_split_cluster_offset_states(core_mask).count();
+    }
+
     BitStates get_pending_core_offset_states(PTO2ResourceShape shape) const {
         if (shape == PTO2ResourceShape::MIX) {
             // Shape-level query kept conservative for legacy callers/tests.
@@ -456,7 +499,10 @@ struct alignas(64) SyncStartDrainState {
     std::atomic<int32_t> drain_worker_elected{0};  // 0=none; >0: elected thread's (thread_idx+1)
     std::atomic<uint32_t> drain_ack_mask{0};       // bit per thread; all-set = all threads reached ack barrier
     std::atomic<PTO2TaskSlotState *> pending_task{nullptr};  // held task (not re-queued)
-    int32_t _pad[10];
+    std::atomic<int32_t> drain_stage_go{0};
+    std::atomic<uint32_t> drain_stage_done_mask{0};
+    std::atomic<int32_t> drain_running_staged{0};
+    int32_t _pad[7];
 };
 static_assert(sizeof(SyncStartDrainState) == 64);
 

@@ -359,6 +359,13 @@ static bool all_claimed_fanin_completed(const PTO2FaninBuilder &fanin_builder) {
     });
 }
 
+static bool all_claimed_fanin_allow_early_resolve(const PTO2FaninBuilder &fanin_builder) {
+    if (fanin_builder.count == 0) return true;
+    return fanin_builder.for_each([](PTO2TaskSlotState *producer) -> bool {
+        return producer != nullptr && producer->allow_early_resolve;
+    });
+}
+
 void PTO2OrchestratorState::mark_dep_pool_position(PTO2TaskSlotState &slot_state) {
     PTO2SchedulerState *sched = scheduler;
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
@@ -377,22 +384,45 @@ void PTO2OrchestratorState::wire_fanin_task(PTO2TaskSlotState &slot_state, int32
     slot_state.fanin_count = wfanin + 1;
 
     int32_t completed_fanin = 0;
+    int32_t early_propagated = 0;
+    // Direct-only (#1285): one unflagged producer => consumer never early-dispatches.
+    bool early_disqualified = false;
     for_each_fanin_slot_state(*payload, [&](PTO2TaskSlotState *producer) {
         producer->lock_fanout();
         int32_t pstate = producer->task_state.load(std::memory_order_acquire);
+        if (!early_disqualified && !producer->allow_early_resolve) {
+            early_disqualified = true;
+        }
         if (pstate >= PTO2_TASK_COMPLETED) {
             completed_fanin++;
         } else {
             producer->fanout_head = rss.dep_pool.prepend(producer->fanout_head, &slot_state);
+            // Marker shares fanout_lock with propagation's snapshot. A set marker
+            // means this edge is outside that snapshot and needs a seed.
+            if (!early_disqualified && producer->has_dispatch_propagated()) {
+                early_propagated++;
+            }
         }
         producer->unlock_fanout();
     });
+
+    // Seed only when every direct producer is codegen-flagged; one unflagged
+    // producer disqualifies the task (no auto-chain inheritance).
+    int32_t early_seed = completed_fanin + early_propagated;
+    if (!early_disqualified && early_seed != 0) {
+        int32_t dispatch_fanin = payload->dispatch_fanin.fetch_add(early_seed, std::memory_order_acq_rel) + early_seed;
+        // Fully pre-completed fanin routes normally. If any producer was live,
+        // the exact-full increment must enqueue the early candidate.
+        if (completed_fanin != payload->fanin_actual_count && dispatch_fanin == payload->fanin_actual_count) {
+            sched->try_enqueue_early_dispatch_candidate(slot_state);
+        }
+    }
 
     int32_t init_rc = completed_fanin + 1;
     int32_t new_rc = slot_state.fanin_refcount.fetch_add(init_rc, std::memory_order_acq_rel) + init_rc;
     mark_dep_pool_position(slot_state);
     if (new_rc >= slot_state.fanin_count) {
-        sched->push_ready_routed(&slot_state);
+        sched->route_ready_once(slot_state);
     }
 }
 
@@ -816,7 +846,7 @@ static TaskOutputTensors submit_task_common(
         }
         const int32_t kernel_ids_capture[3] = {aic_kernel_id, aiv0_kernel_id, aiv1_kernel_id};
         dep_gen_aicpu_record_submit(
-            task_id.raw, orch->in_manual_scope(), /*early_dispatch=*/false, tc, tensor_ptrs, arg_types_u8,
+            task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), tc, tensor_ptrs, arg_types_u8,
             static_cast<int>(args.explicit_dep_count()), reinterpret_cast<const uint64_t *>(args.explicit_deps_data()),
             args.launch_spec.core_num(), kernel_ids_capture
         );
@@ -936,6 +966,7 @@ static TaskOutputTensors submit_task_common(
     }
 
     payload.init(args, result, prepared.alloc_result, layout);
+    cur_slot_state.set_allow_early_resolve(args.allow_early_resolve());
 
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
@@ -986,6 +1017,9 @@ static TaskOutputTensors submit_task_common(
     } else if (all_claimed_fanin_completed(fanin_builder)) {
         int32_t ready_seed = fanin_builder.count + 1;
         cur_slot_state.fanin_count = ready_seed;
+        if (all_claimed_fanin_allow_early_resolve(fanin_builder)) {
+            payload.dispatch_fanin.store(fanin_builder.count, std::memory_order_release);
+        }
         cur_slot_state.fanin_refcount.store(ready_seed, std::memory_order_release);
         orch->mark_dep_pool_position(cur_slot_state);
         sched->push_ready_routed(&cur_slot_state);
@@ -1185,7 +1219,16 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const L0TaskArgs &args) {
         // required so scope_end can release the producer-side reference and
         // drive the slot to CONSUMED, but worker dispatch fields are never
         // observed for hidden alloc tasks.
-        prepared.slot_state->task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+        //
+        // Flag the creator so it does NOT suppress its consumers' early-dispatch.
+        // Under the direct-only model an unflagged producer disqualifies its
+        // consumer, and a pre-completed producer only seeds dispatch_fanin when
+        // flagged. A buffer allocation is pure memory whose output is ready at
+        // creation — it should always be transparent, never a barrier. Unlike a
+        // codegen task there is no Arg-driven hint to honor here, so mark it
+        // unconditionally. (a2a3 #1285/#1292)
+        prepared.slot_state->allow_early_resolve = true;
+        prepared.slot_state->mark_completed();
     }
     orch->inline_completed_tasks++;
 
