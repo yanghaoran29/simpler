@@ -592,6 +592,14 @@ int simpler_run(
         // `Runtime` or reassembled per run.
         {
             STRACE("simpler_run.bind");
+            // Resolve block_dim before bind so host_build_graph host orch can
+            // finalize with the real cluster count (bind runs before run()).
+            rc = runner->early_resolve_worker_count(*r);
+            if (rc < 0) {
+                r->set_gm_sm_ptr(nullptr);
+                int validation_rc = validate_runtime_impl(r, &g_host_api, rc);
+                return validation_rc != 0 ? validation_rc : rc;
+            }
             // One-step bind: restore kernel addrs + active_callable_id and run
             // the per-run binding (tensor args, GM heap, SM alloc). The
             // CallableState-derived host_orch_func_ptr + signature stay inside
@@ -610,7 +618,7 @@ int simpler_run(
         {
             STRACE("simpler_run.runner_run");
             // run() latches the diagnostic enables from config via
-            // apply_call_config() and consumes block_dim / aicpu_thread_num.
+            // apply_call_config() for diagnostics; block_dim / aicpu resolved by DeviceRunner.
             rc = runner->run(*r, *config);
         }
         if (rc != 0) {

@@ -224,11 +224,15 @@ def load_kernel_meta(test_path: Path, func_id: int, platform: str):
     tgt = by_func[func_id]
     cls = owner_cls[func_id]
     auto_case = _first_platform_case(cls, platform)
-    # name -> block_dim for every case, so main can resolve block_dim from the
-    # case actually selected (--case X, or the auto-pinned first-platform case),
-    # not an arbitrary CASES entry. A case declaring no block_dim maps to 1.
+    # name -> SPMD width hint for every case (params.block_dim / block_num).
+    # CallConfig.block_dim was removed; launch cluster count is DeviceRunner-
+    # resolved. Swimlane defaults to 1 when the case does not declare a width.
+    def _case_spmd_width(c):
+        params = c.get("params") or {}
+        return int(params.get("block_dim") or params.get("block_num") or 1)
+
     block_dim_by_case = {
-        c.get("name"): int(c.get("config", {}).get("block_dim") or 1) for c in getattr(cls, "CASES", [])
+        c.get("name"): _case_spmd_width(c) for c in getattr(cls, "CASES", [])
     }
     return {
         "by_func": by_func,

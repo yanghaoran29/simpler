@@ -9,12 +9,13 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * SPMD Paged Attention Orchestration with TPUSH/TPOP (fixed block_num=24)
+ * SPMD Paged Attention Orchestration with TPUSH/TPOP
  *
- * Submits a single MixedKernels task with hardware block_num fixed at 24.
+ * Submits a single MixedKernels task with hardware block_num =
+ * rt_available_cluster_count() (user-visible N, not PLATFORM_MAX ceiling).
  * total_logical_blocks = batch * q_loop logical work items are distributed
- * across the 24 hardware blocks via a stride loop inside the kernel:
- *   for (block_idx = hw_block_idx; block_idx < total_logical_blocks; block_idx += 24)
+ * across the N hardware blocks via a stride loop inside the kernel:
+ *   for (block_idx = hw_block_idx; block_idx < total_logical_blocks; block_idx += N)
  *
  * q_tile adapts to num_heads at runtime: q_tile = min(num_heads, MAX_Q_TILE).
  * When num_heads <= MAX_Q_TILE (=64), q_loop = 1 and each block processes all heads.
@@ -24,7 +25,7 @@
  *   AIC: QK matmul -> TPUSH(sij) -> TPOP(pij) -> PV matmul -> TPUSH(oi_new)
  *   AIV: TPOP(sij) -> online softmax -> TPUSH(pij) -> TPOP(oi_new) -> online update
  *
- * GM FIFO buffers for TPUSH/TPOP are sized for the 24 hardware blocks (not for
+ * GM FIFO buffers for TPUSH/TPOP are sized for the N hardware blocks (not for
  * total_logical_blocks). Each hardware block owns its own FIFO slots and reuses
  * them across stride-loop iterations.
  */
@@ -42,7 +43,6 @@
 static constexpr uint64_t MAX_Q_TILE = 64;
 static constexpr uint64_t HEAD_DIM = 128;
 static constexpr uint64_t MAX_BLOCK_SIZE = 128;
-static constexpr int16_t SPMD_BLOCK_NUM = 24;
 
 // GM FIFO slot sizes (must match kernel's PAConfig<MAX_Q_TILE> constants).
 // Sized for the maximum (q_tile, block_size) so the same FIFO layout works
@@ -76,11 +76,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     uint64_t q_tile = (num_heads >= MAX_Q_TILE) ? MAX_Q_TILE : 16;
     uint64_t q_loop = (num_heads + q_tile - 1) / q_tile;
     int64_t total_logical_blocks = static_cast<int64_t>(batch * q_loop);
+    const int32_t spmd_block_num = rt_available_cluster_count();
 
     LOG_INFO_V0(
         "SPMD PA TPUSH/TPOP: batch=%" PRIu64 " heads=%" PRIu64 " hd=%" PRIu64 " bs=%" PRIu64 " q_tile=%" PRIu64
         " q_loop=%" PRIu64 " hw_blocks=%d logical_blocks=%" PRId64,
-        batch, num_heads, head_dim, block_size, q_tile, q_loop, SPMD_BLOCK_NUM, total_logical_blocks
+        batch, num_heads, head_dim, block_size, q_tile, q_loop, spmd_block_num, total_logical_blocks
     );
 
     // Wrap host tensors
@@ -109,9 +110,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         make_tensor_external(orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false);
 
     // GM FIFO buffers for TPUSH/TPOP (one set of slots per hardware block)
-    uint32_t sij_fifo_total = static_cast<uint32_t>(SPMD_BLOCK_NUM) * SIJ_SLOT_SIZE * FIFO_DEPTH;
-    uint32_t pij_fifo_total = static_cast<uint32_t>(SPMD_BLOCK_NUM) * PIJ_SLOT_SIZE * FIFO_DEPTH;
-    uint32_t oi_fifo_total = static_cast<uint32_t>(SPMD_BLOCK_NUM) * OI_SLOT_SIZE * FIFO_DEPTH;
+    uint32_t sij_fifo_total = static_cast<uint32_t>(spmd_block_num) * SIJ_SLOT_SIZE * FIFO_DEPTH;
+    uint32_t pij_fifo_total = static_cast<uint32_t>(spmd_block_num) * PIJ_SLOT_SIZE * FIFO_DEPTH;
+    uint32_t oi_fifo_total = static_cast<uint32_t>(spmd_block_num) * OI_SLOT_SIZE * FIFO_DEPTH;
 
     // Allocate as 1D byte tensors (using INT32 for 4-byte alignment, divide by 4)
     uint32_t sij_fifo_shapes[1] = {sij_fifo_total / sizeof(int32_t)};
@@ -141,7 +142,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         args.add_scalar(static_cast<int64_t>(q_loop));
         args.add_scalar(total_logical_blocks);
         args.add_scalar(static_cast<int64_t>(q_tile));
-        args.launch_spec.set_block_num(SPMD_BLOCK_NUM);
+        args.launch_spec.set_block_num(spmd_block_num);
 
         MixedKernels mk;
         mk.aic_kernel_id = FUNC_PA_AIC;
@@ -152,7 +153,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
     LOG_INFO_V0(
         "SPMD PA TPUSH/TPOP: submitted 1 MixedKernels task, hw_blocks=%d logical=%" PRId64,
-        static_cast<int>(SPMD_BLOCK_NUM), total_logical_blocks
+        static_cast<int>(spmd_block_num), total_logical_blocks
     );
 }
 

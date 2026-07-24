@@ -19,10 +19,9 @@
  * released together at the rendezvous once every block occupies a running slot and
  * the producer completes.
  *
- * Tasks (the producer writes one cache line per block; the MIX consumer writes
- * one per participating core, so three cache lines per block):
- *   P: AIC block_num=50, base_cl=0, allow_early_resolve=true
- *   C: MIX block_num=24, base_cl=50, require_sync_start=true, dep=[P]
+ * Tasks sized from rt_available_cluster_count() (=N):
+ *   P: AIC block_num=N, base_cl=0, allow_early_resolve=true
+ *   C: MIX block_num=N, base_cl=N, require_sync_start=true, dep=[P]
  *
  * Args layout: [output]
  */
@@ -78,13 +77,16 @@ static void submit_sync_consumer(const Tensor &out, int16_t block_num, int64_t b
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const int32_t n = rt_available_cluster_count();
 
     rt_scope_begin(PTO2ScopeMode::MANUAL);
-    PTO2TaskId prod = submit_producer(ext_output, 50, 0);
-    submit_sync_consumer(ext_output, 24, 50, prod);
+    PTO2TaskId prod = submit_producer(ext_output, static_cast<int16_t>(n), 0);
+    submit_sync_consumer(ext_output, static_cast<int16_t>(n), n, prod);
     rt_scope_end();
 
-    LOG_INFO_V9("[spmd_sync_start_early_dispatch] wide producer + MIX sync_start consumer submitted");
+    LOG_INFO_V9(
+        "[spmd_sync_start_early_dispatch] AIC producer(%d) + MIX sync_start consumer(%d) submitted", n, n
+    );
 }
 
 }  // extern "C"

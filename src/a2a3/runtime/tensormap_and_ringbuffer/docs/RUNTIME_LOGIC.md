@@ -85,11 +85,18 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 
 | Constant | Value | Description |
 | -------- | ----- | ----------- |
-| `PLATFORM_MAX_BLOCKDIM` | 24 | Maximum blocks (each = 1 AIC + 2 AIV) |
+| `PLATFORM_MAX_BLOCKDIM` | 24 | Compile-time ceiling for blocks (each = 1 AIC + 2 AIV). This-run `N` may be lower (ACL / Partial-Good); see `hardware.md` Runtime adaptation. |
 | `PLATFORM_MAX_AICPU_THREADS` | 4 | AICPU thread count (3 schedulers + 1 orchestrator) |
-| `PLATFORM_MAX_AIC_PER_THREAD` | 24 | Max AIC cores per scheduler thread |
-| `PLATFORM_MAX_AIV_PER_THREAD` | 48 | Max AIV cores per scheduler thread |
+| `PLATFORM_MAX_AIC_PER_THREAD` | 24 | Max AIC cores per scheduler thread (ceiling) |
+| `PLATFORM_MAX_AIV_PER_THREAD` | 48 | Max AIV cores per scheduler thread (ceiling) |
 | `PLATFORM_PROF_SYS_CNT_FREQ` | 50 MHz | System counter frequency for profiling |
+
+DeviceRunner resolves cluster count `N` and AICPU thread count from ACL
+(capped by `PLATFORM_MAX_BLOCKDIM` / `PLATFORM_MAX_AICPU_THREADS`).
+`worker_count = N * 3`. Orch helpers `rt_available_cluster_count()` /
+`rt_available_aiv_count()` expose the same `N` / `2N` for ST sizing.
+For `require_sync_start` cohort sizing prefer `rt_sync_start_capacity()`
+(`aic`/`mix` = N, `aiv` = 2N).
 
 ### 2.4 Host Temporary Buffer
 
@@ -867,8 +874,6 @@ ORCHESTRATION = {
 
 RUNTIME_CONFIG = {
     "runtime": "tensormap_and_ringbuffer",
-    "aicpu_thread_num": 4,
-    "block_dim": 24,
 }
 ```
 

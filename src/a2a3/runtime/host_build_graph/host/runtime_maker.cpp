@@ -445,11 +445,23 @@ int32_t run_host_orchestration(
         return -1;
     }
 
-    // Install the ops table (host s_runtime_ops). The SPMD core counts are
-    // re-applied with the real device values on the AICPU at boot; the values
-    // here only feed cluster spreading during this host submit and are unused
-    // by the migrated non-cluster examples.
-    runtime_finalize_after_wire(rt, /*aic*/ 24, /*aiv*/ 48);
+    // Install the ops table (host s_runtime_ops). Cluster counts must match
+    // the resolved block_dim for this run — early_resolve_worker_count sets
+    // runtime.worker_count before bind. Fall back to PLATFORM_MAX only if
+    // worker_count was not published (should not happen on the bind path).
+    int32_t worker_count = runtime->get_worker_count();
+    int32_t aic_count = PLATFORM_MAX_BLOCKDIM;
+    int32_t aiv_count = PLATFORM_MAX_BLOCKDIM * 2;
+    if (worker_count > 0 && (worker_count % PLATFORM_CORES_PER_BLOCKDIM) == 0) {
+        aic_count = worker_count / PLATFORM_CORES_PER_BLOCKDIM;
+        aiv_count = worker_count - aic_count;  // 2 AIV per cluster
+    } else {
+        LOG_WARN(
+            "host-orch: runtime worker_count=%d unset/invalid; falling back to PLATFORM_MAX_BLOCKDIM=%d", worker_count,
+            PLATFORM_MAX_BLOCKDIM
+        );
+    }
+    runtime_finalize_after_wire(rt, aic_count, aiv_count);
     rt->mode = PTO2_MODE_EXECUTE;
     // get_tensor_data/set_tensor_data dereference buffer.addr directly: the
     // input tensors were mapped into host address space at staging time

@@ -945,6 +945,31 @@ int DeviceRunnerBase::bind_callable_to_runtime(
     );
 }
 
+int DeviceRunnerBase::early_resolve_worker_count(Runtime &runtime) {
+    int rc = ensure_device_initialized();
+    if (rc != 0) {
+        LOG_ERROR("early_resolve_worker_count: ensure_device_initialized failed: %d", rc);
+        return -1;
+    }
+    int block_dim = resolve_block_dim();
+    if (block_dim < 0) {
+        return -1;
+    }
+    int num_aicore = block_dim * cores_per_blockdim_;
+    if (num_aicore > RUNTIME_MAX_WORKER) {
+        LOG_ERROR(
+            "early_resolve_worker_count: block_dim (%d) exceeds RUNTIME_MAX_WORKER (%d)", block_dim, RUNTIME_MAX_WORKER
+        );
+        return -1;
+    }
+    runtime.set_worker_count(num_aicore);
+    worker_count_ = num_aicore;
+    LOG_INFO_V0(
+        "early_resolve_worker_count: block_dim=%d worker_count=%d (for host-orch finalize)", block_dim, num_aicore
+    );
+    return block_dim;
+}
+
 // Eager prebuilt-arena warm-up. A runtime that has a prebuilt runtime arena
 // (tensormap_and_ringbuffer) provides a strong prewarm_config_impl in its
 // runtime_maker.cpp that overrides this weak no-op default. Runtimes without one
@@ -1207,25 +1232,36 @@ void DeviceRunnerBase::ensure_device_wall_buffer() {
     }
 }
 
-int DeviceRunnerBase::resolve_block_dim(int requested_block_dim) {
-    // Auto sentinel (block_dim == 0) is resolved directly from
-    // query_max_block_dim; explicit values still go through validate. The
-    // auto branch skips validate so we don't pay the ACL syscalls twice.
-    int resolved = requested_block_dim;
-    if (resolved == 0) {
-        resolved = query_max_block_dim(stream_aicore_);
-        LOG_INFO_V0("block_dim auto-resolved to %d", resolved);
-        if (resolved < 1) {
-            LOG_ERROR("block_dim auto-resolved to invalid value %d", resolved);
-            return -1;
-        }
-    } else {
-        int rc = validate_block_dim(stream_aicore_, resolved);
-        if (rc != 0) {
-            return -1;
-        }
+int DeviceRunnerBase::resolve_block_dim() {
+    int resolved = query_max_block_dim(stream_aicore_);
+    LOG_INFO_V0("block_dim resolved to %d (PLATFORM_MAX_BLOCKDIM=%d)", resolved, PLATFORM_MAX_BLOCKDIM);
+    if (resolved < 1) {
+        LOG_ERROR("block_dim resolved to invalid value %d", resolved);
+        return -1;
     }
     block_dim_ = resolved;
+    return resolved;
+}
+
+int DeviceRunnerBase::query_max_aicpu_threads() {
+    int64_t aicpu = 0;
+    // ACL_DEV_ATTR_AICPU_CORE_NUM = 1 — user-visible AICPU count for this device.
+    if (aclrtGetDeviceInfo(static_cast<uint32_t>(device_id_), ACL_DEV_ATTR_AICPU_CORE_NUM, &aicpu) == ACL_SUCCESS &&
+        aicpu >= 1) {
+        return std::min(static_cast<int>(aicpu), PLATFORM_MAX_AICPU_THREADS);
+    }
+    return PLATFORM_MAX_AICPU_THREADS;
+}
+
+int DeviceRunnerBase::resolve_aicpu_thread_num() {
+    int resolved = query_max_aicpu_threads();
+    LOG_INFO_V0(
+        "aicpu_thread_num resolved to %d (PLATFORM_MAX_AICPU_THREADS=%d)", resolved, PLATFORM_MAX_AICPU_THREADS
+    );
+    if (resolved < 1) {
+        LOG_ERROR("aicpu_thread_num resolved to invalid value %d", resolved);
+        return -1;
+    }
     return resolved;
 }
 

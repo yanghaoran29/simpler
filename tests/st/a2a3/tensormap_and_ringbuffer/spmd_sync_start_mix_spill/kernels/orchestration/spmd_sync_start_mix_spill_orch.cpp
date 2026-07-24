@@ -12,26 +12,9 @@
 /**
  * SPMD sync_start MIX pending-spill Orchestration
  *
- * Reproduces the gated-cohort rendezvous deadlock on a MIX cohort whose clusters
- * spill PER-CORE to pending slots: a FLAGGED AIV producer occupies ALL 48 AIV cores
- * (and spins), leaving the 24 AIC cores idle. When the require_sync_start MIX
- * consumer pre-stages as an early-dispatch candidate, EVERY one of its 24 clusters
- * is mixed — the AIC lands on an idle running slot, both AIVs on the producer's busy
- * cores' gated pending slots (drain_stage_cores takes the to_pending=true split path,
- * mix_cluster_idle_core_count = 1 per cluster). The rendezvous seed then counts only
- * the 24 running AICs while staged_core_mask counts all 72 cores; the 48 pending AIVs
- * must promote to close the gap. If the seed/mask counting diverges on this MIX
- * per-core split, the doorbells never fire -> the cohort never launches -> its
- * consumers never complete -> allocator deadlock.
- *
- * The MIX consumer writes float(block_idx) at 3 cache lines
- * (base_cl + block_idx*3 + {0,1,2}) — AIC slot 0, AIV0 slot 1, AIV1 slot 2. The AIV
- * producer writes float(block_idx) at cache line (base_cl + block_idx).
- *
- * Tasks (deps explicit-only):
- *   P: AIV block_num=48, base_cl=0,  allow_early_resolve=true, spins   (occupies all 48 AIV cores)
- *   C: MIX block_num=24, base_cl=48, require_sync_start=true,  dep=[P] (24 AIC idle->running,
- *                                                                       48 AIV busy->pending)
+ * Sized from rt_available_* (not hardcoded 24/48/72):
+ *   P: AIV block_num=available_aiv, base_cl=0, allow_early_resolve=true, spins
+ *   C: MIX block_num=available_cluster, base_cl=available_aiv, require_sync_start=true, dep=[P]
  *
  * Args layout: [output]
  */
@@ -93,10 +76,17 @@ static void submit_mix_sync_consumer(const Tensor &out, int16_t block_num, int64
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
 
-    PTO2TaskId prod = submit_aiv_producer(ext_output, 48, 0);
-    submit_mix_sync_consumer(ext_output, 24, 48, prod);
+    const PTO2SyncStartCapacity cap = rt_sync_start_capacity();
+    const int32_t n_cluster = cap.mix;
+    const int32_t n_aiv = cap.aiv;
 
-    LOG_INFO_V9("[spmd_sync_start_mix_spill] flagged AIV producer (48) + sync_start MIX consumer (24) submitted");
+    PTO2TaskId prod = submit_aiv_producer(ext_output, static_cast<int16_t>(n_aiv), 0);
+    submit_mix_sync_consumer(ext_output, static_cast<int16_t>(n_cluster), n_aiv, prod);
+
+    LOG_INFO_V9(
+        "[spmd_sync_start_mix_spill] sync_cap aic=%d aiv=%d mix=%d; flagged AIV producer (%d) + sync_start MIX consumer (%d) submitted",
+        cap.aic, cap.aiv, cap.mix, n_aiv, n_cluster
+    );
 }
 
 }  // extern "C"

@@ -12,13 +12,13 @@
 /**
  * SPMD Multi-Block AIV Orchestration
  *
- * Submits three AIV tasks with increasing block_num to exercise:
+ * Submits five AIV tasks with increasing block_num. Full-pool sizes use
+ * rt_available_cluster_count() (=N) / AIV pool (=2N):
  *   T0: block_num=4   — fits within a single sched thread
- *   T1: block_num=16  — saturates one sched thread (8 clusters × 2 AIV)
- *   T2: block_num=24  — forces cross-thread re-push via ready_queue
- *
- * Each task writes to a disjoint region of the output tensor using the
- * base_cl scalar to offset the block writes.
+ *   T1: block_num=16  — saturates one sched thread (typical 8 clusters x 2 AIV)
+ *   T2: block_num=N   — forces cross-thread re-push via ready_queue
+ *   T3: block_num=2N  — occupy all AIV cores across all sched threads
+ *   T4: block_num=4N  — two full rounds of all AIV cores
  *
  * Args layout: [output]
  */
@@ -49,23 +49,27 @@ static void submit_spmd_aiv(int32_t kernel_id, const Tensor &out, int16_t block_
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const int32_t n = rt_available_cluster_count();
+    const int16_t bn0 = 4;
+    const int16_t bn1 = 16;
+    const int16_t bn2 = static_cast<int16_t>(n);
+    const int16_t bn3 = static_cast<int16_t>(2 * n);
+    const int16_t bn4 = static_cast<int16_t>(4 * n);
+    const int64_t base0 = 0;
+    const int64_t base1 = base0 + bn0;
+    const int64_t base2 = base1 + bn1;
+    const int64_t base3 = base2 + bn2;
+    const int64_t base4 = base3 + bn3;
 
-    // T0: 4 blocks — basic multi-block
-    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, 4, 0);
+    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, bn0, base0);
+    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, bn1, base1);
+    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, bn2, base2);
+    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, bn3, base3);
+    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, bn4, base4);
 
-    // T1: 16 blocks — saturate one sched thread's AIV cores (8 clusters × 2 AIV)
-    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, 16, 4);
-
-    // T2: 24 blocks — cross-thread dispatch via ready_queue re-push
-    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, 24, 20);
-
-    // T3: 48 blocks — occupy all AIV cores across all 3 sched threads
-    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, 48, 44);
-
-    // T4: 96 blocks — two full rounds of all AIV cores
-    submit_spmd_aiv(FUNC_SPMD_WRITE_AIV, ext_output, 96, 92);
-
-    LOG_INFO_V9("[spmd_multiblock_aiv] Submitted 5 AIV tasks: block_num=4,16,24,48,96");
+    LOG_INFO_V9(
+        "[spmd_multiblock_aiv] Submitted 5 AIV tasks: block_num=4,16,%d,%d,%d", n, 2 * n, 4 * n
+    );
 }
 
 }  // extern "C"

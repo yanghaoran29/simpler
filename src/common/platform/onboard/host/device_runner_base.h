@@ -385,6 +385,16 @@ public:
     );
 
     /**
+     * Resolve block_dim via ACL (capped by PLATFORM_MAX_BLOCKDIM) and publish
+     * `runtime.worker_count = block_dim * cores_per_blockdim` before bind.
+     * host_build_graph host orch reads this for `runtime_finalize_after_wire`
+     * (bind runs before `run()`). Ensures the device/streams are up.
+     *
+     * @return resolved block_dim (>=1) on success, -1 on failure.
+     */
+    int early_resolve_worker_count(Runtime &runtime);
+
+    /**
      * Number of distinct callable_ids the AICPU has been asked to
      * dlopen for. Monotonically increases when an AICPU load succeeds
      * during prepare prewarm or first-run fallback; `unregister_callable`
@@ -439,9 +449,10 @@ public:
      * Execute a Runtime. Each arch implements its own `run()` — the bodies
      * are too divergent for a shared implementation (FFTS / dep_gen / ACL
      * register init on a2a3; MIX core handling on a5). See the subclass
-     * docs for the per-arch contract. `config` carries block_dim (0 = auto),
-     * aicpu_thread_num, and the diagnostic enables; each arch calls
-     * `apply_call_config(config)` at entry to latch the `enable_*_` members.
+     * docs for the per-arch contract. `config` carries diagnostics +
+     * runtime_env; block_dim / aicpu_thread_num are resolved by DeviceRunner
+     * (ACL + PLATFORM_MAX_*). Each arch calls `apply_call_config(config)`
+     * at entry to latch the `enable_*_` members.
      */
     virtual int run(Runtime &runtime, const CallConfig &config) = 0;
 
@@ -623,9 +634,8 @@ protected:
     // cover the byte-identical sub-sequences at the head and tail.
 
     /**
-     * Validate the caller's `launch_aicpu_num` against
-     * `PLATFORM_MAX_AICPU_THREADS`. Returns 0 on success, -1 on
-     * out-of-range with a logged error.
+     * Validate `launch_aicpu_num` is in [1, PLATFORM_MAX_AICPU_THREADS].
+     * Returns 0 on success, -1 on out-of-range with a logged error.
      */
     int validate_launch_aicpu_num(int launch_aicpu_num);
 
@@ -641,16 +651,24 @@ protected:
     void ensure_device_wall_buffer();
 
     /**
-     * Resolve the caller's `requested_block_dim` into a concrete
-     * block_dim:
-     *  - `requested_block_dim == 0`: auto-resolve from
-     *    `query_max_block_dim(stream_aicore_)`.
-     *  - otherwise: pass through `validate_block_dim`.
-     *
-     * Returns the resolved block_dim on success, -1 on failure.
-     * Updates `block_dim_` on success.
+     * Resolve AICore cluster count from ACL stream limits, capped by
+     * PLATFORM_MAX_BLOCKDIM. Returns the resolved block_dim on success,
+     * -1 on failure. Updates `block_dim_` on success.
      */
-    int resolve_block_dim(int requested_block_dim);
+    int resolve_block_dim();
+
+    /**
+     * Query ACL-visible AICPU core count, capped by
+     * PLATFORM_MAX_AICPU_THREADS. Falls back to the static cap when the
+     * query is unavailable.
+     */
+    int query_max_aicpu_threads();
+
+    /**
+     * Resolve AICPU launch thread count: min(ACL, PLATFORM_MAX_AICPU_THREADS).
+     * Returns >=1 on success, -1 on failure.
+     */
+    int resolve_aicpu_thread_num();
 
     /**
      * Per-run Runtime setup: derives `num_aicore = block_dim *

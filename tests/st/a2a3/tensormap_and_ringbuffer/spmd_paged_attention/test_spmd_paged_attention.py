@@ -57,7 +57,7 @@ class TestPagedAttentionUnrollTpushPop(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 256,
                 "num_heads": 16,
@@ -72,7 +72,7 @@ class TestPagedAttentionUnrollTpushPop(SceneTestCase):
         {
             "name": "Case2",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "manual": True,
             "params": {
                 "batch": 64,
@@ -87,14 +87,13 @@ class TestPagedAttentionUnrollTpushPop(SceneTestCase):
         },
         {
             # Intra-core trace target only (--case SmallCase1; manual -> not in
-            # the default onboard CI sweep). batch=24 == the orchestration's
-            # hardcoded SPMD_BLOCK_NUM, so every hw block gets one logical block
-            # (fewer stalls in the AIC<->AIV handshake). Same q_tile=16 path as
-            # Case1; passes golden at context_len=8192.
+            # the default onboard CI sweep). batch≈N (full-bin a2a3=24) so each
+            # hw block typically gets one logical block when N=24. Same q_tile=16
+            # path as Case1; passes golden at context_len=8192.
             "name": "SmallCase1",
             "platforms": ["a2a3"],
             "manual": True,
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 24,
                 "num_heads": 16,

@@ -174,7 +174,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             # producer-side DdrBarrierBeforeFfts cross-core DDR fence, validated
             # over 19 st-onboard-a2a3 rounds.
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 1,
                 "num_heads": 32,
@@ -182,7 +182,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 128,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },
@@ -190,7 +189,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             "name": "b4_h32_kv8_s512_bs128_fp16",
             "manual": True,
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 4,
                 "num_heads": 32,
@@ -198,7 +197,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 512,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },
@@ -206,7 +204,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             "name": "b1_h32_kv8_s16384_bs128_fp16",
             "manual": True,
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 1,
                 "num_heads": 32,
@@ -214,7 +212,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 16384,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },
@@ -222,7 +219,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             "name": "b1_h32_kv8_s4096_bs128_fp16",
             "manual": True,
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 1,
                 "num_heads": 32,
@@ -230,7 +227,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 4096,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },
@@ -238,7 +234,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             "name": "b1_h32_kv8_s6144_bs128_fp16",
             "manual": True,
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 1,
                 "num_heads": 32,
@@ -246,7 +242,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 6144,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },
@@ -254,7 +249,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             "name": "b1_h32_kv8_s8192_bs128_fp16",
             # enabled in CI to guard the long-sequence fix onboard.
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 1,
                 "num_heads": 32,
@@ -262,7 +257,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 8192,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },
@@ -270,7 +264,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             "name": "b2_h32_kv8_s4096_bs128_fp16",
             "manual": True,
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 2,
                 "num_heads": 32,
@@ -278,7 +272,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 4096,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },
@@ -286,7 +279,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             "name": "b2_h32_kv8_s8192_bs128_fp16",
             "manual": True,
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {
                 "batch": 2,
                 "num_heads": 32,
@@ -294,7 +287,6 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
                 "head_dim": 128,
                 "kv_seq": 8192,
                 "block_size": 128,
-                "block_dim": 24,
                 "dtype": "float16",
             },
         },

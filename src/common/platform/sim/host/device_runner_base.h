@@ -129,6 +129,16 @@ public:
         Runtime &runtime, int32_t callable_id, const HostApi *api, const void *orch_args,
         const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
     );
+
+    /**
+     * Resolve block_dim to PLATFORM_MAX_BLOCKDIM and set runtime.worker_count
+     * before bind — mirrors onboard early_resolve_worker_count for host orch.
+     * @return resolved block_dim (>=1) on success, -1 on failure.
+     */
+    int early_resolve_worker_count(Runtime &runtime);
+
+    /** Sim: PLATFORM_MAX_AICPU_THREADS (no ACL). */
+    int resolve_aicpu_thread_num();
     uint64_t upload_chip_callable_buffer(const ChipCallable *callable);
     int release_chip_callable_buffer(uint64_t hash);
     int launch_device_register(int32_t callable_id);

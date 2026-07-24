@@ -10,20 +10,19 @@
  */
 
 /**
- * CallConfig — per-NEXT_LEVEL-task config. Carries execution knobs
- * (block_dim, aicpu_thread_num), per-task runtime-environment overrides
- * (`runtime_env.ring_task_window` / `.ring_heap` / `.ring_dep_pool`, each a per-ring array) plus the five parallel
- * diagnostics sub-features under the profiling umbrella: `enable_l2_swimlane` (swimlane), `enable_dump_args`,
- * `enable_pmu`, `enable_dep_gen`, and `enable_scope_stats`. All five require `output_prefix` because they each write
- * sibling artifacts into that directory
+ * CallConfig — per-NEXT_LEVEL-task config. Carries per-task runtime-environment
+ * overrides (`runtime_env.ring_task_window` / `.ring_heap` / `.ring_dep_pool`,
+ * each a per-ring array) plus the five parallel diagnostics sub-features under
+ * the profiling umbrella: `enable_l2_swimlane` (swimlane), `enable_dump_args`,
+ * `enable_pmu`, `enable_dep_gen`, and `enable_scope_stats`. All five require
+ * `output_prefix` because they each write sibling artifacts into that directory
  * (`l2_swimlane_records.json` / `args_dump/` / `pmu.csv` / `deps.json` /
  * `scope_stats/scope_stats.jsonl`).
  *
- * `block_dim == 0` is a sentinel for "auto" — DeviceRunner resolves it at
- * run() time to the max block_dim the AICore stream allows
- * (aclrtGetStreamResLimit on onboard; PLATFORM_MAX_BLOCKDIM on sim).
- * Any positive value is taken as an explicit cap and validated against
- * the same stream-resource limits.
+ * AICore cluster count (block_dim) and AICPU thread count are not CallConfig
+ * knobs — DeviceRunner resolves them at run() from ACL (onboard) or
+ * PLATFORM_MAX_* (sim), capped by PLATFORM_MAX_BLOCKDIM /
+ * PLATFORM_MAX_AICPU_THREADS.
  *
  * Lives here (rather than chip_worker.h) so distributed task slot state
  * can store it directly without pulling in the full ChipWorker header
@@ -55,9 +54,8 @@ inline constexpr int RUNTIME_ENV_UINT64_FIELD_COUNT = RUNTIME_ENV_FIELD_GROUPS *
 #pragma pack(push, 1)
 // Per-task runtime-environment overrides — the programmatic equivalent of the
 // `PTO2_RING_*` env vars, grouped under their own sub-struct so they read as a
-// distinct configuration tier from the top-level execution knobs (block_dim,
-// aicpu_thread_num). Consumed by tensormap_and_ringbuffer only; other runtimes
-// ignore them.
+// distinct configuration tier from the diagnostics flags. Consumed by
+// tensormap_and_ringbuffer only; other runtimes ignore them.
 //
 // Each resource is a per-scope-depth-ring array (index 0..3). A 0 entry is
 // unset and falls through to the next precedence tier: per-ring entry >
@@ -108,8 +106,6 @@ struct RuntimeEnv {
 };
 
 struct CallConfig {
-    int32_t block_dim = 0;  // 0 = auto; resolved by DeviceRunner at run() time
-    int32_t aicpu_thread_num = 3;
     int32_t enable_l2_swimlane = 0;
     int32_t enable_dump_args = 0;
     int32_t enable_pmu = 0;  // 0 = disabled; >0 = enabled, value selects event type
@@ -143,6 +139,6 @@ struct CallConfig {
 #pragma pack(pop)
 static_assert(sizeof(RuntimeEnv) == RUNTIME_ENV_UINT64_FIELD_COUNT * sizeof(uint64_t), "RuntimeEnv wire layout drift");
 static_assert(
-    sizeof(CallConfig) == 7 * sizeof(int32_t) + RUNTIME_ENV_UINT64_FIELD_COUNT * sizeof(uint64_t) + 1024,
+    sizeof(CallConfig) == 5 * sizeof(int32_t) + RUNTIME_ENV_UINT64_FIELD_COUNT * sizeof(uint64_t) + 1024,
     "CallConfig wire layout drift"
 );

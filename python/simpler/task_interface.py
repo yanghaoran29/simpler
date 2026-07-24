@@ -930,7 +930,7 @@ class ChipWorker:
         worker = ChipWorker()
         worker.init(device_id=0, bins=bins)
         handle = worker.register_callable(chip_callable)
-        worker.run(handle, args=orch_args, config=CallConfig())  # block_dim defaults to 0 = auto
+        worker.run(handle, args=orch_args, config=CallConfig())
         worker.unregister_callable(handle)
         worker.finalize()
     """
@@ -1145,11 +1145,10 @@ class ChipWorker:
             handle: ``CallableHandle`` returned by ``register_callable``.
             args: ChipStorageTaskArgs for this invocation.
             config: Optional CallConfig. If None, a default is created.
-            **kwargs: Overrides applied to config (e.g. ``block_dim=8`` to
-                pin a smaller value than the default). Omit ``block_dim`` (or
-                set it to 0) to have DeviceRunner auto-resolve it to the max
-                the AICore stream allows (``aclrtGetStreamResLimit`` on
-                onboard, ``PLATFORM_MAX_BLOCKDIM`` on sim).
+            **kwargs: Overrides applied to diagnostic CallConfig fields.
+                Legacy ``block_dim`` / ``aicpu_thread_num`` kwargs are ignored;
+                DeviceRunner resolves launch counts from ACL (capped by
+                ``PLATFORM_MAX_*``; sim uses the ceiling).
 
         Returns ``None``. Per-stage run timing is emitted as ``[STRACE]`` log
         markers by the platform — see ``docs/dfx/host-trace.md``.

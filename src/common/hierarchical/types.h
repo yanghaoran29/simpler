@@ -326,7 +326,7 @@ struct TaskSlotState {
     // Stable callable identity submitted by the parent. Child-local integer
     // execution slots stay private to the target process.
     CallableIdentity callable{};
-    CallConfig config{};  // NEXT_LEVEL config (block_dim, aicpu_thread_num, diagnostics sub-features)
+    CallConfig config{};  // NEXT_LEVEL config (diagnostics + runtime_env; block_dim/aicpu resolved by DeviceRunner)
 
     // Unified task-args storage: `task_args` is the single-task builder;
     // when `is_group_` is true, `task_args_list` carries one TaskArgs per

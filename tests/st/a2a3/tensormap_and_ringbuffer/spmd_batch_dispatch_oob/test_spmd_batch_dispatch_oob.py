@@ -9,25 +9,24 @@
 # -----------------------------------------------------------------------------------------------------------
 """Regression test for batch dispatch OOB (issue #565).
 
-Submits two back-to-back MIX tasks each with block_num=48 (>> 24 clusters).
+Submits two back-to-back MIX tasks each with block_num=2*N (N=available_block_dim).
 When both tasks enter the ready queue simultaneously, pop_ready_tasks_batch
-returns got=2.  Without the fix, the first task's do-while drains all idle
-clusters, and the second task's do-while calls pop_first() on an empty mask,
-returning -1 as cluster_offset — an out-of-bounds array index.
-
-Each block writes float(block_idx) at 3 cache lines (AIC, AIV0, AIV1).
-Output tensor: 2 * 48 * 3 = 288 cache lines = 4608 float32.
+returns got=2.
 """
 
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, available_block_dim, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_BLOCK = 3
-TASKS = [(48, 0), (48, 144)]
-TOTAL_CL = sum(bn * SLOTS_PER_BLOCK for bn, _ in TASKS)
+
+
+def _tasks(platform: str):
+    n = available_block_dim(platform)
+    bn = 2 * n
+    return [(bn, 0), (bn, bn * SLOTS_PER_BLOCK)]
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -67,17 +66,21 @@ class TestSpmdBatchDispatchOob(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {},
         }
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
+        platform = getattr(self, "_st_platform", "a2a3")
+        tasks = _tasks(platform)
+        total_cl = sum(bn * SLOTS_PER_BLOCK for bn, _ in tasks)
+        return TaskArgsBuilder(Tensor("output", torch.zeros(total_cl * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
 
     def compute_golden(self, args, params):
+        platform = getattr(self, "_st_platform", "a2a3")
         out = args.output
-        for block_num, base_cl in TASKS:
+        for block_num, base_cl in _tasks(platform):
             for block_idx in range(block_num):
                 for slot in range(SLOTS_PER_BLOCK):
                     cl = base_cl + block_idx * SLOTS_PER_BLOCK + slot

@@ -907,15 +907,16 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
 
     // Encode require_sync_start into active_mask bit 3 (only meaningful for tasks with block_num > 1)
     if (block_num > 1 && args.launch_spec.require_sync_start()) {
-        // Deadlock check: block_num >= total available slots of the required type.
-        // For MIX/AIC: limit is total_cluster_count (one AIC per cluster).
-        // For AIV:     limit is total_aiv_count.
+        // Hard capacity: require_sync_start needs every block resident at once.
+        // AIC/MIX → total_cluster_count; AIV → total_aiv_count.
+        // Exceeding (or unknown limit<=0) is a guaranteed hang — fail at submit.
         PTO2ResourceShape shape = active_mask.to_shape();
         int32_t limit = (shape == PTO2ResourceShape::AIV) ? orch->total_aiv_count : orch->total_cluster_count;
-        if (limit > 0 && block_num > limit) {
+        if (limit <= 0 || block_num > limit) {
             report_fatal(
                 PTO2_ERROR_REQUIRE_SYNC_START_INVALID, __FUNCTION__,
-                "require_sync_start block_num=%d > limit=%d (deadlock guaranteed)", block_num, limit
+                "require_sync_start block_num=%d > simultaneous capacity limit=%d (shape=%d)", block_num, limit,
+                static_cast<int>(shape)
             );
             return TaskOutputTensors{};
         }

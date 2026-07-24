@@ -7,22 +7,23 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""A wide flagged producer feeds a MIX sync_start early-dispatch consumer.
+"""A flagged producer feeds a MIX sync_start early-dispatch consumer (a2a3).
 
-The consumer must not stage until every producer block range has reserved a core slot;
-otherwise it occupies every AIC slot and strands the producer's unclaimed remainder.
+Sized from available_block_dim (=N).
 """
 
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, available_block_dim, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
-PRODUCER_BLOCKS = 50
-SYNC_BLOCKS = 24
-SYNC_BASE_CL = PRODUCER_BLOCKS
-TOTAL_CL = SYNC_BASE_CL + SYNC_BLOCKS * 3
+SLOTS_PER_BLOCK = 3
+
+
+def _layout(platform: str):
+    n = available_block_dim(platform)
+    return n, n, n + n * SLOTS_PER_BLOCK
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -72,21 +73,25 @@ class TestSpmdSyncStartEarlyDispatch(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {},
         }
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
+        platform = getattr(self, "_st_platform", "a2a3")
+        _, _, total_cl = _layout(platform)
+        return TaskArgsBuilder(Tensor("output", torch.zeros(total_cl * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
 
     def compute_golden(self, args, params):
+        platform = getattr(self, "_st_platform", "a2a3")
+        producer_blocks, sync_blocks, _ = _layout(platform)
         out = args.output
-        for block_idx in range(PRODUCER_BLOCKS):
+        for block_idx in range(producer_blocks):
             out[block_idx * FLOATS_PER_CACHE_LINE] = float(block_idx)
-        for block_idx in range(SYNC_BLOCKS):
-            for slot in range(3):
-                out[(SYNC_BASE_CL + block_idx * 3 + slot) * FLOATS_PER_CACHE_LINE] = float(block_idx)
+        for block_idx in range(sync_blocks):
+            for slot in range(SLOTS_PER_BLOCK):
+                out[(producer_blocks + block_idx * SLOTS_PER_BLOCK + slot) * FLOATS_PER_CACHE_LINE] = float(block_idx)
 
 
 if __name__ == "__main__":

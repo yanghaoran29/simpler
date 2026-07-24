@@ -35,7 +35,7 @@ Every task flowing through any level carries exactly three pieces of data:
 | ------ | ---- | ---------- |
 | `CallableHandle` / `CallableIdentity` | hash digest + kind + namespace | What the target worker should execute; targets resolve the digest to a local slot |
 | `TaskArgs` | user builder class | Tensors + scalars + per-tensor tags (IN/OUT/INOUT/etc.) |
-| `CallConfig` | small POD | Execution knobs (block_dim, aicpu_thread_num, profiling/dump/PMU flags, …) |
+| `CallConfig` | small POD | Diagnostics + runtime_env (profiling/dump/PMU flags, …); block_dim/aicpu resolved by DeviceRunner |
 
 Everything else in the engine is either plumbing (slots, ring, tensormap,
 scheduler) or target-local executable state resolved from the callable digest.
@@ -537,7 +537,7 @@ w3 = Worker(level=3, child_mode=PROCESS)
 w3.add_worker(NEXT_LEVEL, chip_worker_0)
 w3.init()    # fork chip_0 here
 
-w3.run(my_orch, args, CallConfig(block_dim=3))
+w3.run(my_orch, args, CallConfig())
 ```
 
 Step-by-step (one chip worker):

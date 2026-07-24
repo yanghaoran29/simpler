@@ -7,21 +7,29 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""SPMD multi-block MIX: five MIX tasks with block_num = 2, 8, 12, 24, 48.
+"""SPMD multi-block MIX: five MIX tasks with block_num = 2, 8, 12, N, 2N.
 
-Each block occupies 3 cache lines (AIC, AIV0, AIV1).
-Output tensor: 282 cache lines = 4512 float32.
+Each block occupies 3 cache lines (AIC, AIV0, AIV1). N = available_block_dim.
 """
 
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, available_block_dim, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_BLOCK = 3
-TASKS = [(2, 0), (8, 6), (12, 30), (24, 66), (48, 138)]
-TOTAL_CL = sum(bn * SLOTS_PER_BLOCK for bn, _ in TASKS)
+
+
+def _tasks(platform: str):
+    n = available_block_dim(platform)
+    bns = [2, 8, 12, n, 2 * n]
+    tasks = []
+    base = 0
+    for bn in bns:
+        tasks.append((bn, base))
+        base += bn * SLOTS_PER_BLOCK
+    return tasks
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -41,10 +49,6 @@ class TestSpmdMultiblockMix(SceneTestCase):
                 "name": "SPMD_MIX_AIC",
                 "source": "kernels/aic/kernel_spmd_mix.cpp",
                 "core_type": "aic",
-                # Cooperative MIX (AIC+AIV0+AIV1 share one args[]). Each subtask
-                # declares the shared output it uses (slot 0, INOUT); the dump
-                # records that tensor once per declaring subtask, each under its
-                # own func_id.
                 "signature": [D.INOUT],
             },
             {
@@ -67,18 +71,22 @@ class TestSpmdMultiblockMix(SceneTestCase):
     CASES = [
         {
             "name": "Case1",
-            "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "platforms": ['a2a3sim', 'a2a3'],
+            "config": {},
             "params": {},
         }
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
+        platform = getattr(self, "_st_platform", 'a2a3')
+        tasks = _tasks(platform)
+        total_cl = sum(bn * SLOTS_PER_BLOCK for bn, _ in tasks)
+        return TaskArgsBuilder(Tensor("output", torch.zeros(total_cl * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
 
     def compute_golden(self, args, params):
+        platform = getattr(self, "_st_platform", 'a2a3')
         out = args.output
-        for block_num, base_cl in TASKS:
+        for block_num, base_cl in _tasks(platform):
             for block_idx in range(block_num):
                 for slot in range(SLOTS_PER_BLOCK):
                     cl = base_cl + block_idx * SLOTS_PER_BLOCK + slot

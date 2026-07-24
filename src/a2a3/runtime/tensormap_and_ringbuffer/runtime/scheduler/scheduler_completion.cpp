@@ -745,6 +745,36 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
         int32_t available =
             count_global_available(shape, slot_state->active_mask.core_mask(), /*include_pending=*/gated);
         if (available < block_num) {
+            // Physical simultaneous capacity: AIC/MIX → aic_count_, AIV → aiv_count_.
+            // If the cohort is larger than capacity, retrying drain can never succeed —
+            // latch a scheduler fatal and abort drain instead of spinning forever.
+            const int32_t physical_limit =
+                (shape == PTO2ResourceShape::AIV) ? aiv_count_ : aic_count_;
+            if (block_num > physical_limit || physical_limit <= 0) {
+                LOG_ERROR(
+                    "sync_start drain: block_num=%d > physical_limit=%d (shape=%d); aborting", block_num,
+                    physical_limit, static_cast<int>(shape)
+                );
+                if (sched_ != nullptr && sched_->sm_header != nullptr) {
+                    int32_t expected = PTO2_ERROR_NONE;
+                    sched_->sm_header->sched_error_code.compare_exchange_strong(
+                        expected, PTO2_ERROR_REQUIRE_SYNC_START_INVALID, std::memory_order_acq_rel,
+                        std::memory_order_acquire
+                    );
+                    if (thread_idx >= 0 && thread_idx < 32) {
+                        sched_->sm_header->sched_error_bitmap.fetch_or(
+                            1U << static_cast<uint32_t>(thread_idx), std::memory_order_acq_rel
+                        );
+                    }
+                }
+                drain_state_.pending_task.store(nullptr, std::memory_order_release);
+                drain_state_.drain_stage_go.store(0, std::memory_order_relaxed);
+                drain_state_.drain_stage_done_mask.store(0, std::memory_order_relaxed);
+                drain_state_.drain_ack_mask.store(0, std::memory_order_relaxed);
+                drain_state_.drain_worker_elected.store(0, std::memory_order_relaxed);
+                drain_state_.sync_start_pending.store(0, std::memory_order_release);
+                return;
+            }
             // Insufficient -- reset so all threads resume completion polling to free cores, then retry.
             drain_state_.drain_ack_mask.store(0, std::memory_order_release);
             drain_state_.drain_worker_elected.store(0, std::memory_order_release);

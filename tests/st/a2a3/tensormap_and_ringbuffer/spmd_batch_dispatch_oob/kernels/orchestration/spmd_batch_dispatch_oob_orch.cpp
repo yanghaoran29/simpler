@@ -12,8 +12,9 @@
 /**
  * Regression test for batch dispatch OOB (issue #565).
  *
- * Submits two MIX tasks with block_num=48 back-to-back so they are both
- * in the ready queue when the scheduler runs pop_ready_tasks_batch.
+ * Submits two MIX tasks with block_num=2*N (N = rt_available_cluster_count())
+ * back-to-back so they are both in the ready queue when the scheduler runs
+ * pop_ready_tasks_batch.
  *
  * Args layout: [output]
  */
@@ -51,14 +52,16 @@ static void submit_spmd_mix(const Tensor &out, int16_t block_num, int64_t base_c
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const int32_t n = rt_available_cluster_count();
+    const int16_t bn = static_cast<int16_t>(2 * n);
+    const int64_t base1 = static_cast<int64_t>(bn) * 3;
 
-    // Two back-to-back tasks with block_num=48 (2x cluster count).
-    // Both land in the ready queue simultaneously, triggering got=2 in
-    // pop_ready_tasks_batch — the scenario that causes OOB without the fix.
-    submit_spmd_mix(ext_output, 48, 0);
-    submit_spmd_mix(ext_output, 48, 144);
+    // Two back-to-back tasks with block_num=2N. Both land in the ready queue
+    // simultaneously, triggering got=2 in pop_ready_tasks_batch.
+    submit_spmd_mix(ext_output, bn, 0);
+    submit_spmd_mix(ext_output, bn, base1);
 
-    LOG_INFO_V9("[spmd_batch_dispatch_oob] Submitted 2 MIX tasks: block_num=48,48");
+    LOG_INFO_V9("[spmd_batch_dispatch_oob] Submitted 2 MIX tasks: block_num=%d,%d", bn, bn);
 }
 
 }  // extern "C"

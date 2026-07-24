@@ -7,20 +7,28 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""SPMD multi-block AIV: five AIV tasks with block_num = 4, 16, 24, 48, 96.
+"""SPMD multi-block AIV: five AIV tasks with block_num = 4, 16, N, 2N, 4N.
 
-Each block writes float(block_idx) at cache line (base_cl + block_idx).
-Output tensor: 188 cache lines = 3008 float32.
+N = available_block_dim. Each block writes float(block_idx) at cache line (base_cl + block_idx).
 """
 
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, available_block_dim, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
-TASKS = [(4, 0), (16, 4), (24, 20), (48, 44), (96, 92)]
-TOTAL_CL = sum(bn for bn, _ in TASKS)
+
+
+def _tasks(platform: str):
+    n = available_block_dim(platform)
+    bns = [4, 16, n, 2 * n, 4 * n]
+    tasks = []
+    base = 0
+    for bn in bns:
+        tasks.append((bn, base))
+        base += bn
+    return tasks
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -35,32 +43,29 @@ class TestSpmdMultiblockAiv(SceneTestCase):
             "signature": [D.INOUT],
         },
         "incores": [
-            {
-                "func_id": 0,
-                "name": "SPMD_WRITE_AIV",
-                "source": "kernels/aiv/kernel_spmd_write.cpp",
-                "core_type": "aiv",
-                # Single-AIV task with one INOUT tensor at payload slot 0.
-                "signature": [D.INOUT],
-            },
+            {"func_id": 0, "name": "SPMD_WRITE_AIV", "source": "kernels/aiv/kernel_spmd_write.cpp", "core_type": "aiv"},
         ],
     }
 
     CASES = [
         {
             "name": "Case1",
-            "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "platforms": ['a2a3sim', 'a2a3'],
+            "config": {},
             "params": {},
         }
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
+        platform = getattr(self, "_st_platform", 'a2a3')
+        tasks = _tasks(platform)
+        total_cl = sum(bn for bn, _ in tasks)
+        return TaskArgsBuilder(Tensor("output", torch.zeros(total_cl * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
 
     def compute_golden(self, args, params):
+        platform = getattr(self, "_st_platform", 'a2a3')
         out = args.output
-        for block_num, base_cl in TASKS:
+        for block_num, base_cl in _tasks(platform):
             for block_idx in range(block_num):
                 out[(base_cl + block_idx) * FLOATS_PER_CACHE_LINE] = float(block_idx)
 

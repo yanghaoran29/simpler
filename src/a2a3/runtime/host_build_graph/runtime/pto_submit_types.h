@@ -114,6 +114,16 @@ enum class PTO2ResourceShape : uint8_t {
     DUMMY = 3,  // Dependency-only (no AICore dispatch)
 };
 
+// Max require_sync_start SPMD width per resource shape for this run
+// (mirrors submit-time hard limits: aic/mix = total_cluster_count,
+// aiv = total_aiv_count). Not instantaneous free-core counts.
+struct PTO2SyncStartCapacity {
+    int32_t aic{0};
+    int32_t aiv{0};
+    int32_t mix{0};
+};
+
+
 // Number of *dispatchable* resource shapes (AIC, AIV, MIX). DUMMY does not
 // allocate a per-shape ready_queue entry / local buffer — it lives in a
 // dedicated queue inside PTO2SchedulerState.

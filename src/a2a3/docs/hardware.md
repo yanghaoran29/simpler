@@ -145,12 +145,12 @@ correctness, prefer ACL or CANN ini.
 
 | You are doing… | Use |
 | -------------- | --- |
-| Configuring runtime `aicpu_thread_num` (per-case config) | **user-accessible** (6 — never request more) |
-| Setting kernel `block_dim` for AICore launch | **user-accessible** (24 — runtime rejects > 24) |
+| Understanding DeviceRunner AICPU launch count | **ACL AICPU** capped by `PLATFORM_MAX_AICPU_THREADS` (4) |
+| Understanding DeviceRunner AICore cluster count | **ACL cube** capped by `PLATFORM_MAX_BLOCKDIM` (24) |
 | Reading the spec sheet / product datasheet | **spec / user-accessible** (24 AIC, 6 AICPU) |
 | Asking "what is in silicon" | **HAL physical** (25 AIC, 8 AICPU slots) — 1 PG-disabled + 1 OS-reserved on AICPU; 1 PG-disabled on AICore |
-| Debugging "I set `aicpu_thread_num=8`, got error" | gap is **cpu_id 0 (AICPU OS) + cpu_id 1 (PG)** — both unreachable from runtime; cap is 6 |
-| Debugging "I set `block_dim=25`, got error" | runtime cap is **24**; the +1 slot is PG fab-disabled |
+| Debugging "why can't I launch 8 AICPU?" | CallConfig no longer accepts a knob; DeviceRunner caps at `PLATFORM_MAX_AICPU_THREADS` (4). Silicon gap is **cpu_id 0 (OS) + cpu_id 1 (PG)** |
+| Debugging "why isn't cluster count 25?" | DeviceRunner caps at `PLATFORM_MAX_BLOCKDIM` (24); the +1 slot is PG fab-disabled |
 | Building a chip-management dashboard | use HAL OCCUPY + OS_SCHED to expose the split; cite `tools/cann-examples/aicpu-device-query/` for the OS_SCHED query |
 
 For everyday kernel and runtime work: **always use the user-accessible
@@ -158,6 +158,26 @@ view** (ACL, CANN ini, `rtGetAiCpuCount`). The HAL physical-view counts
 are diagnostic only and are exposed by `tools/cann-examples/aicpu-topo/`
 (host side) and `tools/cann-examples/aicpu-device-query/` (device side,
 for the OS_SCHED bitmap that needs an AICPU OS context).
+
+## Runtime adaptation: `PLATFORM_MAX_BLOCKDIM` vs this-run `N`
+
+`PLATFORM_MAX_BLOCKDIM` (24 on a2a3) is the **compile-time ceiling** used for
+static array sizes and validate upper bounds. The **this-run cluster count
+`N`** is what ACL reports via `aclrtGetStreamResLimit` (cube cores), capped by
+that ceiling — typically 24 on a full-bin part, lower when Partial-Good / a
+restricted ACL view exposes fewer clusters (e.g. N=20).
+
+| Concept | Source | Role |
+| ------- | ------ | ---- |
+| Ceiling | `PLATFORM_MAX_BLOCKDIM` | Array sizes; reject `block_dim > ceiling` |
+| This-run `N` | ACL cube limit (onboard) / ceiling (sim) | `resolve_block_dim`, `worker_count = N*3`, orch `rt_available_cluster_count()` |
+
+DeviceRunner always resolves `block_dim` / `aicpu_thread_num` from ACL
+(capped by `PLATFORM_MAX_*`); CallConfig no longer carries these knobs.
+Example: N=20 clusters with `PLATFORM_MAX_AICPU_THREADS=4` → 3 sched + 1 orch.
+
+Logical cores stay `0..N-1`; the runtime does **not** remap around fab-disabled
+physical clusters.
 
 ## Host bus
 
