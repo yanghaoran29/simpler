@@ -214,22 +214,7 @@ int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
 
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     apply_call_config(config);
-    int block_dim = config.block_dim;
-    const int launch_aicpu_num = config.aicpu_thread_num;
     clear_cpu_sim_shared_storage();
-    if (launch_aicpu_num < 1 || launch_aicpu_num > PLATFORM_MAX_AICPU_THREADS) {
-        LOG_ERROR("launch_aicpu_num (%d) must be in range [1, %d]", launch_aicpu_num, PLATFORM_MAX_AICPU_THREADS);
-        return -1;
-    }
-
-    if (block_dim == 0) {
-        block_dim = PLATFORM_MAX_BLOCKDIM;
-        LOG_INFO_V0("block_dim auto-resolved to %d", block_dim);
-    }
-    if (block_dim < 1 || block_dim > PLATFORM_MAX_BLOCKDIM) {
-        LOG_ERROR("block_dim (%d) must be in range [1, %d]", block_dim, PLATFORM_MAX_BLOCKDIM);
-        return -1;
-    }
 
     int rc = ensure_device_initialized();
     if (rc != 0) {
@@ -245,6 +230,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
+    const int launch_aicpu_num = resolve_aicpu_thread_num();
+    if (launch_aicpu_num < 1) return -1;
+    int block_dim = PLATFORM_MAX_BLOCKDIM;
+    LOG_INFO_V0("block_dim resolved to %d (sim)", block_dim);
     block_dim_ = block_dim;
     int num_aicore = block_dim * cores_per_blockdim_;
 

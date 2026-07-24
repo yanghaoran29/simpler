@@ -68,18 +68,7 @@ class TestSpmdBasic(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
-            "params": {},
-        },
-        {
-            # Exercises the CallConfig block_dim=0 "auto" path: scene_test
-            # omits block_dim, so DeviceRunner resolves it to the stream's
-            # max (PLATFORM_MAX_BLOCKDIM on sim, aclrtGetStreamResLimit on
-            # onboard). The SPMD task itself is block_num=1, so the golden
-            # is identical to Case1 regardless of how many workers exist.
-            "name": "Case2_AutoBlockDim",
-            "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
+            "config": {},
             "params": {},
         },
     ]

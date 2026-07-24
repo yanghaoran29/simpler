@@ -8,6 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Scene test setup — compilation toolchain, test framework, and platform discovery."""
 
+from .available_block_dim import available_block_dim, platform_max_block_dim
 from .elf_parser import extract_text_section
 from .kernel_compiler import KernelCompiler
 from .platform_info import parse_platform
@@ -24,10 +25,12 @@ __all__ = [
     "SceneTestCase",
     "Tensor",
     "TaskArgsBuilder",
+    "available_block_dim",
     "ensure_pto_isa_root",
     "extract_text_section",
     "make_tensor_arg",
     "parse_platform",
+    "platform_max_block_dim",
     "scene_test",
     "torch_dtype_to_datatype",
 ]

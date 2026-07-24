@@ -507,6 +507,32 @@ int SimDeviceRunnerBase::bind_callable_to_runtime(
     );
 }
 
+int SimDeviceRunnerBase::early_resolve_worker_count(Runtime &runtime) {
+    int rc = ensure_device_initialized();
+    if (rc != 0) {
+        LOG_ERROR("early_resolve_worker_count: ensure_device_initialized failed: %d", rc);
+        return -1;
+    }
+    int block_dim = PLATFORM_MAX_BLOCKDIM;
+    LOG_INFO_V0("early_resolve_worker_count: block_dim resolved to %d", block_dim);
+    int num_aicore = block_dim * cores_per_blockdim_;
+    if (num_aicore > RUNTIME_MAX_WORKER) {
+        LOG_ERROR(
+            "early_resolve_worker_count: block_dim (%d) exceeds RUNTIME_MAX_WORKER (%d)", block_dim, RUNTIME_MAX_WORKER
+        );
+        return -1;
+    }
+    block_dim_ = block_dim;
+    runtime.set_worker_count(num_aicore);
+    worker_count_ = num_aicore;
+    return block_dim;
+}
+
+int SimDeviceRunnerBase::resolve_aicpu_thread_num() {
+    LOG_INFO_V0("aicpu_thread_num resolved to %d (sim PLATFORM_MAX)", PLATFORM_MAX_AICPU_THREADS);
+    return PLATFORM_MAX_AICPU_THREADS;
+}
+
 // Eager prebuilt-arena warm-up. A runtime with a prebuilt runtime arena
 // (tensormap_and_ringbuffer) provides a strong prewarm_config_impl in its
 // runtime_maker.cpp that overrides this weak no-op default; runtimes without one

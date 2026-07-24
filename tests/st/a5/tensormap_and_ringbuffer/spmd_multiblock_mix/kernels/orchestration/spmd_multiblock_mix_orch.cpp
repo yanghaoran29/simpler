@@ -12,13 +12,13 @@
 /**
  * SPMD Multi-Block MIX Orchestration
  *
- * Submits three MIX tasks (AIC + AIV0 + AIV1) with increasing block_num:
+ * Submits five MIX tasks with increasing block_num. Full-pool sizes use
+ * rt_available_cluster_count() (=N), not a hardcoded ceiling:
  *   T0: block_num=2   — basic multi-block MIX
- *   T1: block_num=8   — saturates one sched thread (8 clusters)
+ *   T1: block_num=8   — saturates one sched thread (typical 8 clusters)
  *   T2: block_num=12  — forces cross-thread re-push via ready_queue
- *
- * Each task writes to a disjoint region of the output tensor using the
- * base_cl scalar to offset the block writes.
+ *   T3: block_num=N   — occupy all clusters across all sched threads
+ *   T4: block_num=2N  — two full rounds of all clusters
  *
  * Args layout: [output]
  */
@@ -58,23 +58,27 @@ static void submit_spmd_mix(
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const int32_t n = rt_available_cluster_count();
+    const int16_t bn0 = 2;
+    const int16_t bn1 = 8;
+    const int16_t bn2 = 12;
+    const int16_t bn3 = static_cast<int16_t>(n);
+    const int16_t bn4 = static_cast<int16_t>(2 * n);
+    const int64_t base0 = 0;
+    const int64_t base1 = base0 + bn0 * 3;
+    const int64_t base2 = base1 + bn1 * 3;
+    const int64_t base3 = base2 + bn2 * 3;
+    const int64_t base4 = base3 + bn3 * 3;
 
-    // T0: 2 blocks (6 CL) — basic multi-block MIX
-    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, 2, 0);
+    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, bn0, base0);
+    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, bn1, base1);
+    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, bn2, base2);
+    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, bn3, base3);
+    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, bn4, base4);
 
-    // T1: 8 blocks (24 CL) — saturate one sched thread's clusters
-    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, 8, 6);
-
-    // T2: 12 blocks (36 CL) — cross-thread dispatch via ready_queue re-push
-    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, 12, 30);
-
-    // T3: 24 blocks (72 CL) — occupy all clusters across all 3 sched threads
-    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, 24, 66);
-
-    // T4: 48 blocks (144 CL) — two full rounds of all clusters
-    submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, 48, 138);
-
-    LOG_INFO_V9("[spmd_multiblock_mix] Submitted 5 MIX tasks: block_num=2,8,12,24,48");
+    LOG_INFO_V9(
+        "[spmd_multiblock_mix] Submitted 5 MIX tasks: block_num=2,8,12,%d,%d", n, 2 * n
+    );
 }
 
 }  // extern "C"

@@ -415,8 +415,6 @@ def encode_hello(payload: HelloPayload) -> bytes:
 
 def decode_call_config(reader: _Reader) -> CallConfig:
     cfg = CallConfig()
-    cfg.block_dim = reader.i32()
-    cfg.aicpu_thread_num = reader.i32()
     cfg.enable_l2_swimlane = reader.i32()
     cfg.enable_dump_args = reader.i32()
     cfg.enable_pmu = reader.i32()

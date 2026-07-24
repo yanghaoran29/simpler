@@ -1063,12 +1063,16 @@ class SceneTestCase:
         from simpler.task_interface import CallConfig  # noqa: PLC0415
 
         config = CallConfig()
-        # Default to 0 (CallConfig "auto" sentinel) when a case omits
-        # block_dim — DeviceRunner resolves it to the stream's max capacity
-        # at run() time. Cases that need a specific value still set it
-        # explicitly in their config dict.
-        config.block_dim = config_dict.get("block_dim", 0)
-        config.aicpu_thread_num = config_dict.get("aicpu_thread_num", 3)
+        # block_dim / aicpu_thread_num are resolved by DeviceRunner (ACL or
+        # PLATFORM_MAX_*); ignore legacy keys if still present in case configs.
+        if "block_dim" in config_dict or "aicpu_thread_num" in config_dict:
+            import warnings
+
+            warnings.warn(
+                "CallConfig no longer accepts block_dim/aicpu_thread_num; "
+                "DeviceRunner resolves them from hardware. Ignoring case config keys.",
+                stacklevel=2,
+            )
         # Per-task ring sizing (tensormap_and_ringbuffer only; 0 = unset),
         # nested under the "runtime_env" key. Takes precedence over the
         # PTO2_RING_* env vars / RUNTIME_ENV. Each value is either a scalar
@@ -1392,6 +1396,9 @@ class SceneTestCase:
             import pytest  # noqa: PLC0415
 
             pytest.skip(f"No cases matched {cls_name} (platform={st_platform}, manual={manual_mode})")
+
+        # Expose active platform to generate_args / compute_golden (e.g. available_block_dim).
+        self._st_platform = st_platform
 
         run_class_cases(
             st_worker,

@@ -16,8 +16,9 @@
  * the producer is flagged allow_early_resolve (1) or not (0), so the same scene
  * can compare early vs ready-only swimlanes.
  *
- *   P: AIC core_num=50, base_cl=0, allow_early_resolve = scalar early_on
- *   C: MIX core_num=24, base_cl=50, require_sync_start=true, dep=[P]
+ * Sized from rt_available_cluster_count() (=N):
+ *   P: AIC core_num=N, base_cl=0, allow_early_resolve = scalar early_on
+ *   C: MIX core_num=N, base_cl=N, require_sync_start=true, dep=[P]
  *
  * Args layout: [output], scalar: early_on
  */
@@ -74,14 +75,16 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     const Tensor &ext_output = orch_args.tensor(0).ref();
     const bool early_on = orch_args.scalar(0) != 0;
 
+    const int32_t n = rt_available_cluster_count();
+    // Sequential via dep: both can use the full user-visible AIC/cluster pool.
     rt_scope_begin(PTO2ScopeMode::MANUAL);
-    PTO2TaskId prod = submit_producer(ext_output, 50, 0, early_on);
-    submit_sync_consumer(ext_output, 24, 50, prod);
+    PTO2TaskId prod = submit_producer(ext_output, static_cast<int16_t>(n), 0, early_on);
+    submit_sync_consumer(ext_output, static_cast<int16_t>(n), n, prod);
     rt_scope_end();
 
     LOG_INFO_V9(
-        "[spmd_sync_start_early_dispatch] early_on=%d wide AIC producer + MIX sync_start consumer submitted",
-        early_on ? 1 : 0
+        "[spmd_sync_start_early_dispatch] early_on=%d AIC producer(%d) + MIX sync_start consumer(%d) submitted",
+        early_on ? 1 : 0, n, n
     );
 }
 

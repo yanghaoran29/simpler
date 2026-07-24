@@ -12,10 +12,9 @@
 /**
  * SPMD sync_start MIX pending-spill Orchestration (a5)
  *
- * Port of a2a3 spmd_sync_start_mix_spill, sized for a5 (36 AIC + 72 AIV):
- *   P: AIV core_num=72, base_cl=0,  allow_early_resolve = scalar early_on (fills all AIV)
- *   C: MIX core_num=24, base_cl=72, require_sync_start=true, dep=[P]
- *      → 24 AIC idle→running, 48 AIV busy→pending (per-core spill + rendezvous)
+ * Sized from rt_available_* (not hardcoded 24/36/72):
+ *   P: AIV core_num=available_aiv, base_cl=0,  allow_early_resolve = scalar early_on
+ *   C: MIX core_num=available_cluster, base_cl=available_aiv, require_sync_start=true, dep=[P]
  *
  * Args layout: [output], scalar: early_on
  */
@@ -75,12 +74,16 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     const Tensor &ext_output = orch_args.tensor(0).ref();
     const bool early_on = orch_args.scalar(0) != 0;
 
-    PTO2TaskId prod = submit_aiv_producer(ext_output, 72, 0, early_on);
-    submit_mix_sync_consumer(ext_output, 24, 72, prod);
+    const PTO2SyncStartCapacity cap = rt_sync_start_capacity();
+    const int32_t n_cluster = cap.mix;
+    const int32_t n_aiv = cap.aiv;
+
+    PTO2TaskId prod = submit_aiv_producer(ext_output, static_cast<int16_t>(n_aiv), 0, early_on);
+    submit_mix_sync_consumer(ext_output, static_cast<int16_t>(n_cluster), n_aiv, prod);
 
     LOG_INFO_V9(
-        "[spmd_sync_start_mix_spill] early_on=%d AIV producer(72) + MIX sync_start consumer(24) submitted",
-        early_on ? 1 : 0
+        "[spmd_sync_start_mix_spill] early_on=%d sync_cap aic=%d aiv=%d mix=%d; AIV producer(%d) + MIX sync_start consumer(%d) submitted",
+        early_on ? 1 : 0, cap.aic, cap.aiv, cap.mix, n_aiv, n_cluster
     );
 }
 

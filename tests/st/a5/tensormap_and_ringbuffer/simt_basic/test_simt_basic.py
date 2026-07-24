@@ -52,7 +52,7 @@ class TestSimtBasic(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a5", "a5sim"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
+            "config": {},
             "params": {},
         }
     ]

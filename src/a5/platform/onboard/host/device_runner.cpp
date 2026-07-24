@@ -153,8 +153,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
     apply_call_config(config);
-    int block_dim = config.block_dim;
-    const int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
     // in-place drain could not clear it. Refuse to run rather than cascade
     // into halResMap rc=62 (init_aicore_register_addresses) or rtMalloc
@@ -172,7 +170,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         );
         return -1;
     }
-    if (validate_launch_aicpu_num(launch_aicpu_num) != 0) return -1;
 
     int rc = ensure_device_initialized();
     if (rc != 0) {
@@ -182,8 +179,11 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     ensure_device_wall_buffer();
 
-    block_dim = resolve_block_dim(block_dim);
+    int block_dim = resolve_block_dim();
     if (block_dim < 0) return -1;
+    const int launch_aicpu_num = resolve_aicpu_thread_num();
+    if (launch_aicpu_num < 0) return -1;
+    if (validate_launch_aicpu_num(launch_aicpu_num) != 0) return -1;
     int num_aicore = block_dim * cores_per_blockdim_;
 
     rc = init_aicore_register_addresses(&kernel_args_.args.regs, static_cast<uint64_t>(device_id_), mem_alloc_);

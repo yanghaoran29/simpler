@@ -7,22 +7,24 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""A wide flagged producer feeds a MIX sync_start early-dispatch consumer (a5).
+"""A flagged producer feeds a MIX sync_start early-dispatch consumer (a5).
 
-Cases EarlyOn / EarlyOff toggle producer ``allow_early_resolve`` via orch scalar
-so swimlanes can be compared under identical topology.
+Sized from available_block_dim (=N). Cases EarlyOn / EarlyOff toggle producer
+``allow_early_resolve`` via orch scalar so swimlanes can be compared.
 """
 
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, available_block_dim, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
-PRODUCER_BLOCKS = 50
-SYNC_BLOCKS = 24
-SYNC_BASE_CL = PRODUCER_BLOCKS
-TOTAL_CL = SYNC_BASE_CL + SYNC_BLOCKS * 3
+SLOTS_PER_BLOCK = 3
+
+
+def _layout(platform: str):
+    n = available_block_dim(platform)
+    return n, n, n + n * SLOTS_PER_BLOCK
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -72,30 +74,34 @@ class TestSpmdSyncStartEarlyDispatch(SceneTestCase):
         {
             "name": "EarlyOn",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {"early_on": 1},
         },
         {
             "name": "EarlyOff",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {},
             "params": {"early_on": 0},
         },
     ]
 
     def generate_args(self, params):
+        platform = getattr(self, "_st_platform", "a5")
+        _, _, total_cl = _layout(platform)
         return TaskArgsBuilder(
-            Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
+            Tensor("output", torch.zeros(total_cl * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
             Scalar("early_on", int(params.get("early_on", 1))),
         )
 
     def compute_golden(self, args, params):
+        platform = getattr(self, "_st_platform", "a5")
+        producer_blocks, sync_blocks, _ = _layout(platform)
         out = args.output
-        for block_idx in range(PRODUCER_BLOCKS):
+        for block_idx in range(producer_blocks):
             out[block_idx * FLOATS_PER_CACHE_LINE] = float(block_idx)
-        for block_idx in range(SYNC_BLOCKS):
-            for slot in range(3):
-                out[(SYNC_BASE_CL + block_idx * 3 + slot) * FLOATS_PER_CACHE_LINE] = float(block_idx)
+        for block_idx in range(sync_blocks):
+            for slot in range(SLOTS_PER_BLOCK):
+                out[(producer_blocks + block_idx * SLOTS_PER_BLOCK + slot) * FLOATS_PER_CACHE_LINE] = float(block_idx)
 
 
 if __name__ == "__main__":

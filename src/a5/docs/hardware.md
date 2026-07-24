@@ -139,16 +139,37 @@ report what user code can address.
 
 | You are doing… | Use |
 | -------------- | --- |
-| Configuring runtime `aicpu_thread_num` | **user-visible** (6) |
-| Setting kernel `block_dim` for AICore | **user-visible** (per CANN ini for your specific SKU) |
+| Understanding DeviceRunner AICPU launch count | **ACL AICPU** capped by `PLATFORM_MAX_AICPU_THREADS` (7 → typically 6 sched + 1 orch) |
+| Understanding DeviceRunner AICore cluster count | **ACL cube** capped by `PLATFORM_MAX_BLOCKDIM` (36; this-run N from SKU, e.g. 28) |
 | Counting cores in a multi-die a5 device | **per-device** HAL CORE_NUM (= 2 × per-die) |
 | Reasoning about hyperthreading on AICPU | **DSMI CPU_TOPO** (only it shows the hyperthread pair on cpu_id 1+2) |
 | Writing code expected to also work on a3 | **ACL or CANN ini only** — HAL semantics differ |
-| Debugging "I requested N AICPU, only 6 ran" | gap is **1 AICPU OS scheduler (cpu_id 0) + 2 SMT-pair (cpu_id 1, 2) withheld by AICPU OS**; cap is 6 |
+| Debugging "ACL says 7 AICPU but only 6 sched + 1 orch ran" | expected: launch=`PLATFORM_MAX_AICPU_THREADS`; gap vs silicon is OS/SMT reserved cores |
 
 For cross-generation portable code: **always go through ACL or CANN
 ini, never HAL**. HAL's CORE_NUM semantics shift between a3 and a5 in
 ways that have no public documentation.
+
+## Runtime adaptation: `PLATFORM_MAX_BLOCKDIM` vs this-run `N`
+
+`PLATFORM_MAX_BLOCKDIM` (36 on a5) is the **compile-time ceiling** for static
+array sizes and validate upper bounds. The **this-run cluster count `N`** is
+ACL's cube-core stream limit capped by that ceiling. Across a5 SKUs,
+`ai_core_cnt` varies (not only Partial-Good fab-disable); a measured box with
+SoC `Ascend950PR_9579` exposes **N=28** AIC / 56 AIV per device while the
+ceiling remains 36.
+
+| Concept | Source | Role |
+| ------- | ------ | ---- |
+| Ceiling | `PLATFORM_MAX_BLOCKDIM` (=36) | Array sizes; reject `block_dim > 36` |
+| This-run `N` | ACL cube limit (onboard) / 36 (sim) | `resolve_block_dim`, `worker_count = N*3`, orch `rt_available_cluster_count()` |
+
+DeviceRunner always resolves `block_dim` / `aicpu_thread_num` from ACL
+(capped by `PLATFORM_MAX_*`); CallConfig no longer carries these knobs.
+Example on this SKU: cluster **N=28**, AICPU launch **min(7, PLATFORM_MAX=7)=7**
+→ 6 sched + 1 orch; `ci % 6` for core assignment.
+
+Logical cores are `0..N-1` with **no** physical bad-core remapping.
 
 ## CANN AICPU thread dispatch under varying launch budgets
 

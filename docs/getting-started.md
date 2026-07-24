@@ -215,8 +215,7 @@ Runtime behavior is configured via `kernel_config.py` in each example:
 ```python
 RUNTIME_CONFIG = {
     "runtime": "host_build_graph",    # Runtime to use
-    "aicpu_thread_num": 3,            # Number of AICPU scheduler threads
-    "block_dim": 3,                   # Number of AICore blocks (1 block = 1 AIC + 2 AIV)
+    # block_dim / aicpu_thread_num: resolved by DeviceRunner (ACL + PLATFORM_MAX_*)
 }
 ```
 
