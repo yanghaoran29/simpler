@@ -12,7 +12,7 @@
  * Paged Attention MIX Kernel — AIC + AIV in single source via TPUSH/TPOP
  *
  * Hardware block_num is the user-visible cluster count N
- * (rt_available_cluster_count()). Each hardware block strides over
+ * (rt_available_aic_counts()). Each hardware block strides over
  * total_logical_blocks = batch * q_loop logical work items:
  *   for (block_idx = hw_block_idx; block_idx < total_logical_blocks; block_idx += N)
  * Each logical block_idx encodes one (batch_idx, q_tile_idx) position.

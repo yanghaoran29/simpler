@@ -93,9 +93,6 @@ typedef struct PTO2RuntimeOps {
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
 
-    // require_sync_start max SPMD width per shape (aic/mix=N, aiv=2N typically).
-    void (*sync_start_capacity)(PTO2Runtime *rt, PTO2SyncStartCapacity *out);
-
     // Stash the call-site of the next PTO2ScopeGuard so the [ScopeStats]
     // collector can log it. Always present to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
@@ -234,24 +231,16 @@ static inline void rt_orchestration_done() {
     rt->ops->orchestration_done(rt);
 }
 
-/** User-visible AICore cluster count for this run (do not hardcode 24/36). */
-static inline int32_t rt_available_cluster_count() {
+/** This-run AIC (= cluster) count. Do not hardcode 24/36; MIX cohorts use this. */
+static inline int32_t rt_available_aic_counts() {
     PTO2Runtime *rt = current_runtime();
     return rt->ops->available_cluster_count(rt);
 }
 
-/** User-visible AIV core count for this run (= 2 × clusters on standard silicon). */
-static inline int32_t rt_available_aiv_count() {
+/** This-run AIV core count (= 2 × clusters on standard silicon). */
+static inline int32_t rt_available_aiv_counts() {
     PTO2Runtime *rt = current_runtime();
     return rt->ops->available_aiv_count(rt);
-}
-
-/** Max require_sync_start SPMD width per shape (aic/mix = N clusters, aiv = 2N). */
-static inline PTO2SyncStartCapacity rt_sync_start_capacity() {
-    PTO2SyncStartCapacity cap{};
-    PTO2Runtime *rt = current_runtime();
-    rt->ops->sync_start_capacity(rt, &cap);
-    return cap;
 }
 
 static inline bool rt_is_fatal() {

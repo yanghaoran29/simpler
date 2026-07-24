@@ -170,7 +170,7 @@ restricted ACL view exposes fewer clusters (e.g. N=20).
 | Concept | Source | Role |
 | ------- | ------ | ---- |
 | Ceiling | `PLATFORM_MAX_BLOCKDIM` | Array sizes; reject `block_dim > ceiling` |
-| This-run `N` | ACL cube limit (onboard) / ceiling (sim) | `resolve_block_dim`, `worker_count = N*3`, orch `rt_available_cluster_count()` |
+| This-run `N` | ACL cube limit (onboard) / ceiling (sim) | `resolve_block_dim`, `worker_count = N*3`, orch `rt_available_aic_counts()` |
 
 DeviceRunner always resolves `block_dim` / `aicpu_thread_num` from ACL
 (capped by `PLATFORM_MAX_*`); CallConfig no longer carries these knobs.

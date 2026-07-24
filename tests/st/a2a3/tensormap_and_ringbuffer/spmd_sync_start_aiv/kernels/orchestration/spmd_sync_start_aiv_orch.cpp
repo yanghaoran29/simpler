@@ -16,7 +16,7 @@
  *   - AIV fast path: count_idle_aiv_cores() >= block_num (small block_num)
  *   - AIV drain path: block_num exceeds local AIV cores (cross-thread drain)
  *
- * Tasks (N = rt_available_cluster_count()):
+ * Tasks (N = rt_available_aic_counts()):
  *   T0: block_num=4,  require_sync_start=true   (fast path)
  *   T1: block_num=16, require_sync_start=true   (saturate one thread: 8 clusters x 2 AIV)
  *   T2: block_num=4,  require_sync_start=false  (baseline)
@@ -52,7 +52,7 @@ static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bo
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
-    const int32_t n = rt_available_cluster_count();
+    const int32_t n = rt_available_aic_counts();
     const int16_t bn0 = 4;
     const int16_t bn1 = 16;
     const int16_t bn2 = 4;

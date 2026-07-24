@@ -12,7 +12,7 @@
 /**
  * Regression test for batch dispatch OOB (issue #565).
  *
- * Submits two MIX tasks with block_num=2*N (N = rt_available_cluster_count())
+ * Submits two MIX tasks with block_num=2*N (N = rt_available_aic_counts())
  * back-to-back so they are both in the ready queue when the scheduler runs
  * pop_ready_tasks_batch.
  *
@@ -52,7 +52,7 @@ static void submit_spmd_mix(const Tensor &out, int16_t block_num, int64_t base_c
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
-    const int32_t n = rt_available_cluster_count();
+    const int32_t n = rt_available_aic_counts();
     const int16_t bn = static_cast<int16_t>(2 * n);
     const int64_t base1 = static_cast<int64_t>(bn) * 3;
 

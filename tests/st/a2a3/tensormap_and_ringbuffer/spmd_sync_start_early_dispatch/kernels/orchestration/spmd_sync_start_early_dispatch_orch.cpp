@@ -19,7 +19,7 @@
  * released together at the rendezvous once every block occupies a running slot and
  * the producer completes.
  *
- * Tasks sized from rt_available_cluster_count() (=N):
+ * Tasks sized from rt_available_aic_counts() (=N):
  *   P: AIC block_num=N, base_cl=0, allow_early_resolve=true
  *   C: MIX block_num=N, base_cl=N, require_sync_start=true, dep=[P]
  *
@@ -77,7 +77,7 @@ static void submit_sync_consumer(const Tensor &out, int16_t block_num, int64_t b
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
-    const int32_t n = rt_available_cluster_count();
+    const int32_t n = rt_available_aic_counts();
 
     rt_scope_begin(PTO2ScopeMode::MANUAL);
     PTO2TaskId prod = submit_producer(ext_output, static_cast<int16_t>(n), 0);

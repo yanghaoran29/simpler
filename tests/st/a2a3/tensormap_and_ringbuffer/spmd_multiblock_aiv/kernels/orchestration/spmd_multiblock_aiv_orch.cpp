@@ -13,7 +13,7 @@
  * SPMD Multi-Block AIV Orchestration
  *
  * Submits five AIV tasks with increasing block_num. Full-pool sizes use
- * rt_available_cluster_count() (=N) / AIV pool (=2N):
+ * rt_available_aic_counts() (=N) / AIV pool (=2N):
  *   T0: block_num=4   — fits within a single sched thread
  *   T1: block_num=16  — saturates one sched thread (typical 8 clusters x 2 AIV)
  *   T2: block_num=N   — forces cross-thread re-push via ready_queue
@@ -49,7 +49,7 @@ static void submit_spmd_aiv(int32_t kernel_id, const Tensor &out, int16_t block_
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
-    const int32_t n = rt_available_cluster_count();
+    const int32_t n = rt_available_aic_counts();
     const int16_t bn0 = 4;
     const int16_t bn1 = 16;
     const int16_t bn2 = static_cast<int16_t>(n);

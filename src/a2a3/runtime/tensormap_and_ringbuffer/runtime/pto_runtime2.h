@@ -96,9 +96,6 @@ struct PTO2RuntimeOps {
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
 
-    // require_sync_start max SPMD width per shape (aic/mix=N, aiv=2N typically).
-    void (*sync_start_capacity)(PTO2Runtime *rt, PTO2SyncStartCapacity *out);
-
     // Stash the call-site captured by PTO2ScopeGuard into the [ScopeStats]
     // collector. Always present in the struct to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.

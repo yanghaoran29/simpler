@@ -76,16 +76,15 @@ static void submit_mix_sync_consumer(const Tensor &out, int16_t block_num, int64
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
 
-    const PTO2SyncStartCapacity cap = rt_sync_start_capacity();
-    const int32_t n_cluster = cap.mix;
-    const int32_t n_aiv = cap.aiv;
+    const int32_t n_cluster = rt_available_aic_counts();
+    const int32_t n_aiv = rt_available_aiv_counts();
 
     PTO2TaskId prod = submit_aiv_producer(ext_output, static_cast<int16_t>(n_aiv), 0);
     submit_mix_sync_consumer(ext_output, static_cast<int16_t>(n_cluster), n_aiv, prod);
 
     LOG_INFO_V9(
-        "[spmd_sync_start_mix_spill] sync_cap aic=%d aiv=%d mix=%d; flagged AIV producer (%d) + sync_start MIX consumer (%d) submitted",
-        cap.aic, cap.aiv, cap.mix, n_aiv, n_cluster
+        "[spmd_sync_start_mix_spill] aic=%d aiv=%d; flagged AIV producer (%d) + sync_start MIX consumer (%d) submitted",
+        n_cluster, n_aiv, n_aiv, n_cluster
     );
 }
 

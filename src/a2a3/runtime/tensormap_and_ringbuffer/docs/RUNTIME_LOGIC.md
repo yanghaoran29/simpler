@@ -93,10 +93,9 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 
 DeviceRunner resolves cluster count `N` and AICPU thread count from ACL
 (capped by `PLATFORM_MAX_BLOCKDIM` / `PLATFORM_MAX_AICPU_THREADS`).
-`worker_count = N * 3`. Orch helpers `rt_available_cluster_count()` /
-`rt_available_aiv_count()` expose the same `N` / `2N` for ST sizing.
-For `require_sync_start` cohort sizing prefer `rt_sync_start_capacity()`
-(`aic`/`mix` = N, `aiv` = 2N).
+`worker_count = N * 3`. Orch helpers `rt_available_aic_counts()` /
+`rt_available_aiv_counts()` expose the same `N` / `2N` for ST sizing
+(MIX cohorts use the AIC count).
 
 ### 2.4 Host Temporary Buffer
 

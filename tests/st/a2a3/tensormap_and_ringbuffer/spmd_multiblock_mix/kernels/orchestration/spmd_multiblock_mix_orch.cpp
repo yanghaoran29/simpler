@@ -13,7 +13,7 @@
  * SPMD Multi-Block MIX Orchestration
  *
  * Submits five MIX tasks with increasing block_num. Full-pool sizes use
- * rt_available_cluster_count() (=N), not a hardcoded ceiling:
+ * rt_available_aic_counts() (=N), not a hardcoded ceiling:
  *   T0: block_num=2   — basic multi-block MIX
  *   T1: block_num=8   — saturates one sched thread (typical 8 clusters)
  *   T2: block_num=12  — forces cross-thread re-push via ready_queue
@@ -58,7 +58,7 @@ static void submit_spmd_mix(
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
-    const int32_t n = rt_available_cluster_count();
+    const int32_t n = rt_available_aic_counts();
     const int16_t bn0 = 2;
     const int16_t bn1 = 8;
     const int16_t bn2 = 12;

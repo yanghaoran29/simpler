@@ -12,7 +12,7 @@
  * SPMD Paged Attention Orchestration with TPUSH/TPOP
  *
  * Submits a single MixedKernels task with hardware block_num =
- * rt_available_cluster_count() (user-visible N, not PLATFORM_MAX ceiling).
+ * rt_available_aic_counts() (user-visible N, not PLATFORM_MAX ceiling).
  * total_logical_blocks = batch * q_loop logical work items are distributed
  * across the N hardware blocks via a stride loop inside the kernel:
  *   for (block_idx = hw_block_idx; block_idx < total_logical_blocks; block_idx += N)
@@ -76,7 +76,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     uint64_t q_tile = (num_heads >= MAX_Q_TILE) ? MAX_Q_TILE : 16;
     uint64_t q_loop = (num_heads + q_tile - 1) / q_tile;
     int64_t total_logical_blocks = static_cast<int64_t>(batch * q_loop);
-    const int32_t spmd_block_num = rt_available_cluster_count();
+    const int32_t spmd_block_num = rt_available_aic_counts();
 
     LOG_INFO_V0(
         "SPMD PA TPUSH/TPOP: batch=%" PRIu64 " heads=%" PRIu64 " hd=%" PRIu64 " bs=%" PRIu64 " q_tile=%" PRIu64
