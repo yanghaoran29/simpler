@@ -12,6 +12,11 @@
 A flagged AIV producer occupies all 72 AIV cores and spins; the require_sync_start
 MIX consumer (24 clusters) pre-stages with AIC on idle running slots and AIVs on
 busy pending slots. EarlyOn / EarlyOff toggle producer ``allow_early_resolve``.
+
+The producer spans every AIV core and the consumer every cluster, so both
+widths are the device's own counts — a run always takes the whole device, and
+that width differs between sim and silicon. The orchestration reports the two
+widths in `layout` and the golden is rebuilt from them.
 """
 
 import torch
@@ -37,7 +42,7 @@ class TestSpmdSyncStartMixSpill(SceneTestCase):
         "orchestration": {
             "source": "kernels/orchestration/spmd_sync_start_mix_spill_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.INOUT],
+            "signature": [D.INOUT, D.INOUT],
         },
         "incores": [
             {
@@ -75,13 +80,13 @@ class TestSpmdSyncStartMixSpill(SceneTestCase):
         {
             "name": "EarlyOn",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {"early_on": 1},
         },
         {
             "name": "EarlyOff",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {"early_on": 0},
         },
     ]
