@@ -1,7 +1,7 @@
 # A5 跨 cluster `last_task_alive` 优化计划（衍生自 PR 906，待上机测量）
 
 **Date**: 2026-07-25
-**Verdict**: deferred-pending-A5-onboard-measurement（4 个方案按 D→B-0→B→C 推进，每项落地前先跑「优化前 vs 优化后」真机对比）。**Scheme D 已实现 a5 + 单测通过 + 上机 before/after 实测（无回归，见下）**；B-0/B/C 仍待上机测量。
+**Verdict**: **D 已合入（正确性修复，实测无回归）**；**B 已实测 → orch 退步 ~13% → dropped**（把 orch 搬进 sched 所在 die 引入的 cache 争用 > 省下的跨 die 读开销；现有跨 die 隔离是有意为之）；**C 前提被 B 动摇，存疑、暂不做**。原 M5「跨 die `last_task_alive` 是瓶颈」的假设在 A5 本机负载上不成立。要重启 B/C 需先有 B-0 隔离微基准 + full-SKU（cube≥36）跑高任务量负载。
 
 目标：消除 A5 默认布局下 orch 每任务跨 die acquire-load `last_task_alive` 的开销。
 
@@ -41,43 +41,40 @@ python -m simpler_setup.tools.strace_timing <run.log> --rounds-table
   全部 |Δ| < 2%，方向互有正负 → **噪声内，无回归、无收益**，与「D 是正确性 no-op 修复」的预期一致。
 - **判据（已满足）**：正确性——`test_a5_tensormap` 33 例全过 + `a5sim mixed_example` 场景通过 + 上机 `spmd_multiblock_mix` 跑通；性能——三项运行时指标 ±2% 内。注：`paged_attention_unroll/Case1` / 全套 `TMR_EXAMPLE_CASES` 需 full-SKU（cube≥36）设备才能跑，本机暂无；留作换到 full-SKU 机器时的补充验证。
 
-## Scheme B-0 — 跨 die 硬件 ceiling 微基准（不改运行时代码）
+## Scheme B-0 — 跨 die 硬件 ceiling 微基准（skipped）
 
-**做**：`tools/cann-examples/`（与 `aicpu-thread-spread/` 同级）加两线程 acquire-load/release-store 往返微基准，按 `allowed_cpus` 钉 same-cluster / same-die-other-cluster / other-die 三种放置，量往返 cycle。先量出 B 能恢复的硬件上限。
+用户决定跳过微基准、直接做 B+实测（认为 B before/after 更接近真问题）。**事后看是教训**：B-0 能在隔离环境高 SNR 量出跨 die 硬件成本，本可避免下面 B 在低 SNR 工作负载上「同配置 ~10% 抖动、差点判错」的反复。下次类似场景先做隔离微基准。
 
-- **看**：同 die vs 跨 die 往返 cycle 差 = Scheme B 的可恢复上限。
-- **判据**：跨 die 显著贵（>数十 ns）→ 继续 B；几乎无差 → 跳过 B、直接评估 C。
+## Scheme B — placement 修复（❌ 实测 orch 退步 ~13%，dropped）
 
-## Scheme B — placement 修复（affinity 层，最便宜）
+**改（已实现后丢弃）**：在 `compute_allowed_cpus`（`aicpu_topology_probe.cpp`）现有 sched-first 逻辑后加一个 rebalance swap——若 orch 落在与 sched 多数 die 不同的 die，就把它和 sched 多数 die 里的一个 sched 交换。Scenario A：`ALLOWED_CPUS` 从 `{5,6,7,8,3}`（orch=cpu3 die0）变成 `{3,6,7,8,5}`（orch=cpu5 die1，与 3 个 sched 同 die）。最小改动、复用全部现有逻辑、orch 已同 die 时 no-op（full-SKU 单 cluster 放得下时不触发）。
 
-**改**：`aicpu_topology_probe.cpp:294-364` `compute_allowed_cpus` 改两遍——先在 sched 多数 die `D*` 用 `pick_lowest_for_orch` 给 orch 预留槽，再用剩余（保 SMT 配对排序）+ `fit_spread` 填 sched。输出仍按 `[sched…, orch]` 契约（`:359-362`）。结果：orch + 3 sched 在 die1，1 sched 溢出 die0。无条件合入。
+**实测（a5 onboard, `spmd_multiblock_mix` Case1, 100 rounds, device 0, task-submit）**，每组 2 次重复：
 
-- **优化前**：merge-base baseline（skill 自动）。
-- **优化后**：两遍 placement 改动后重装。
-- **看**：orch_cost（headline）+ sched_max（抓溢出 sched 的跨 die CAS 回归）。
-- **判据**：orch_cost 改善 >5% 且 sched_max ±2% → 合入；sched_max 退步 >5% → 不合入。
+| config | Orch run1 | Orch run2 | Orch mean |
+|---|---|---|---|
+| main placement `{5,6,7,8,3}` | 78.1us | 70.5us | ~74.3us |
+| Scheme B `{3,6,7,8,5}` | 86.4us | 81.6us | ~84.0us |
 
-## Scheme C — 软件单写者 lazy publish（M5 适配，依赖 D+B）
+B 的 orch_cost **高 ~13%、两次重复区间不重叠**（main ≤78.1 < B ≥81.6），不是噪声。Sched/Device 同向小幅退步。
 
-**改**：
-1. host→device 新字段 `publisher_sched_idx`（`device_runner.cpp:250-253` 附近下发，= 与 orch 同 die 的 sched 的 `allowed_cpus[]` index）。
-2. `aicpu_executor.cpp:486` `run()` 里算 `is_publisher_sched`（函数局部 bool）。
-3. `pto_scheduler.h:464/479`：非 publisher 跳过 `sync_to_sm` 的 SM store，但仍推进共享 local `last_task_alive`（把现有 `thread_idx` 传参改无条件）。
-4. `scheduler_dispatch.cpp:~888`（completion 后）：publisher 每 iter 条件 publish（每 ring relaxed load + 变化时一个 release store）。
+**为什么变差**：把 orch 搬进 sched 所在 die，省下了 orch 跨 die 读 `last_task_alive` 的开销，但**引入了 orch 与 sched 的 L3/cache 争用**（orch 自己的 tensormap 查找 + 依赖 wiring 与 sched 抢 die1 资源），后者 > 前者。说明现有「orch 跨 die 隔离」是**有意为之**（隔离 orch 工作集），不是疏忽。同配置 ~10% 的 run-to-run 抖动也提示：本机 PG 设备 + `spmd_multiblock_mix`（Orch ~70-86us）SNR 偏低，但 B 的 gap 大于该抖动。
 
-orch 侧无需新增容忍逻辑（`ensure_tensormap_capacity` 已有 500ms backstop）。publish/read 仍 `stlr`/`ldar`，不需新屏障；MMIO COND 读取不在 publish 路径，`dmb ishld` 不适用。
+**判据触发「不合入」**（orch 退步 >5%）。代码已丢弃、不提交（rebalance swap 的描述留在此处，供 full-SKU 上复核时快速重写）。
 
-- **优化前**：**B tip**（隔离变量，非 merge-base）。
-- **优化后**：D+C 重装；额外用 `CXXFLAGS="-DSIMPLER_TENSORMAP_PROFILING=1"` 重装看查找链是否变长。
-- **看**：orch_cost（headline）+ wire/effective（抓 pool 耗尽回归）。
-- **诊断**：`dfx-analyze` skill + 两次独立运行（`--enable-l2-swimlane`、`--enable-dep-gen`）→ `sched_overhead_analysis` 看 `sync_tensormap` 阶段是否缩小。
-- **判据**：orch_cost >5% 改善且 wire/effective ±2% → 无条件合入；wire/effective 退步 >2% → 申请 `SIMPLER_LAZY_LAST_TASK_ALIVE_PUBLISH` opt-in env（env-macro-gating 需用户许可）落暗版。
+**局限**：只测了本机能放的 `spmd_multiblock_mix`；高任务量负载（`paged_attention` Case1，需 full-SKU cube≥36）上 co-location 争用 vs 跨 die 读谁占优未测。但 co-location 争用机制是 workload-general 的，B 大概率在各负载上都偏负。
+
+## Scheme C — 软件单写者 lazy publish（⚠️ 存疑，前提被 B 动摇）
+
+原计划（依赖 D+B）：host→device 加 `publisher_sched_idx`；非 publisher 跳过 `sync_to_sm` 的 SM store；publisher 每 iter 条件 publish；orch 侧靠 `ensure_tensormap_capacity` 的 500ms backstop 容忍旧值。publish/read 仍 `stlr`/`ldar`，不需新屏障。
+
+**现状**：B 已证「把 `last_task_alive` 的生产/消费搬到同 die 会因 cache 争用变慢」，C 的前提（跨 die 写是瓶颈）因此存疑。在拿出反证前**不做 C**。要重启 C，先得回答两件事：(1) 跨 die `last_task_alive` 往返的真实硬件成本（B-0 微基准）；(2) 高任务量负载（`paged_attention` Case1，需 full-SKU）上 co-location 争用 vs 跨 die 读谁占优。
 
 ---
 
 ## 背景（一句话）
 
-PR 906「[WIP] A5 performance opt」整体不可直接合（WIP、自 6/11 停更、被 main 走偏、A5 无实测收益）；但其 M5 思路（限制 `last_task_alive` 的 SM 写者为单一与 orch 同 cluster/die 的线程）在 A5 上正中要害——A5 默认 `ALLOWED_CPUS={5,6,7,8,3}` 让 orch 与全部 sched 跨 die，每任务一次跨 die cache line 往返，目前未测量、未记录。
+PR 906「[WIP] A5 performance opt」整体不可直接合（WIP、自 6/11 停更、被 main 走偏、A5 无实测收益）。其 M5 思路（限制 `last_task_alive` 的 SM 写者为单一与 orch 同 cluster/die 的线程）**看起来**正中要害——A5 默认 `ALLOWED_CPUS={5,6,7,8,3}` 让 orch 与全部 sched 跨 die，每任务一次跨 die cache line 往返。但 Scheme B 的实测（见下）表明：在 A5 本机负载上，把 orch 搬到与 sched 同 die 引入的 cache 争用 > 省下的跨 die 读开销，前提并不成立。
 
 ## 不做（main 已有或已移除，避免重复踩坑）
 
