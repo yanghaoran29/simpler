@@ -49,6 +49,41 @@ python -m simpler_setup.tools.strace_timing <run.log> --rounds-table
 
 **改（已实现后丢弃）**：在 `compute_allowed_cpus`（`aicpu_topology_probe.cpp`）现有 sched-first 逻辑后加一个 rebalance swap——若 orch 落在与 sched 多数 die 不同的 die，就把它和 sched 多数 die 里的一个 sched 交换。Scenario A：`ALLOWED_CPUS` 从 `{5,6,7,8,3}`（orch=cpu3 die0）变成 `{3,6,7,8,5}`（orch=cpu5 die1，与 3 个 sched 同 die）。最小改动、复用全部现有逻辑、orch 已同 die 时 no-op（full-SKU 单 cluster 放得下时不触发）。
 
+完整改动（插在 `compute_allowed_cpus` 的 orch 循环之后、`// Emit in the canonical [sched..., orch...] order.` 之前）：
+
+```cpp
+// Orch shares the sched-majority die. The sched-first placement above can
+// exile orch to another die when scheds fill their die entirely (the
+// same-die fallback then finds no free cpu there). Swap each such orch
+// with a sched from the sched-majority die so the per-task orch<->sched
+// last_task_alive handoff stays intra-die. No-op when orch already shares
+// the sched-majority die (e.g. scheds fit one cluster on a full SKU).
+if (!sched_indices.empty() && !orch_indices.empty()) {
+    int32_t max_die = -1;
+    for (const auto &c : user_cpus) max_die = std::max(max_die, c.die_id);
+    std::vector<int32_t> die_count(std::max(max_die + 1, 1), 0);
+    for (int32_t i : sched_indices) die_count[user_cpus[i].die_id]++;
+    int32_t sched_die = 0;
+    for (int32_t d = 1; d <= max_die; ++d) {
+        if (die_count[d] > die_count[sched_die]) sched_die = d;
+    }
+    for (int32_t &orch : orch_indices) {
+        if (user_cpus[orch].die_id == sched_die) continue;
+        int32_t victim = -1;
+        for (size_t k = 0; k < sched_indices.size(); ++k) {
+            if (user_cpus[sched_indices[k]].die_id != sched_die) continue;
+            if (victim < 0 ||
+                user_cpus[sched_indices[k]].cpu_id < user_cpus[sched_indices[victim]].cpu_id) {
+                victim = static_cast<int32_t>(k);
+            }
+        }
+        if (victim >= 0) std::swap(orch, sched_indices[victim]);
+    }
+}
+```
+
+Scenario A 推演：现有逻辑产出 `sched_indices={cpu5,6,7,8}`(die1)、`orch_indices={cpu3}`(die0) → emit `{5,6,7,8,3}`；加 swap 后 `sched_die=die1`，orch(cpu3) 不在 die1 → 与 die1 中 cpu_id 最小的 sched(cpu5) 交换 → `sched_indices={cpu3,6,7,8}`、`orch_indices={cpu5}` → emit `{3,6,7,8,5}`。选 swap 而非计划里的两遍重写，是为了最小 diff（不动 `try_fit_in_one`/`pick_lowest_for_orch`/`fit_spread`，保 SMT 配对排序），且对已是好布局的 SKU 严格 no-op。
+
 **实测（a5 onboard, `spmd_multiblock_mix` Case1, 100 rounds, device 0, task-submit）**，每组 2 次重复：
 
 | config | Orch run1 | Orch run2 | Orch mean |
