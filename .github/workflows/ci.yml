@@ -881,8 +881,20 @@ jobs:
         run: |
           source .venv/bin/activate
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
+          # qwen3_14b_decode is a 38 GiB / ~5 min fixture — keep it out of the
+          # general sweep (mirrors st-onboard-a2a3) and run it in its own step.
+          HEAVY_IGNORE="--ignore=examples/a5/tensormap_and_ringbuffer/qwen3_14b_decode"
+          PYTEST="python -m pytest examples tests/st $HEAVY_IGNORE --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST --pto-session-timeout 1200"
+
+      # qwen3_14b_decode is the full 40-layer Qwen3-14B decode — own device + budget.
+      - name: Qwen3-14B 40-layer decode (a5)
+        run: |
+          source .venv/bin/activate
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          QWEN_TEST="examples/a5/tensormap_and_ringbuffer/qwen3_14b_decode"
+          PYTEST="python -m pytest $QWEN_TEST --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1800"
+          task-submit --timeout 3600 --max-time 3600 --device "$DEVICE_LIST" --run "$PYTEST"
 
       # DFX per-feature smokes — hardware mirror of the st-sim-a5 set. The
       # race window in dep_gen only fires on real timing, so this row is
