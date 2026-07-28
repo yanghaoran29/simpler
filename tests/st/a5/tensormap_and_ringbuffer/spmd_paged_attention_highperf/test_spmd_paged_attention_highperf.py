@@ -173,7 +173,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
             # onboard a5 enabled: the 'out' golden mismatch is closed by the
             # producer-side DdrBarrierBeforeFfts cross-core DDR fence, validated
             # over 19 st-onboard-a5 rounds.
-            "platforms": ["a5sim", "a2a3"],
+            "platforms": ["a5sim", "a5"],
             "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 1,
@@ -189,7 +189,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
         {
             "name": "b4_h32_kv8_s512_bs128_fp16",
             "manual": True,
-            "platforms": ["a5sim", "a2a3"],
+            "platforms": ["a5sim", "a5"],
             "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 4,
@@ -221,7 +221,7 @@ class TestSpmdPagedAttentionHighPerf(SceneTestCase):
         {
             "name": "b1_h32_kv8_s4096_bs128_fp16",
             "manual": True,
-            "platforms": ["a5sim", "a2a3"],
+            "platforms": ["a5sim", "a5"],
             "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 1,
