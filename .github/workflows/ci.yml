@@ -881,8 +881,22 @@ jobs:
         run: |
           source .venv/bin/activate
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
+          # Keep SDMA demos out of the general sweep (issue #1425 teardown cost),
+          # mirroring st-onboard-a2a3. They run in the dedicated SDMA step below.
+          SDMA_IGNORE="--ignore=examples/a5/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a5/tensormap_and_ringbuffer/sdma_async_completion_demo"
+          PYTEST="python -m pytest examples tests/st $SDMA_IGNORE --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST --pto-session-timeout 1200"
+
+      # SDMA pytest — isolated from the general sweep (issue #1425). Both demos
+      # create Worker(enable_sdma=True): prefetch_async_demo on 1 device (L2),
+      # sdma_async_completion_demo on 2 devices (L3) with a comm domain.
+      - name: SDMA pytest (a5)
+        run: |
+          source .venv/bin/activate
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          SDMA_TESTS="examples/a5/tensormap_and_ringbuffer/prefetch_async_demo examples/a5/tensormap_and_ringbuffer/sdma_async_completion_demo"
+          PYTEST="python -m pytest $SDMA_TESTS --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600"
+          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
 
       # DFX per-feature smokes — hardware mirror of the st-sim-a5 set. The
       # race window in dep_gen only fires on real timing, so this row is
