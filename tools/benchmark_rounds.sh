@@ -55,19 +55,49 @@ TMR_EXAMPLE_ORDER=(
     qwen3_14b_decode
 )
 
-# --- tensormap_and_ringbuffer (a5): only samples that exist under tests/st/a5 ---
-# Ablation / PR906 primary target is paged_attention_unroll Case1.
+# --- tensormap_and_ringbuffer (a5): full ST suite under tests/st/a5 ---
+# Empty case list = DEFAULT_CASE. paged_attention_unroll keeps Case1 (ablation).
 declare -A TMR_EXAMPLE_CASES_A5=(
-    [paged_attention_unroll]="Case1"
-    [mixed_example]=""
-    [simt_basic]=""
+    [available_aicore_counts]=""
     [dummy_task]=""
+    [mixed_example]=""
+    [mx_fp_gemm]=""
+    [orch_so_cache]=""
+    [paged_attention_unroll]="Case1"
+    [predicated_dispatch]=""
+    [prepared_callable]=""
+    [simt_basic]=""
+    [spmd_basic]=""
+    [spmd_multiblock_aiv]=""
+    [spmd_multiblock_mix]=""
+    [spmd_starvation]=""
+    [spmd_sync_start]=""
+    [spmd_sync_start_aiv]=""
+    [spmd_sync_start_early_dispatch]=""
+    [spmd_sync_start_edge]=""
+    [spmd_sync_start_mix_spill]=""
+    [spmd_sync_start_stress]=""
 )
 TMR_EXAMPLE_ORDER_A5=(
-    paged_attention_unroll
-    mixed_example
-    simt_basic
+    available_aicore_counts
     dummy_task
+    mixed_example
+    mx_fp_gemm
+    orch_so_cache
+    paged_attention_unroll
+    predicated_dispatch
+    prepared_callable
+    simt_basic
+    spmd_basic
+    spmd_multiblock_aiv
+    spmd_multiblock_mix
+    spmd_starvation
+    spmd_sync_start
+    spmd_sync_start_aiv
+    spmd_sync_start_early_dispatch
+    spmd_sync_start_edge
+    spmd_sync_start_mix_spill
+    spmd_sync_start_stress
 )
 
 # ---------------------------------------------------------------------------
