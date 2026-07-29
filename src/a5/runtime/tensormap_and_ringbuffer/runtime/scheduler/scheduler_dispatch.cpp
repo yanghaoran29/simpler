@@ -923,7 +923,11 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         }
 #endif
 
-        if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
+        // PR906 F2: restrict aicore_mailbox polling to higher-index scheds
+        // (exec_idx >= 2). Keeps mailbox traffic off the first two sched
+        // threads (typically co-located with orch affinity).
+        bool is_mailbox_poller = (thread_idx >= 2 && thread_idx < sched_thread_num_);
+        if (is_mailbox_poller && rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
                 rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count,
