@@ -137,6 +137,28 @@ namespace {
 std::mutex s_topo_cache_mu;
 std::unordered_map<uint32_t, std::vector<AicpuLogicalCpu>> s_topo_cache;
 
+// Synthesize a user pool from the OCCUPY bitmap alone. Used when DSMI/HAL
+// CPU_TOPO is unavailable (rc=65534 on some driver/CANN combos — SUB_CMD_CPU_TOPO
+// is absent from newer public DSMI headers). Without TOPO we lose SMT pairing
+// metadata; treat each occupied logical cpu_id as its own phy and derive
+// cluster/die from that id with the same a5 ratios (2 phy/cluster, 2 cluster/die).
+// Placement quality is coarser than TOPO-backed packing, but the affinity gate
+// still gets a deterministic ALLOWED_CPUS set matching where CANN can land.
+bool synthesize_from_occupy(uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus) {
+    out_user_cpus.clear();
+    for (int32_t cpu_id = 0; cpu_id < 64; ++cpu_id) {
+        if (((occupy >> static_cast<uint32_t>(cpu_id)) & 1ULL) == 0) continue;
+        AicpuLogicalCpu e{};
+        e.cpu_id = cpu_id;
+        e.phy_cpu_id = cpu_id;
+        e.hyperthread_id = 0;
+        e.cluster_id = e.phy_cpu_id / 2;
+        e.die_id = e.phy_cpu_id / 4;
+        out_user_cpus.push_back(e);
+    }
+    return !out_user_cpus.empty();
+}
+
 bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus) {
     out_user_cpus.clear();
 
@@ -144,28 +166,45 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
     if (!query_occupy(device_id, occupy)) return false;
 
     DsmiCpuTopo topo{};
-    if (!query_cpu_topo(device_id, topo)) return false;
-
-    for (uint32_t i = 0; i < topo.total_nums; ++i) {
-        const DsmiSingleCpu &c = topo.cpus[i];
-        // Skip any cpu_id not in the device-side OCCUPY pool. Guard the
-        // shift against cpu_id >= 64 (UB in C++) — no a5 SKU is expected
-        // to expose more than 64 logical AICPU cpus, but a driver bug or
-        // future SKU change shouldn't trip undefined behavior here.
-        if (c.cpu_id >= 64 || ((occupy >> c.cpu_id) & 1ULL) == 0) continue;
-        AicpuLogicalCpu e{};
-        e.cpu_id = static_cast<int32_t>(c.cpu_id);
-        e.phy_cpu_id = static_cast<int32_t>(c.phy_cpu_id);
-        e.hyperthread_id = static_cast<int32_t>(c.hyperthread_id);
-        // a5 cluster mapping: 2 phy/cluster, 2 cluster/die.
-        e.cluster_id = e.phy_cpu_id / 2;
-        e.die_id = e.phy_cpu_id / 4;
-        out_user_cpus.push_back(e);
+    if (query_cpu_topo(device_id, topo)) {
+        for (uint32_t i = 0; i < topo.total_nums; ++i) {
+            const DsmiSingleCpu &c = topo.cpus[i];
+            // Skip any cpu_id not in the device-side OCCUPY pool. Guard the
+            // shift against cpu_id >= 64 (UB in C++) — no a5 SKU is expected
+            // to expose more than 64 logical AICPU cpus, but a driver bug or
+            // future SKU change shouldn't trip undefined behavior here.
+            if (c.cpu_id >= 64 || ((occupy >> c.cpu_id) & 1ULL) == 0) continue;
+            AicpuLogicalCpu e{};
+            e.cpu_id = static_cast<int32_t>(c.cpu_id);
+            e.phy_cpu_id = static_cast<int32_t>(c.phy_cpu_id);
+            e.hyperthread_id = static_cast<int32_t>(c.hyperthread_id);
+            // a5 cluster mapping: 2 phy/cluster, 2 cluster/die.
+            e.cluster_id = e.phy_cpu_id / 2;
+            e.die_id = e.phy_cpu_id / 4;
+            out_user_cpus.push_back(e);
+        }
+        std::sort(out_user_cpus.begin(), out_user_cpus.end(), [](const AicpuLogicalCpu &a, const AicpuLogicalCpu &b) {
+            return a.cpu_id < b.cpu_id;
+        });
+        if (!out_user_cpus.empty()) return true;
+        LOG_WARN(
+            "aicpu_topology_probe: CPU_TOPO returned %u entries but none intersect OCCUPY=0x%llx; "
+            "falling back to OCCUPY-only synthesis",
+            topo.total_nums, static_cast<unsigned long long>(occupy)
+        );
+    } else {
+        LOG_WARN(
+            "aicpu_topology_probe: CPU_TOPO unavailable; synthesizing user pool from OCCUPY=0x%llx "
+            "(popcount=%d) — SMT pairing unknown",
+            static_cast<unsigned long long>(occupy), __builtin_popcountll(occupy)
+        );
     }
+
+    if (!synthesize_from_occupy(occupy, out_user_cpus)) return false;
     std::sort(out_user_cpus.begin(), out_user_cpus.end(), [](const AicpuLogicalCpu &a, const AicpuLogicalCpu &b) {
         return a.cpu_id < b.cpu_id;
     });
-    return !out_user_cpus.empty();
+    return true;
 }
 
 }  // namespace

@@ -33,7 +33,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Value = comma-separated case names to run (empty string = run DEFAULT_CASE)
 # ---------------------------------------------------------------------------
 
-# --- tensormap_and_ringbuffer ---
+# --- tensormap_and_ringbuffer (a2a3 default map) ---
 declare -A TMR_EXAMPLE_CASES=(
     [alternating_matmul_add]="Case1"
     [benchmark_bgemm]="Case0"
@@ -53,6 +53,21 @@ TMR_EXAMPLE_ORDER=(
     batch_paged_attention
     # spmd_paged_attention  # temporarily disabled — see KNOWN_ISSUES.md
     qwen3_14b_decode
+)
+
+# --- tensormap_and_ringbuffer (a5): only samples that exist under tests/st/a5 ---
+# Ablation / PR906 primary target is paged_attention_unroll Case1.
+declare -A TMR_EXAMPLE_CASES_A5=(
+    [paged_attention_unroll]="Case1"
+    [mixed_example]=""
+    [simt_basic]=""
+    [dummy_task]=""
+)
+TMR_EXAMPLE_ORDER_A5=(
+    paged_attention_unroll
+    mixed_example
+    simt_basic
+    dummy_task
 )
 
 # ---------------------------------------------------------------------------
@@ -161,17 +176,31 @@ case "$PLATFORM" in
     *) echo "ERROR: unsupported platform '$PLATFORM'. Use a2a3 or a5."; exit 1 ;;
 esac
 
-# Select example cases and order based on runtime
+# Select example cases and order based on runtime (+ a5-specific map).
+# BENCH_ONLY_EXAMPLE=name restricts the run to a single sample (ablation entry).
 case "$RUNTIME" in
     tensormap_and_ringbuffer)
-        declare -n EXAMPLE_CASES=TMR_EXAMPLE_CASES
-        EXAMPLE_ORDER=("${TMR_EXAMPLE_ORDER[@]}")
+        if [[ "$ARCH" == "a5" ]]; then
+            declare -n EXAMPLE_CASES=TMR_EXAMPLE_CASES_A5
+            EXAMPLE_ORDER=("${TMR_EXAMPLE_ORDER_A5[@]}")
+        else
+            declare -n EXAMPLE_CASES=TMR_EXAMPLE_CASES
+            EXAMPLE_ORDER=("${TMR_EXAMPLE_ORDER[@]}")
+        fi
         ;;
     *)
         echo "ERROR: unknown runtime '$RUNTIME'. Use tensormap_and_ringbuffer."
         exit 1
         ;;
 esac
+
+if [[ -n "${BENCH_ONLY_EXAMPLE:-}" ]]; then
+    EXAMPLE_ORDER=("$BENCH_ONLY_EXAMPLE")
+    if [[ -z "${EXAMPLE_CASES[$BENCH_ONLY_EXAMPLE]+x}" ]]; then
+        echo "ERROR: BENCH_ONLY_EXAMPLE='$BENCH_ONLY_EXAMPLE' not in selected EXAMPLE_CASES map"
+        exit 1
+    fi
+fi
 
 
 # ---------------------------------------------------------------------------
