@@ -514,7 +514,7 @@ static void prefetch_payload(PTO2TaskPayload *payload, int32_t tensor_count, int
     __builtin_prefetch(reinterpret_cast<char *>(payload) + 128, 1, 3);
 }
 
-static bool prepare_task(
+__attribute__((always_inline)) static inline bool prepare_task(
     PTO2OrchestratorState *orch, const L0TaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
     TaskAttrs task_attrs, PTO2PreparedTask *out
 ) {
@@ -797,7 +797,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
 // kernel_ids (all INVALID_KERNEL_ID for dummy). Performs tensormap sync, fanin
 // computation (explicit_deps + auto), output registration, slot init, and
 // Orch-side wiring/ready publication.
-static TaskOutputTensors submit_task_common(
+__attribute__((always_inline)) static inline TaskOutputTensors submit_task_common(
     PTO2OrchestratorState *orch, const L0TaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
