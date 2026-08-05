@@ -42,6 +42,9 @@
 #include <runtime/rt.h>
 #include <runtime/runtime/rts/rts_kernel.h>
 
+#include "aicpu_topology_probe.h"
+#include "aicpu_topology_driver_abi.h"
+
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -193,6 +196,16 @@ struct QueryResult {
 };
 #pragma pack(pop)
 
+const QueryResult *FindQueryResult(
+    const std::vector<QueryRequest> &requests, const std::vector<QueryResult> &results, int32_t module_type,
+    int32_t info_type
+) {
+    for (size_t i = 0; i < requests.size() && i < results.size(); ++i) {
+        if (requests[i].module_type == module_type && requests[i].info_type == info_type) return &results[i];
+    }
+    return nullptr;
+}
+
 const char *kModuleName(int32_t m) {
     switch (m) {
     case 0:
@@ -309,16 +322,35 @@ std::string MakeJsonDescriptor(uint64_t fp, const std::string &so_basename) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <device_id>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <device_id> [--platform a2a3|a5] [--json]\n", argv[0]);
         return 1;
     }
     int device_id = std::atoi(argv[1]);
+    std::string platform = "a5";
+    bool json_output = false;
+    for (int i = 2; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--json") == 0) {
+            json_output = true;
+        } else if (std::strcmp(argv[i], "--platform") == 0 && i + 1 < argc) {
+            platform = argv[++i];
+        } else {
+            std::fprintf(stderr, "usage: %s <device_id> [--platform a2a3|a5] [--json]\n", argv[0]);
+            return 1;
+        }
+    }
+    if (platform != "a2a3" && platform != "a5") {
+        std::fprintf(stderr, "unsupported platform: %s (expected a2a3 or a5)\n", platform.c_str());
+        return 1;
+    }
+    if (json_output && platform != "a5") {
+        std::fprintf(stderr, "--json topology classification is only supported on a5\n");
+        return 1;
+    }
 
     const char *dispatcher_path_env = std::getenv("SIMPLER_DISPATCHER_SO");
     std::string dispatcher_path = dispatcher_path_env ?
                                       dispatcher_path_env :
-                                      "/data/wcwxyai/workspace/simpler/.claude/worktrees/parallel-petting-newt/build/"
-                                      "lib/a2a3/dispatcher/libsimpler_aicpu_dispatcher.so";
+                                      "build/lib/" + platform + "/dispatcher/libsimpler_aicpu_dispatcher.so";
     const char *inner_path_env = std::getenv("SIMPLER_AICPU_QUERY_SO");
     std::string inner_path =
         inner_path_env ? inner_path_env : "tools/cann-examples/aicpu-device-query/device/build/libaicpu_query.so";
@@ -331,10 +363,12 @@ int main(int argc, char **argv) {
     // Built-in initial query set — exactly what the kernel.cpp probe ran, so
     // we can sanity-check against the on-record results.
     std::vector<QueryRequest> requests = {
-        {1 /* AICPU */, 5 /* OS_SCHED */},     {1 /* AICPU */, 8 /* OCCUPY */},     {1 /* AICPU */, 1 /* CORE_NUM */},
-        {1 /* AICPU */, 20 /* PF_CORE_NUM */}, {1 /* AICPU */, 21 /* PF_OCCUPY */}, {2 /* CCPU */, 8 /* OCCUPY */},
-        {2 /* CCPU */, 1 /* CORE_NUM */},      {3 /* DCPU */, 8 /* OCCUPY */},      {3 /* DCPU */, 1 /* CORE_NUM */},
-        {5 /* TSCPU */, 8 /* OCCUPY */},       {5 /* TSCPU */, 1 /* CORE_NUM */},
+        {MODULE_TYPE_AICPU, INFO_TYPE_OS_SCHED},  {MODULE_TYPE_AICPU, INFO_TYPE_OCCUPY},
+        {MODULE_TYPE_AICPU, INFO_TYPE_CORE_NUM},  {MODULE_TYPE_AICPU, INFO_TYPE_PF_CORE_NUM},
+        {MODULE_TYPE_AICPU, INFO_TYPE_PF_OCCUPY}, {MODULE_TYPE_CCPU, INFO_TYPE_OCCUPY},
+        {MODULE_TYPE_CCPU, INFO_TYPE_CORE_NUM},   {MODULE_TYPE_DCPU, INFO_TYPE_OCCUPY},
+        {MODULE_TYPE_DCPU, INFO_TYPE_CORE_NUM},   {MODULE_TYPE_TSCPU, INFO_TYPE_OCCUPY},
+        {MODULE_TYPE_TSCPU, INFO_TYPE_CORE_NUM},
     };
     std::vector<QueryResult> results(requests.size());
 
@@ -416,7 +450,7 @@ int main(int argc, char **argv) {
         return std::string(b);
     }();
     std::string preinstall_path = MakePreinstallPath(fp, device_id);
-    std::printf("[bootstrap] inner SO at %s (fp=%016lx)\n", preinstall_path.c_str(), fp);
+    if (!json_output) std::printf("[bootstrap] inner SO at %s (fp=%016lx)\n", preinstall_path.c_str(), fp);
 
     char json_path_buf[128];
     std::snprintf(json_path_buf, sizeof(json_path_buf), "/tmp/simpler_inner_%016lx_%d.json", fp, getpid());
@@ -494,13 +528,52 @@ int main(int argc, char **argv) {
         "D2H QueryResult"
     );
 
-    // ---- Pretty-print ----
-    std::printf("\n=== device=%d  device-side HAL view (via dispatcher + inner SO) ===\n", device_id);
-    for (size_t i = 0; i < requests.size(); ++i) {
-        std::printf(
-            "  %-12s + %-14s  rc=%d  val=0x%lx (%ld)\n", kModuleName(requests[i].module_type),
-            kInfoName(requests[i].info_type), results[i].rc, (long)results[i].value, (long)results[i].value
+    if (json_output) {
+        const QueryResult *os_sched = FindQueryResult(requests, results, MODULE_TYPE_AICPU, INFO_TYPE_OS_SCHED);
+        const QueryResult *occupy = FindQueryResult(requests, results, MODULE_TYPE_AICPU, INFO_TYPE_OCCUPY);
+        const QueryResult *pf_occupy = FindQueryResult(requests, results, MODULE_TYPE_AICPU, INFO_TYPE_PF_OCCUPY);
+        if (os_sched == nullptr || occupy == nullptr || pf_occupy == nullptr) {
+            std::fprintf(stderr, "required AICPU occupancy query result is missing\n");
+            return 1;
+        }
+        pto::a5::AicpuDeviceOccupancy occupancy;
+        occupancy.os_sched = static_cast<uint64_t>(os_sched->value);
+        occupancy.os_sched_valid = os_sched->rc == 0;
+        occupancy.occupy = static_cast<uint64_t>(occupy->value);
+        occupancy.occupy_valid = occupy->rc == 0;
+        occupancy.pf_occupy = static_cast<uint64_t>(pf_occupy->value);
+        occupancy.pf_occupy_valid = pf_occupy->rc == 0;
+        pto::a5::AicpuTopology topology;
+        if (!pto::a5::probe_aicpu_topology(static_cast<uint32_t>(device_id), occupancy, topology)) {
+            std::fprintf(stderr, "AICPU topology probe failed for device %d\n", device_id);
+            return 1;
+        }
+        pto::a5::AicpuLaunchPlan plan;
+        std::string plan_error;
+        if (!pto::a5::build_aicpu_launch_plan(topology, /*automatic=*/0, plan, plan_error)) {
+            std::fprintf(stderr, "AICPU launch-plan construction failed: %s\n", plan_error.c_str());
+            return 1;
+        }
+        if (plan.warn_cpu_topology_unavailable) {
+            std::fprintf(stderr, "WARNING: CPU_TOPO unavailable; using OCCUPY-only fallback\n");
+        }
+        if (plan.warn_stable_reachable_below_default) {
+            std::fprintf(
+                stderr, "WARNING: only %d stable reachable AICPU CPUs; effective active count is %d\n",
+                plan.stable_reachable_count, plan.effective_active_count
+            );
+        }
+        std::fputs(
+            pto::a5::format_aicpu_topology_json(topology, plan.selection_policy, plan.allowed_cpus).c_str(), stdout
         );
+    } else {
+        std::printf("\n=== device=%d  device-side HAL view (via dispatcher + inner SO) ===\n", device_id);
+        for (size_t i = 0; i < requests.size(); ++i) {
+            std::printf(
+                "  %-12s + %-14s  rc=%d  val=0x%lx (%ld)\n", kModuleName(requests[i].module_type),
+                kInfoName(requests[i].info_type), results[i].rc, (long)results[i].value, (long)results[i].value
+            );
+        }
     }
 
     ACL_CHECK(aclrtDestroyStream(stream), "destroy stream");

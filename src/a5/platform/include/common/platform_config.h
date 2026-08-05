@@ -49,14 +49,7 @@ constexpr int PLATFORM_AIV_CORES_PER_BLOCKDIM = 2;
  * Maximum AICPU scheduling threads
  * Determines parallelism level of the AICPU task scheduler.
  */
-constexpr int PLATFORM_MAX_AICPU_THREADS = 7;
-
-/**
- * Default active AICPU thread count when aicpu_thread_num is left at 0 (auto):
- * 1 orchestrator + 4 schedulers. Onboard topology probing assigns those
- * threads to device-visible CPUs; simulation uses the value directly.
- */
-constexpr int PLATFORM_DEFAULT_AICPU_THREAD_NUM = 5;  // 1 orch + 4 sched
+constexpr int PLATFORM_MAX_AICPU_THREADS = 5;
 
 /**
  * Compile-time upper bound on the number of AICPU threads CANN may
@@ -91,7 +84,7 @@ constexpr int PLATFORM_DEFAULT_AICPU_THREAD_NUM = 5;  // 1 orch + 4 sched
  * empirical data and src/a5/platform/onboard/host/device_runner.cpp
  * for where the runtime count is decided.
  */
-constexpr int PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH = 14;
+constexpr int PLATFORM_MAX_AICPU_LAUNCH_THREADS = 14;
 
 /**
  * Default AICore op execution timeout (microseconds).

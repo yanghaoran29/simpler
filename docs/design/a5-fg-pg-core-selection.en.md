@@ -3,18 +3,18 @@
 ## 1. Objective and scope
 
 This document defines AICPU core-selection logic for all currently known A5
-topology scenarios: default FG, FG+SMT, one failed cluster (PG1), and two
-failed clusters (PG2).
+topology scenarios: default FG, one failed cluster (PG1), and two failed
+clusters (PG2). Scheduler SMT availability is a topology property of these
+scenarios, not a separate scenario. A5 supports two through five active AICPU
+threads: one Orchestrator and one through four Schedulers. `1O+4S` remains the
+automatic default; Sections 4-6 define the detailed rules.
 
-FG and FG+SMT must be identified separately, but they use the same default
-policy. FG+SMT only adds SMT layouts for later exploration. Every scenario uses
-`1O+4S` as its default basis; Sections 4-6 define the detailed rules.
-
-This document defines code design only. The repository already implements the
-generic `probe_aicpu_topology()` topology probe and `compute_allowed_cpus()`
-packing algorithm. It does not yet implement the PG scenario classification or
-the scenario-specific policies proposed here. Section 4 lists other Scheduler
-counts and layouts for later hardware performance testing.
+This document is the design contract for A5 AICPU core selection. The runtime
+implements device-side occupancy query, scenario classification
+(`kFg` / `kPg1` / `kPg2` / `kUnknown`), the Section 4 policies for every
+supported active count (`1O+1S` through `1O+4S`), and the unknown-topology
+fallback. Section 4 also lists placement variants reserved for later hardware
+performance testing.
 
 > **Architecture boundary:** AICPU PG is designed and implemented only for A5.
 > A2/A3 AICPU does not enter PG. It continues to use the existing non-PG
@@ -62,37 +62,35 @@ The authoritative per-logical-CPU contract is `AicpuLogicalCpu` in
 present in the driver `OCCUPY` bitmap; Control, Data, and system-reserved CPUs
 are not candidates for O/S placement.
 
-FG+SMT is selected through driver configuration. After changing that
-configuration, the tool queries the effective state. `scheduler_smt_enabled`
-records this queried state; it is not a temporary Runtime software switch.
+`scheduler_smt_enabled` records whether the driver-reported schedulable pool
+contains an SMT sibling pair. It is an observed topology property and not a
+temporary Runtime software switch. In particular, `kFg` does not imply that
+Scheduler SMT is disabled.
 
 The runtime may identify the scenario from any of the following sources, in
 priority order:
 
 1. Prefer the scenario-type query interface in Section 3.3 and directly use
-   `kFg`, `kFgSmt`, `kPg1`, or `kPg2`.
-2. If the interface does not return a type, use the surviving-cluster count,
-   cross-die distribution, and schedulable SMT sibling state.
-3. If cluster information is unavailable, match the driver-reported logical
-   AICPU count against the current A5 BIOS topology configuration and use SMT
-   sibling state to distinguish FG from FG+SMT.
+   `kFg`, `kPg1`, or `kPg2`.
+2. If the interface does not return a type, use the surviving-cluster count
+   and cross-die distribution.
+3. Record schedulable SMT sibling state independently in
+   `scheduler_smt_enabled`; it does not change the scenario type.
 
-| Scenario | Logical AICPU count | Surviving clusters | SMT state | Distribution |
-| -------- | ------------------: | -----------------: | --------- | ------------ |
-| FG | 16 (T0-T15) | 4 | Scheduler SMT siblings disabled | Both dies are complete |
-| FG+SMT | 16 (T0-T15) | 4 | Scheduler SMT siblings available | Both dies are complete |
-| PG1 | 12 (T0-T11) | 3 | As reported by the driver | One complete die and one surviving cluster on the other die |
-| PG2 | 8 (T0-T7) | 2 | As reported by the driver | One surviving cluster on each die |
+When cluster/die metadata is present (the common host path), classification
+**does not** require logical AICPU counts of 16/12/8. Those counts describe one
+BIOS mapping; other valid layouts (for example a 9-logical FG SKU) still map by
+surviving clusters:
 
-The logical AICPU count is the total number of logical CPUs exposed by
-BIOS/driver, not the number of active Control, Data, and Compute roles. For
-example, PG1 exposes 12 logical AICPUs while the diagram contains 10 active
-roles. Count-based detection is valid only after confirming that the device
-uses the A5 BIOS mapping above. Return `kUnknown` if the count does not match
-the mapping or cannot identify a scenario uniquely. FG and FG+SMT have the
-same logical-AICPU and cluster counts, so the runtime must distinguish them
-using driver-reported schedulable SMT sibling information rather than counts
-alone.
+| Scenario | Surviving clusters | Distribution | SMT property |
+| -------- | -----------------: | ------------ | ------------ |
+| FG | 4 | Both dies complete (2+2 clusters) | Recorded independently; does not affect `kFg` classification |
+| PG1 | 3 | One die 2 clusters, the other 1 | Recorded; default 1O+4S uses SMT pairs |
+| PG2 | 2 | One surviving cluster on each die | Recorded; SMT sharing is allowed for 1O+4S |
+
+Return `kUnknown` only when the cluster/die shape cannot identify a scenario
+uniquely. A complete four-cluster, two-die layout is FG regardless of its
+current schedulable SMT state.
 
 Whether Data 1 and Data 2 are exposed as two independent logical CPUs or one
 merged logical CPU remains a BIOS/driver question. Core selection consumes only
@@ -100,7 +98,7 @@ the final schedulable set returned by the driver.
 
 ### 3.3 Scenario-type query interface
 
-Two existing tools provide reusable low-level signals:
+The runtime and diagnostic tool combine these low-level signals:
 
 - `tools/cann-examples/query/query.cpp` queries CPU topology through
   `halGetDeviceInfoByBuff(SYSTEM, CPU_TOPO)`, with
@@ -122,30 +120,40 @@ struct AicpuLogicalCpu {
 };
 ```
 
-The existing `compute_allowed_cpus()` applies a generic topology-aware packing
-algorithm to this probe output. Neither it nor the query tools currently provide
-the PG scenario classifier or the scenario-specific policies proposed below.
+`compute_allowed_cpus()` remains the generic topology-aware packer for packaged
+entries that explicitly request the generic policy. Known scenarios use
+`classify_aicpu_scenario()` plus `compute_scenario_allowed_cpus()` for every
+supported active count from two through five.
 
-> **TODO (not implemented):** Implement `QueryAicpuTopology()` under
-> `tools/cann-examples/aicpu-topology-query/`. The interface and output
-> format below are proposals and cannot be called by the current version.
+The production AICPU SO exposes a one-thread topology-query entry before the
+normal affinity-gated launch. It returns device-side `OCCUPY`, `PF_OCCUPY`, and
+`OS_SCHED`; Host CPU_TOPO supplies physical, SMT, cluster, and die metadata.
+`tools/cann-examples/aicpu-device-query/host/query_device_hal --json` uses the
+same classifier and serializer as the runtime.
 
 ```cpp
 enum class AicpuScenarioType {
     kNotApplicable,  // A2/A3
-    kFg,             // A5, 4 clusters, Scheduler SMT disabled
-    kFgSmt,          // A5, 4 clusters, Scheduler SMT enabled
+    kFg,             // A5, 4 clusters; SMT state is recorded separately
     kPg1,            // A5, 3 surviving clusters
     kPg2,            // A5, one surviving cluster on each die
     kUnknown,
 };
 
 struct AicpuTopology {
+    AicpuTopologySource source;  // driver, verified JSON, or OCCUPY-only
     AicpuScenarioType scenario_type;
     bool scheduler_smt_enabled;
     uint32_t logical_cpu_count;
     std::vector<int32_t> surviving_cluster_ids;
     std::vector<AicpuLogicalCpu> os_schedulable_cpus;
+};
+
+struct AicpuLaunchPlan {
+    int32_t effective_active_count;
+    int32_t stable_reachable_count;
+    int32_t launch_count;
+    std::vector<int32_t> allowed_cpus;  // [S..., O]
 };
 
 AicpuTopology QueryAicpuTopology(uint32_t device_id);
@@ -177,37 +185,65 @@ a second ID-only representation. This lets tests and DFX reproduce every
 placement decision. The interface combines these signals using the priority in
 Section 3.2 and returns `kUnknown` when classification is ambiguous.
 
+Live FG measurement on `Ascend950PR_9599` (CANN 9.2.0, 2026-08-05,
+`query_device_hal --json`, automatic `1O+4S`):
+
+```json
+{
+  "architecture": "a5",
+  "soc_name": "Ascend950PR_9599",
+  "topology_source": "driver",
+  "scenario_type": "FG",
+  "selection_policy": "scenario",
+  "scheduler_smt_enabled": false,
+  "logical_cpu_count": 9,
+  "surviving_clusters": [0, 1, 2, 3],
+  "device_masks": {"occupy": "0x1f8", "pf_occupy": "0x1f8", "os_sched": "0x1"},
+  "os_schedulable_cpus": [
+    {"cpu_id": 3, "phy_cpu_id": 2, "hyperthread_id": 0, "cluster_id": 1, "die_id": 0},
+    {"cpu_id": 4, "phy_cpu_id": 3, "hyperthread_id": 0, "cluster_id": 1, "die_id": 0},
+    {"cpu_id": 5, "phy_cpu_id": 4, "hyperthread_id": 0, "cluster_id": 2, "die_id": 1},
+    {"cpu_id": 6, "phy_cpu_id": 5, "hyperthread_id": 0, "cluster_id": 2, "die_id": 1},
+    {"cpu_id": 7, "phy_cpu_id": 6, "hyperthread_id": 0, "cluster_id": 3, "die_id": 1},
+    {"cpu_id": 8, "phy_cpu_id": 7, "hyperthread_id": 0, "cluster_id": 3, "die_id": 1}
+  ],
+  "allowed_cpus": [7, 5, 6, 3, 8]
+}
+```
+
+Affinity is `[S:7, S:5, S:6, S:3, O:8]`. The only SMT pair in CPU_TOPO sits on
+phy_cpu_id 1 outside OCCUPY, so `scheduler_smt_enabled` is false. Full dump:
+`src/a5/docs/hardware.md` ("Live FG topology on Ascend950PR_9599").
+
 ## 4. Core-selection strategies for all scenarios
 
-Default policies:
+Topology policies for `1O+NS`, where `N` is one through four:
 
-| Scenario | Default `1O+4S` policy |
-| -------- | ---------------------- |
-| FG | O owns the last suitable physical CPU; every Scheduler uses a dedicated physical CPU close to O; prefer one die |
-| FG+SMT | Same as FG; O uses the first logical thread of the last suitable physical CPU and leaves its sibling idle; Schedulers do not use the second SMT thread by default |
-| PG1 | Use the fixed SMT compensation layout without searching other layouts. O uses the primary thread of the last suitable physical CPU and leaves its sibling idle. From the remaining candidates, prefer the same cluster as O, then the same die, then the other die, and select two physical CPUs that each provide a complete schedulable SMT pair; the four threads of those pairs become 4S. If this layout is unavailable, return insufficient capacity. The same topology-relative rule handles every failed-cluster position without relying on logical CPU numbering |
-| PG2 | The scenario policy overrides the global isolation preferences. Order CPUs by die, cluster, physical CPU, and logical CPU; use the last eligible logical CPU as O without requiring an idle sibling. An S may use O's SMT sibling, and two S roles may use both threads of another physical CPU when necessary. Place Schedulers in O's cluster first and the remaining Schedulers on the other die |
+| Scenario | `1O+NS` policy |
+| -------- | -------------- |
+| FG | O uses the primary thread of the last suitable physical CPU. Select N primary threads on dedicated physical CPUs, preferring O's cluster, then O's die, then the other die. The scenario remains FG whether or not schedulable SMT siblings are present |
+| PG1 | O uses the primary thread of the last suitable physical CPU on the die with the most schedulable threads and leaves its sibling idle. Among the remaining CPUs, select one primary thread per physical CPU first, ordered by O's cluster, O's die, then the other die. Consume SMT siblings only when distinct physical CPUs cannot satisfy N. If the remaining logical CPUs are insufficient, return insufficient capacity |
+| PG2 | Order CPUs by die, cluster, physical CPU, hyperthread, and logical CPU; use the last eligible logical CPU as O without requiring an idle sibling. Order the remaining candidates by proximity to O and take the first N. An S may use O's SMT sibling, and two S roles may share another physical CPU |
 
-Under the current BIOS mapping, `[T6, T7, T8, T9, T10]`, with T6-T9 as
-Schedulers and T10 as O, is a non-normative example for one right-side PG1
-cluster failure. Implementations must derive the equivalent layout from
-`cluster_id`, `die_id`, `phy_cpu_id`, and `hyperthread_id` for either failure
-orientation.
+For the documented right-side Cluster 3 failure, the deterministic default is
+`[S:T8, S:T4, S:T6, S:T9, O:T10]`. T8/T9 are the only Scheduler SMT sibling
+pair; T4 and T6 occupy distinct physical CPUs. A fully non-SMT 4S+1O mapping is
+impossible because only four Compute physical CPUs remain and one is reserved
+for O. Implementations derive the mirrored result from topology metadata.
 
 Strategies for later exploration:
 
 | Scenario | Strategies to explore |
 | -------- | --------------------- |
-| FG | Compare `1O+2S`, `1O+3S`, and `1O+4S`, plus single-cluster packing, multi-cluster spreading on one die, and cross-die placement |
-| FG+SMT | In addition to the FG options, compare one or two Scheduler logical threads per physical CPU, compact SMT, hybrid SMT, and multi-cluster spreading |
-| PG1 | Validate only the performance and stability of the fixed SMT compensation layout; do not explore other SMT densities or placements |
-| PG2 | Compare default shared-physical-CPU `1O+4S`, dedicated-O `1O+3S`/`1O+2S`, and Scheduler distribution between the two surviving clusters |
+| FG | Compare the implemented `1O+1S` through `1O+4S` counts, single-cluster packing, multi-cluster spreading on one die, and cross-die placement. When schedulable SMT siblings are present, also compare compact SMT and hybrid SMT variants |
+| PG1 | Compare the minimum-SMT-sharing default with compact SMT only on a machine that exposes the required PG1 topology; see `docs/investigations/2026-08-a5-pg1-smt-placement-validation-plan.md` |
+| PG2 | Compare the implemented shared-physical-CPU counts with dedicated-O variants and alternative Scheduler distribution between the two surviving clusters |
 
 ## 5. Global core-selection principles
 
 The scenario-specific rules in Section 4 take precedence over the global
-placement preferences in this section. In particular, PG1 explicitly uses
-Scheduler SMT pairs, and PG2 explicitly permits physical-CPU sharing.
+placement preferences in this section. PG1 delays Scheduler SMT sharing until
+distinct physical CPUs are exhausted; PG2 explicitly permits physical sharing.
 
 Orchestrator:
 
@@ -231,20 +267,20 @@ Scheduler placement and affinity:
 
 - Prefer O's cluster, then O's die, and cross dies last.
 - Prefer a dedicated physical CPU for each Scheduler except where the scenario
-  policy permits SMT sharing. PG1 uses exactly two complete Scheduler SMT pairs.
-  PG2 may assign a Scheduler to O's sibling and may assign two Schedulers to
-  both threads of another physical CPU when necessary.
-- Multi-cluster spreading, SMT density, and other Scheduler counts are
-  exploration items.
+  policy permits SMT sharing. PG1 uses a sibling only after available primary
+  threads on other physical CPUs; PG2 may assign a Scheduler to O's sibling and may assign two
+  Schedulers to both threads of another physical CPU when necessary.
+- Alternative multi-cluster spreading and SMT density are exploration items.
 
 Policy-specific capacity requirements:
 
-| Scenario | Requirements for the default `1O+4S` layout |
-| -------- | ------------------------------------------- |
-| FG | At least five suitable physical CPUs; O owns one physical CPU and leaves its sibling idle; four Schedulers use four other distinct physical CPUs |
-| FG+SMT | Same as FG; schedulable SMT siblings may exist, but the default layout does not use a second Scheduler thread on any physical CPU |
-| PG1 | One suitable physical CPU provides O's primary thread and an idle sibling; two other physical CPUs each provide a complete schedulable SMT pair, supplying 4S |
-| PG2 | At least five schedulable logical CPUs; two surviving clusters are present on different dies; O/S and Scheduler/Scheduler physical-CPU sharing is permitted |
+- FG requires at least N+1 suitable physical CPUs: O owns one and each
+  Scheduler uses another primary thread.
+- PG1 requires one suitable physical CPU for O and at least N remaining
+  schedulable logical CPUs. It prefers distinct physical CPUs but does not
+  require complete SMT pairs.
+- PG2 requires at least N+1 schedulable logical CPUs across the identified PG2
+  topology; physical-CPU sharing is permitted.
 
 Determinism and state consistency:
 
@@ -262,25 +298,43 @@ Determinism and state consistency:
 
 ## 6. Common selection flow
 
-1. Call the existing `probe_aicpu_topology()` to obtain the driver-filtered
-   `os_schedulable_cpus`. After the unified interface is implemented, A5 uses
-   `QueryAicpuTopology()` to add scenario classification. Until then, the
-   existing `compute_allowed_cpus()` remains a generic packing algorithm rather
-   than an implementation of these scenario policies. A2/A3 directly enters
-   the existing non-PG path.
+1. Query device-side `OCCUPY` / `PF_OCCUPY` / `OS_SCHED`, then call
+   `probe_aicpu_topology()` to merge Host CPU_TOPO metadata, build
+   `os_schedulable_cpus`, and classify the scenario. A2/A3 stays on the
+   existing non-PG path and does not enter this flow.
 2. Group logical CPUs by `phy_cpu_id`, and retain their `cluster_id`, `die_id`,
    and `hyperthread_id`.
-3. Select a scenario policy from `kFg`, `kFgSmt`, `kPg1`, or `kPg2`.
-4. Validate the common requirements and every policy-specific capacity
-   requirement in Section 5 before assigning any role. A count of five logical
-   CPUs alone is sufficient only for PG2, subject to its required cross-die
-   cluster distribution.
+3. Select a scenario policy from `kFg`, `kPg1`, or `kPg2`, or take the
+   `kUnknown` fallback in step 8.
+4. Resolve `aicpu_thread_num=0` to the automatic default of five. Reject manual
+   values outside 2-5. For every known scenario and active count, validate the
+   common requirements and the policy-specific capacity in Section 5.
 5. Place O and S using the selected scenario policy in Section 4. The scenario
    policy overrides the global placement preferences where Section 4 states an
    exception.
-6. Verify that all five selected IDs are unique and schedulable, then emit
-   `[S0 ... S3, O]` atomically. Synchronize the actual launch count, Runtime,
+6. Verify that all selected IDs are unique and schedulable, then emit
+   `[S0 ... SN-1, O]` atomically. Synchronize the actual launch count, Runtime,
    DFX, and affinity state with that complete array.
 7. If validation or placement fails, return insufficient capacity without
    emitting a partial affinity array.
-8. For `kUnknown`, disable automatic affinity and emit only the raw probe data.
+8. For `kUnknown`, sort valid metadata by die, cluster, physical CPU,
+   hyperthread, and logical CPU. OCCUPY-only inputs have no physical metadata,
+   so their order reduces to logical CPU ID. A manual request selects exactly
+   that many CPUs and fails on insufficient capacity; automatic mode selects up
+   to five and may shrink to the available count. At least two CPUs are
+   required. The last selection is O and the preceding selections are S. Emit
+   a Host warning on every run that uses this fallback; JSON mode keeps the
+   warning on stderr and machine-readable output on stdout.
+
+Before the generic `kUnknown` fallback, a packaged JSON entry may preserve a
+verified CPU_TOPO-less signature. Its SoC and every constraint declared by the
+entry must match. The 9599 entry is host-independent but requires exact
+device-side `OCCUPY=0x1f8`; the 9579 entry also constrains host architecture.
+Entries marked `generic` use `compute_allowed_cpus()` and honor an explicit
+active count.
+
+The fallback's active count is the number selected, while the AICPU launch
+count remains the full device-side `OCCUPY` population so the filter gate sees
+one representative on every schedulable CPU. This launch count may exceed the
+active limit of five and is independently capped at 14. Unknown automatic mode
+may shrink the active count; a manual count is never silently changed.

@@ -10,6 +10,8 @@
  */
 #include <cstdio>
 
+#include <driver/ascend_hal_base.h>
+
 #include "common/unified_log.h"
 #include "common/kernel_args.h"
 #include "common/platform_config.h"
@@ -28,7 +30,7 @@
 
 // Run-wall capture: the host allocates a device buffer addressed by
 // KernelArgs.device_wall_data_base holding one { start_cycle, end_cycle } pair
-// per launched AICPU thread (PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH pairs,
+// per launched AICPU thread (PLATFORM_MAX_AICPU_LAUNCH_THREADS pairs,
 // raw sys-counter cycles), and resets it to { UINT64_MAX, 0 } before each run.
 // Every surviving simpler_aicpu_exec thread writes its own start/end into its
 // own slot (indexed by platform_aicpu_affinity_thread_idx()) — plain stores,
@@ -40,6 +42,23 @@
 // simpler_aicpu_register_callable is NOT declared/forwarded here: it is
 // exported directly by the TMARB runtime (host_build_graph does not export it).
 extern "C" int aicpu_execute(Runtime *arg);
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_query_topology(void *arg) {
+    if (arg == nullptr) return -1;
+    auto *query_args = reinterpret_cast<AicpuTopologyQueryArgs *>(arg);
+    if (query_args->result_addr == 0) return -1;
+    auto *result = reinterpret_cast<AicpuTopologyQueryResult *>(query_args->result_addr);
+    int64_t value = 0;
+    result->occupy_rc = halGetDeviceInfo(0, MODULE_TYPE_AICPU, INFO_TYPE_OCCUPY, &value);
+    result->occupy = static_cast<uint64_t>(value);
+    value = 0;
+    result->pf_occupy_rc = halGetDeviceInfo(0, MODULE_TYPE_AICPU, INFO_TYPE_PF_OCCUPY, &value);
+    result->pf_occupy = static_cast<uint64_t>(value);
+    value = 0;
+    result->os_sched_rc = halGetDeviceInfo(0, MODULE_TYPE_AICPU, INFO_TYPE_OS_SCHED, &value);
+    result->os_sched = static_cast<uint64_t>(value);
+    return result->occupy_rc == 0 ? 0 : -1;
+}
 
 /**
  * AICPU kernel main execution entry point.

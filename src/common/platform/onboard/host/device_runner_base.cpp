@@ -1236,7 +1236,7 @@ void DeviceRunnerBase::ensure_device_wall_buffer() {
     // max(end) - min(start) and surfaces the other phases as trace markers. The
     // buffer is allocated once (lazy) but RESET every run so a stale prior run
     // cannot leak into the reduction.
-    constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    constexpr int kThreads = PLATFORM_MAX_AICPU_LAUNCH_THREADS;
     // Phase region followed by the task-timing tail. Both records are 16 bytes and
     // share the {kPhaseUnset, 0} reset, so one AicpuPhaseRecord init array covers
     // both; the AICPU SO resolves the tail at base + task_timing_tail_offset().
@@ -1383,7 +1383,7 @@ void DeviceRunnerBase::read_device_wall_ns() {
     }
     if (device_wall_dev_ptr_ == nullptr) return;
 
-    constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    constexpr int kThreads = PLATFORM_MAX_AICPU_LAUNCH_THREADS;
     constexpr int kRecords = kThreads * NUM_AICPU_PHASES;
     AicpuPhaseRecord buf[kRecords] = {};
     int wall_rc = rtMemcpy(buf, sizeof(buf), device_wall_dev_ptr_, sizeof(buf), RT_MEMCPY_DEVICE_TO_HOST);

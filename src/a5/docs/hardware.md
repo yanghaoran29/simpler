@@ -64,8 +64,8 @@ HAL counts mean the same thing across generations.
 | `aclrtGetDeviceInfo(ACL_DEV_ATTR_AICPU_CORE_NUM)` | **6** | — | — |
 | CANN ini `ai_cpu_cnt` / `ai_core_cnt` / `vector_core_cnt` | (per-SKU, see ini) | (per-SKU) | (per-SKU) |
 | `halGetDeviceInfo(AICPU, CORE_NUM)` host-side | **8** | — | — |
-| `halGetDeviceInfo(AICPU, OCCUPY)` host-side | `0x1fe` (**9-bit** mask, 8 set: bits 1..8) | — | — |
-| `halGetDeviceInfo(AICPU, IN_USED)` | **8** | — | — |
+| `halGetDeviceInfo(AICPU, OCCUPY)` host-side | historically `0x1fe` (bits 1..8); on CANN 9.2.0 measured **`0x1f8`** (matches device) | — | — |
+| `halGetDeviceInfo(AICPU, IN_USED)` | historically **8**; on CANN 9.2.0 measured **6** | — | — |
 | `halGetDeviceInfo(AICORE, CORE_NUM)` | — | **36** (per device, = 2 dies × 18) | — |
 | `halGetDeviceInfo(AICORE, DIE_NUM)` | — | **2** | — |
 | `halGetDeviceInfo(VECTOR_CORE, CORE_NUM)` | — | — | **72** (per device) |
@@ -85,35 +85,42 @@ id 0 it returns:
 | Query | Result | Interpretation |
 | ----- | ------ | -------------- |
 | `AICPU + OS_SCHED` | `0x1` | **AICPU OS owns exactly cpu_id 0** (single bit) |
-| `AICPU + OCCUPY` (device-side) | `0x1f8 = 0b111111000` | **6 cores in the AICPU user pool at cpu_id 3..8** — not the `0x1fe` seen host-side. The 2-bit divergence (bits 1, 2) is the key new finding. |
+| `AICPU + OCCUPY` (device-side) | `0x1f8 = 0b111111000` | **6 cores in the AICPU user pool at cpu_id 3..8**. Earlier drivers also differed from host-side `0x1fe`; on CANN 9.2.0 host OCCUPY matches this mask. |
 | `AICPU + PF_OCCUPY` | `0x1f8` | identical to device-side OCCUPY → no SR-IOV / vNPU slicing |
 | `AICPU + PF_CORE_NUM` | `6` | PF-view count matches user view → no virtualization |
 | `AICPU + CORE_NUM` (device-side) | rc=3 | unlike a3, a5 restricts this query device-side — use `PF_CORE_NUM` instead |
 | `CCPU + OCCUPY` | `0x1` | CCPU owns 1 core in its own namespace |
 | `DCPU/TSCPU + OCCUPY`, `+ CORE_NUM` | rc=3 | module-level access restricted device-side (same as a3) |
 
-The host-side / device-side OCCUPY divergence is **a5-specific**: on a3
-both views return the same `0xfc`. On a5 host-side reports 8 enabled
-cores (`0x1fe`) but the device-side AICPU OS exposes only 6 to its user
-kernel pool (`0x1f8`). The 2-bit gap (bits 1, 2) exactly matches DSMI
-CPU_TOPO's lone hyperthread pair on phy_cpu_id 1 — the AICPU OS keeps
-the SMT-paired logical CPUs for itself rather than dispatching user
-kernels onto them.
+The host-side / device-side OCCUPY divergence was **a5-specific** on
+earlier drivers: on a3 both views return the same `0xfc`; on earlier a5
+hosts, host-side reported 8 enabled cores (`0x1fe`) while the
+device-side AICPU OS exposed only 6 to its user kernel pool (`0x1f8`).
+The 2-bit gap (bits 1, 2) exactly matches DSMI CPU_TOPO's lone
+hyperthread pair on phy_cpu_id 1 — the AICPU OS keeps the SMT-paired
+logical CPUs for itself rather than dispatching user kernels onto them.
+
+On CANN 9.2.0 (`Ascend950PR_9599`, 2026-08-05 live dump) host-side
+`AICPU + OCCUPY` also returns `0x1f8`, matching device-side. CPU_TOPO
+still enumerates all 9 logical CPUs including the SMT pair, so the
+layout below is unchanged — only the host OCCUPY bitmap no longer
+exposes bits 1 and 2.
 
 Combined with the absence of any vNPU mode (`is_virtual: no` via ACL),
 the AICPU side splits as:
 
 | Slot | Owner | Evidence |
 | ---- | ----- | -------- |
-| cpu_id 0 | AICPU OS scheduler | OS_SCHED bit 0 = 1 (device-side probe); cleared in host-side OCCUPY by design (OS scheduler is exposed via OS_SCHED, not OCCUPY) |
-| cpu_id 1, 2 | Hyperthread pair on phy_cpu_id 1, withheld from the user pool by the AICPU OS | present in host-side OCCUPY (`0x1fe`) so they are **not** PG fab-disabled — that would clear them everywhere as cpu_id 1 was on a3. Absent from device-side AICPU OCCUPY (`0x1f8`), absent from CCPU OCCUPY (`0x1`). DSMI CPU_TOPO labels exactly this pair as the chip's only SMT pair. AICPU OS withholds SMT pairs from user dispatch to avoid intra-pair contention. |
+| cpu_id 0 | AICPU OS scheduler | OS_SCHED bit 0 = 1 (device-side probe); cleared in OCCUPY by design (OS scheduler is exposed via OS_SCHED, not OCCUPY) |
+| cpu_id 1, 2 | Hyperthread pair on phy_cpu_id 1, withheld from the user pool by the AICPU OS | present in DSMI CPU_TOPO (and historically in host-side OCCUPY `0x1fe`) so they are **not** PG fab-disabled — that would clear them from CPU_TOPO as cpu_id 1 was on a3. Absent from device-side AICPU OCCUPY (`0x1f8`), absent from CCPU OCCUPY (`0x1`). DSMI CPU_TOPO labels exactly this pair as the chip's only SMT pair. AICPU OS withholds SMT pairs from user dispatch to avoid intra-pair contention. |
 | cpu_id 3..8 | user-schedulable (6) | device-side OCCUPY bits 3..8 set; matches `rtGetAiCpuCount=6` and `PF_CORE_NUM=6` |
 
 The 9 → 6 gap on a5 is therefore **1 AICPU OS-reserved (cpu_id 0) + 2
 SMT-pair withheld from user (cpu_id 1, 2)**, not "AICPU-OS-reserved
 or PG fab-disabled" as the earlier inference from HAL host-side data
-alone suggested. PG fab-disable can be ruled out on a5 by the host-side
-OCCUPY containing both gap slots.
+alone suggested. PG fab-disable is ruled out by CPU_TOPO still listing
+both SMT siblings (and, on earlier drivers, by host-side OCCUPY
+containing both gap slots).
 
 ### Key semantic differences from a3
 
@@ -121,8 +128,8 @@ OCCUPY containing both gap slots.
 | ----------- | ------------------- | -------------- |
 | `halGetDeviceInfo(AICPU, CORE_NUM)` host-side | 6 (matches user-visible) | **8** (does NOT match user-visible) |
 | `halGetDeviceInfo(AICPU, CORE_NUM)` device-side | 6 (succeeds) | **rc=3** (restricted) |
-| `halGetDeviceInfo(AICPU, OCCUPY)` host-side | 8-bit `0xfc` | **9-bit `0x1fe`** |
-| `halGetDeviceInfo(AICPU, OCCUPY)` device-side | `0xfc` (matches host) | **`0x1f8` (differs from host)** — AICPU OS withholds the SMT pair |
+| `halGetDeviceInfo(AICPU, OCCUPY)` host-side | 8-bit `0xfc` | historically **9-bit `0x1fe`**; CANN 9.2.0 measured **`0x1f8`** (matches device) |
+| `halGetDeviceInfo(AICPU, OCCUPY)` device-side | `0xfc` (matches host) | **`0x1f8`** — AICPU OS withholds the SMT pair from user dispatch |
 | `AICPU` gap composition (HAL → user) | 1 OS-reserved + 1 PG fab-disabled | **1 OS-reserved + 2 SMT-pair withheld** (no PG-disable) |
 | Logical vs physical AICPU | no hyperthread evidence | **1 phy core hyperthreaded → 9 logical** |
 | `halGetDeviceInfo(AICORE, DIE_NUM)` | fails (rc=3) | works, returns **2** |
@@ -139,12 +146,12 @@ report what user code can address.
 
 | You are doing… | Use |
 | -------------- | --- |
-| Configuring runtime `aicpu_thread_num` | **0 = auto** → architecture default 5; explicit values pass configuration validation in `[2, 7]`, while the observed onboard device-visible pool limits the effective maximum to 6 |
+| Configuring runtime `aicpu_thread_num` | **0 = auto** → architecture default 5; explicit values pass configuration validation in `[2, 5]` and use the same topology-aware selection policy |
 | Setting kernel `block_dim` for AICore | **user-visible** (per CANN ini for your specific SKU) |
 | Counting cores in a multi-die a5 device | **per-device** HAL CORE_NUM (= 2 × per-die) |
 | Reasoning about hyperthreading on AICPU | **DSMI CPU_TOPO** (only it shows the hyperthread pair on cpu_id 1+2) |
 | Writing code expected to also work on a3 | **ACL or CANN ini only** — HAL semantics differ |
-| Debugging "I requested N AICPU, only 6 ran" | active cap is **7** (`PLATFORM_MAX_AICPU_THREADS`); 6 are device-usable (gap = 1 OS cpu_id 0 + 2 SMT-pair withheld by AICPU OS). Host-side OCCUPY reports 8, so the default 5 stays <= 6 |
+| Debugging "I requested N AICPU, only 6 ran" | active cap is **5** (`PLATFORM_MAX_AICPU_THREADS`); the independent launch population is 6 on this SKU so the affinity gate reaches every device-usable CPU before retaining at most 5 active roles |
 
 For cross-generation portable code: **always go through ACL or CANN
 ini, never HAL**. HAL's CORE_NUM semantics shift between a3 and a5 in
@@ -162,12 +169,77 @@ The same driver returns `DRV_ERROR_NOT_SUPPORT` for both
 `dsmi_get_device_info(SOC_INFO, CPU_TOPO)`. Its public DSMI header only
 defines SOC_INFO subcommands 0 and 1.
 
-The OCCUPY-only fallback is restricted to the verified x86 standard-card
-signature `Ascend950PR_9579` with `OCCUPY=0x3e`. In that case, the host
-runtime treats each set bit as a distinct non-SMT physical CPU. Other hosts,
-SoCs, and masks remain unsupported when CPU_TOPO is unavailable. Drivers
-that provide CPU_TOPO continue to use its detailed physical and hyperthread
-metadata.
+The packaged JSON preserves verified CPU_TOPO-less signatures, including
+logical-to-physical mapping and selection policy. A signature is used only
+when its SoC and every constraint declared by that entry match. The 9599 entry
+is host-independent and requires exact device-side `OCCUPY=0x1f8`; the 9579
+entry additionally constrains host architecture. The verified generic policy
+continues to honor an explicit `aicpu_thread_num`.
+When neither the driver nor a verified JSON entry provides CPU_TOPO, the
+runtime uses the set bits in OCCUPY as schedulable CPU IDs and applies the
+unknown-topology fallback without inferring physical cores, SMT siblings,
+clusters, or dies.
+
+When CPU_TOPO is unavailable, the host runtime may also load the packaged
+JSON table keyed by `aclrtGetSocName()` (see
+`aicpu_cpu_topo_fallback.json`).
+Live driver topology is still preferred when present. Hardware signatures
+without a matching entry use the generic OCCUPY-only fallback when CPU_TOPO is
+unavailable.
+
+### Live FG topology on Ascend950PR_9599 (2026-08-05)
+
+Captured under `task-submit` on this box (CANN 9.2.0). Host
+`tools/cann-examples/query` and
+`tools/cann-examples/aicpu-device-query --json` agree on the layout; all
+eight devices report the same CPU_TOPO.
+
+Raw DSMI / HAL CPU_TOPO (9 logical):
+
+```text
+cpu_id=0 phy_cpu_id=0 hyperthread_id=0 is_share=0 cpu_mask=0x1
+cpu_id=1 phy_cpu_id=1 hyperthread_id=0 is_share=1 cpu_mask=0x6
+cpu_id=2 phy_cpu_id=1 hyperthread_id=1 is_share=1 cpu_mask=0x6
+cpu_id=3 phy_cpu_id=2 hyperthread_id=0 is_share=0 cpu_mask=0x8
+cpu_id=4 phy_cpu_id=3 hyperthread_id=0 is_share=0 cpu_mask=0x10
+cpu_id=5 phy_cpu_id=4 hyperthread_id=0 is_share=0 cpu_mask=0x20
+cpu_id=6 phy_cpu_id=5 hyperthread_id=0 is_share=0 cpu_mask=0x40
+cpu_id=7 phy_cpu_id=6 hyperthread_id=0 is_share=0 cpu_mask=0x80
+cpu_id=8 phy_cpu_id=7 hyperthread_id=0 is_share=0 cpu_mask=0x100
+```
+
+Device-side masks: `OS_SCHED=0x1`, `OCCUPY=PF_OCCUPY=0x1f8`. Runtime
+classification (`query_device_hal --json`, automatic 1O+4S):
+
+```json
+{
+  "architecture": "a5",
+  "soc_name": "Ascend950PR_9599",
+  "topology_source": "driver",
+  "scenario_type": "FG",
+  "selection_policy": "scenario",
+  "scheduler_smt_enabled": false,
+  "logical_cpu_count": 9,
+  "surviving_clusters": [0, 1, 2, 3],
+  "device_masks": {"occupy": "0x1f8", "pf_occupy": "0x1f8", "os_sched": "0x1"},
+  "os_schedulable_cpus": [
+    {"cpu_id": 3, "phy_cpu_id": 2, "hyperthread_id": 0, "cluster_id": 1, "die_id": 0},
+    {"cpu_id": 4, "phy_cpu_id": 3, "hyperthread_id": 0, "cluster_id": 1, "die_id": 0},
+    {"cpu_id": 5, "phy_cpu_id": 4, "hyperthread_id": 0, "cluster_id": 2, "die_id": 1},
+    {"cpu_id": 6, "phy_cpu_id": 5, "hyperthread_id": 0, "cluster_id": 2, "die_id": 1},
+    {"cpu_id": 7, "phy_cpu_id": 6, "hyperthread_id": 0, "cluster_id": 3, "die_id": 1},
+    {"cpu_id": 8, "phy_cpu_id": 7, "hyperthread_id": 0, "cluster_id": 3, "die_id": 1}
+  ],
+  "allowed_cpus": [7, 5, 6, 3, 8]
+}
+```
+
+`cluster_id = phy_cpu_id / 2`, `die_id = phy_cpu_id / 4`. The SMT pair on
+phy_cpu_id 1 is present in CPU_TOPO but outside OCCUPY, so
+`scheduler_smt_enabled` is false and automatic affinity is
+`[S:7, S:5, S:6, S:3, O:8]` — one primary thread per physical CPU, O on
+the last suitable CPU of die 1 / cluster 3. This dump is the source for
+the `Ascend950PR_9599` entry in `aicpu_cpu_topo_fallback.json`.
 
 ## CANN AICPU thread dispatch under varying launch budgets
 
@@ -228,10 +300,10 @@ Scenario A (OCCUPY=0x1f8, 6 user cpus):
   the failure as `aclrtSynchronizeStream rc=507000` (runtime internal)
   after the launch.
 
-The runtime implements the safe choice: the host's topology probe sets
-`runtime->aicpu_launch_count = popcount(OCCUPY)` after reading the
-device-side OCCUPY, and the host's `rtsLaunchCpuKernel` is called with
-that exact value. `PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH = 14`
+The runtime implements the safe choice: a one-thread preflight AICPU query
+reads device-side OCCUPY, then the host topology probe sets
+`runtime->aicpu_launch_count = popcount(OCCUPY)`. The host's `rtsLaunchCpuKernel` is called with
+that exact value. `PLATFORM_MAX_AICPU_LAUNCH_THREADS = 14`
 remains a compile-time **upper bound** (array sizes, headroom), not the
 actual launch count. See:
 
@@ -242,6 +314,19 @@ actual launch count. See:
   with that count
 - `src/common/platform/onboard/aicpu/platform_aicpu_affinity.cpp` —
   `platform_aicpu_affinity_gate_filter()` (the post-hoc classifier)
+
+If CPU_TOPO does not match FG, PG1, or PG2 by **surviving cluster/die
+layout** (logical CPU count is not a gate), the runtime warns and
+uses a deterministic fallback: valid metadata is sorted by `(die, cluster,
+physical CPU, hyperthread, logical CPU)`; OCCUPY-only metadata reduces this to
+logical CPU ID order. Automatic mode keeps at most five and may shrink to the
+available count. A manual request from 2 through 5 must be satisfied exactly.
+The last selection is the Orchestrator and preceding selections are
+Schedulers. The launch count remains the full device-side OCCUPY population
+required by the filter gate and may therefore exceed the active cap. On
+`Ascend950PR_9599`, a measured 9-logical layout with four clusters classifies
+as FG. Scheduler SMT availability is recorded separately and does not define
+another scenario.
 
 The 0x7ffe SKU's dispatch behavior at `aicpu_num=14` has **not yet
 been measured** — once an a5 0x7ffe device runs an a5 onboard test,

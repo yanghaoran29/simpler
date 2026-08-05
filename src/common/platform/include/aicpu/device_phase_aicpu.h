@@ -52,7 +52,7 @@ extern "C" uint64_t get_platform_phase_base();
  * @param thread_idx   platform_aicpu_affinity_thread_idx() for this thread.
  */
 inline AicpuPhaseRecord *aicpu_phase_records(uint64_t buffer_base, int thread_idx) {
-    if (buffer_base == 0 || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH) {
+    if (buffer_base == 0 || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_LAUNCH_THREADS) {
         return nullptr;
     }
     return reinterpret_cast<AicpuPhaseRecord *>(buffer_base) + thread_idx * NUM_AICPU_PHASES;
@@ -105,10 +105,10 @@ inline void aicpu_phase_set_window(AicpuPhase phase, uint64_t start_cycle, uint6
  * capture is disabled / the slot array is out of range.
  */
 inline TaskTimingRecord *aicpu_task_timing_records(uint64_t buffer_base, int thread_idx) {
-    if (buffer_base == 0 || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH) {
+    if (buffer_base == 0 || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_LAUNCH_THREADS) {
         return nullptr;
     }
-    uint64_t tail = buffer_base + task_timing_tail_offset(PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH);
+    uint64_t tail = buffer_base + task_timing_tail_offset(PLATFORM_MAX_AICPU_LAUNCH_THREADS);
     return reinterpret_cast<TaskTimingRecord *>(tail) + thread_idx * NUM_TASK_TIMING_SLOTS;
 }
 

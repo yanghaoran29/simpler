@@ -273,7 +273,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
     // Sim has no hardware topology to probe, so auto uses the architecture
     // default directly. Publish the effective count so AICPU init and DFX
     // setup match the launch gate.
-    if (launch_aicpu_num == 0) launch_aicpu_num = PLATFORM_DEFAULT_AICPU_THREAD_NUM;
+    if (launch_aicpu_num == 0) launch_aicpu_num = PLATFORM_MAX_AICPU_THREADS;
     runtime.set_aicpu_thread_num(launch_aicpu_num);
     if (block_dim < 1) {
         LOG_ERROR("enqueue_run reached with unresolved block_dim; prepare_launch_shape must run first");
@@ -451,7 +451,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
         scope_stats_collector_.start(thread_factory);
     }
 
-    constexpr int over_launch = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    constexpr int over_launch = PLATFORM_MAX_AICPU_LAUNCH_THREADS;
     LOG_INFO("Launching %d AICPU threads (logical=%d)", over_launch, launch_aicpu_num);
     active_run_->aicpu_threads.reserve(over_launch);
     active_run_->aicore_threads.reserve(num_aicore);
@@ -468,7 +468,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
     // and each thread resolves its slot from platform_aicpu_affinity_thread_idx()
     // — no C++ thread_local. The active run owns the buffer until drain reduces
     // it into device_phase_ns_.
-    constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_LAUNCH_THREADS;
     constexpr size_t kPhaseRecs = static_cast<size_t>(kPhaseThreads) * NUM_AICPU_PHASES;
     constexpr size_t kTailRecs = static_cast<size_t>(task_timing_buffer_slots(kPhaseThreads));
     // One 16-byte-record vector backs the phase region plus the task-timing tail
@@ -544,7 +544,7 @@ int DeviceRunner::drain_run() {
     // is computable and the sub-phases nest correctly.
     uint64_t phase_start[NUM_AICPU_PHASES];
     uint64_t phase_cycles[NUM_AICPU_PHASES];
-    constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_LAUNCH_THREADS;
     constexpr size_t kPhaseRecs = static_cast<size_t>(kPhaseThreads) * NUM_AICPU_PHASES;
     reduce_aicpu_phase_windows(active_run_->phase_buf.data(), kPhaseThreads, phase_start, phase_cycles);
     auto cyc_to_ns = [](uint64_t c) {

@@ -156,6 +156,7 @@ namespace KernelNames {
 constexpr const char *RunName = "simpler_aicpu_exec";   // multi-threaded exec
 constexpr const char *InitName = "simpler_aicpu_init";  // per-device one-shot invariants
 constexpr const char *RegisterCallableName = "simpler_aicpu_register_callable";
+constexpr const char *TopologyQueryName = "simpler_aicpu_query_topology";
 }  // namespace KernelNames
 
 }  // namespace host

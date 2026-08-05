@@ -117,7 +117,7 @@ struct KernelArgs {
     // inline field would be write-only from AICPU;
     // the dedicated host-allocated buffer's address travels via this field.
     // Onboard layout: one { start_cycle, end_cycle } pair per launched AICPU
-    // thread (PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH pairs, raw sys-counter
+    // thread (PLATFORM_MAX_AICPU_LAUNCH_THREADS pairs, raw sys-counter
     // cycles). Each surviving thread writes its own slot (plain stores, no
     // atomics); the host reduces max(end) - min(start) -> ns on readback (see
     // ensure_device_wall_buffer / read_device_wall_ns). Sim keeps the simpler

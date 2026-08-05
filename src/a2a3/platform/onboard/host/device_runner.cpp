@@ -346,7 +346,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
             return -1;
         }
         int resolved_aicpu = resolve_aicpu_thread_num(
-            runtime.get_aicpu_thread_num(), static_cast<int>(user_cpus.size()), PLATFORM_DEFAULT_AICPU_THREAD_NUM
+            runtime.get_aicpu_thread_num(), static_cast<int>(user_cpus.size()), PLATFORM_MAX_AICPU_THREADS
         );
         if (resolved_aicpu < 0) return -1;
         if (!pto::a2a3::compute_allowed_cpus(user_cpus, resolved_aicpu, allowed)) {
@@ -367,8 +367,8 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
             allowed_cpus[i] = allowed[i];
         runtime.set_aicpu_allowed_cpu_count(static_cast<int32_t>(allowed.size()));
         int32_t launch_n = static_cast<int32_t>(user_cpus.size());
-        if (launch_n > PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH) {
-            launch_n = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+        if (launch_n > PLATFORM_MAX_AICPU_LAUNCH_THREADS) {
+            launch_n = PLATFORM_MAX_AICPU_LAUNCH_THREADS;
         }
         runtime.set_aicpu_launch_count(launch_n);
 

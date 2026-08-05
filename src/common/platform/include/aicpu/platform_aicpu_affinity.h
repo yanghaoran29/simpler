@@ -23,7 +23,7 @@ constexpr int32_t MAX_GATE_THREADS = 16;
 // Returns true if this thread should call aicpu_execute().
 // Returns false if this thread should exit (dropped).
 // logical_count: desired active threads (from runtime.aicpu_thread_num)
-// total_launched: actual threads launched (PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH)
+// total_launched: actual threads launched (PLATFORM_MAX_AICPU_LAUNCH_THREADS)
 //
 // Used by sim platforms. a2a3/a5 onboard use the _filter variant below
 // instead.
@@ -42,7 +42,7 @@ bool platform_aicpu_affinity_gate(int32_t logical_count, int32_t total_launched)
 // array down through the Runtime struct.
 //
 // total_launched is the number of AICPU threads CANN actually launched
-// (PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH on the target arch); the
+// (PLATFORM_MAX_AICPU_LAUNCH_THREADS on the target arch); the
 // gate stops exactly that many threads on its barrier and lets only the
 // allowed_count survivors continue.
 bool platform_aicpu_affinity_gate_filter(const int32_t *allowed_cpus, int32_t allowed_count, int32_t total_launched);

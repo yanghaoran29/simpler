@@ -28,7 +28,7 @@
 
 // Run-wall capture: the host allocates a device buffer addressed by
 // KernelArgs.device_wall_data_base holding one { start_cycle, end_cycle } pair
-// per launched AICPU thread (PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH pairs,
+// per launched AICPU thread (PLATFORM_MAX_AICPU_LAUNCH_THREADS pairs,
 // raw sys-counter cycles), and resets it to { UINT64_MAX, 0 } before each run.
 // Every surviving simpler_aicpu_exec thread writes its own start/end into its
 // own slot (indexed by platform_aicpu_affinity_thread_idx()) — plain stores,

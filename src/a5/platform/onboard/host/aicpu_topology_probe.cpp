@@ -14,10 +14,19 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
-#include <mutex>
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include <sstream>
+#include <string>
+#include <tuple>
 #include <unordered_map>
+#include <vector>
 
+#include "aicpu_topology_driver_abi.h"
+#include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "common/acl_hal_device.h"
 
@@ -25,41 +34,15 @@ namespace pto::a5 {
 
 namespace {
 
-// HAL constants — replicated locally so we don't need to pull
-// driver/ascend_hal_base.h into the public header.  Values match
-// `tools/cann-examples/query/query.cpp`'s usage.
-constexpr int32_t kModuleAicpu = 1;
-constexpr int32_t kModuleSystem = 0;
-constexpr int32_t kInfoOccupy = 8;
-constexpr int32_t kInfoCpuTopo = 59;
+using driver_abi::DsmiCpuTopology;
+using driver_abi::DsmiSingleCpu;
+using driver_abi::kAicpuCpuMaskBits;
+using driver_abi::kDsmiCpuTopologySubcommand;
+using driver_abi::kHalInfoCpuTopology;
 
-// DSMI constants for SOC_INFO + CPU_TOPO. Verified against
-// $ASCEND_HOME_PATH/aarch64-linux/include/driver/dsmi_common_interface.h:
-// the dsmi_main_cmd enum jumps from CAN=3 to UPGRADE=5, so SOC_INFO = 14
-// (0x0e), NOT 0x10. Reference tools/cann-examples/query/query.cpp picks
-// it up via the header symbol; we hardcode here to keep the runtime SO
-// dependency-free.
-constexpr unsigned int kDsmiSocInfoMainCmd = 14;       // DSMI_MAIN_CMD_SOC_INFO
-constexpr unsigned int kDsmiSocInfoSubCmdCpuTopo = 2;  // SUB_CMD_CPU_TOPO
-constexpr unsigned int kCpuTopoMaxLogical = 64;        // headroom for any a5 SKU
-constexpr char kVerifiedFallbackSoc[] = "Ascend950PR_9579";
-constexpr uint64_t kVerifiedFallbackOccupy = 0x3e;
-
-// Natural-alignment layout (no pack pragma). Mirrors
-// tools/cann-examples/query/query.cpp's struct; the HAL/DSMI driver
-// expects this byte layout — packing breaks the size check inside the
-// driver and yields rc=65534.
-struct DsmiSingleCpu {
-    uint64_t cpu_mask;
-    uint8_t cpu_id;
-    uint8_t is_share;
-    uint8_t phy_cpu_id;
-    uint8_t hyperthread_id;
-};
-struct DsmiCpuTopo {
-    uint32_t total_nums;
-    DsmiSingleCpu cpus[kCpuTopoMaxLogical];
-};
+bool fill_dsmi_topo_from_json(
+    const char *soc_name, uint64_t occupy, DsmiCpuTopology &out, bool &out_generic_selection_only
+);
 
 // dlsym helpers — keep error reporting at WARN, callers fall back.
 using HalGetDeviceInfoFn = int (*)(uint64_t deviceId, int32_t moduleType, int32_t infoType, int64_t *value);
@@ -113,7 +96,7 @@ bool query_occupy(uint32_t device_id, uint64_t &out_mask) {
     auto fn = load_hal_get_device_info();
     if (fn == nullptr) return false;
     int64_t v = 0;
-    int rc = fn(static_cast<uint64_t>(pto::acl_to_hal_device_id(device_id)), kModuleAicpu, kInfoOccupy, &v);
+    int rc = fn(static_cast<uint64_t>(pto::acl_to_hal_device_id(device_id)), MODULE_TYPE_AICPU, INFO_TYPE_OCCUPY, &v);
     if (rc != 0) {
         LOG_WARN("aicpu_topology_probe: halGetDeviceInfo(AICPU,OCCUPY) rc=%d", rc);
         return false;
@@ -122,13 +105,14 @@ bool query_occupy(uint32_t device_id, uint64_t &out_mask) {
     return true;
 }
 
-bool query_cpu_topo(uint32_t device_id, DsmiCpuTopo &out) {
+bool query_cpu_topo(uint32_t device_id, DsmiCpuTopology &out) {
     std::memset(&out, 0, sizeof(out));
     if (auto fn = load_hal_get_device_info_by_buff(); fn != nullptr) {
         int32_t sz = static_cast<int32_t>(sizeof(out));
         int rc =
-            fn(static_cast<uint64_t>(pto::acl_to_hal_device_id(device_id)), kModuleSystem, kInfoCpuTopo, &out, &sz);
-        if (rc == 0 && out.total_nums > 0 && out.total_nums <= kCpuTopoMaxLogical) return true;
+            fn(static_cast<uint64_t>(pto::acl_to_hal_device_id(device_id)), MODULE_TYPE_SYSTEM, kHalInfoCpuTopology,
+               &out, &sz);
+        if (rc == 0 && out.total_nums > 0 && out.total_nums <= kAicpuCpuMaskBits) return true;
         LOG_WARN("aicpu_topology_probe: halGetDeviceInfoByBuff(CPU_TOPO) rc=%d total=%u", rc, out.total_nums);
     }
     if (auto fn = load_dsmi_get_device_info(); fn != nullptr) {
@@ -138,51 +122,24 @@ bool query_cpu_topo(uint32_t device_id, DsmiCpuTopo &out) {
         // dsmi_get_device_info indexes the same driver-visible id space as the HAL; if DSMI
         // uses its own logic-id numbering this is wrong. Revisit once an a5 node is available.
         int rc =
-            fn(static_cast<uint32_t>(pto::acl_to_hal_device_id(device_id)), kDsmiSocInfoMainCmd,
-               kDsmiSocInfoSubCmdCpuTopo, &out, &sz);
-        if (rc == 0 && out.total_nums > 0 && out.total_nums <= kCpuTopoMaxLogical) return true;
+            fn(static_cast<uint32_t>(pto::acl_to_hal_device_id(device_id)), DSMI_MAIN_CMD_SOC_INFO,
+               kDsmiCpuTopologySubcommand, &out, &sz);
+        if (rc == 0 && out.total_nums > 0 && out.total_nums <= kAicpuCpuMaskBits) return true;
         LOG_WARN("aicpu_topology_probe: dsmi_get_device_info(CPU_TOPO) rc=%d total=%u", rc, out.total_nums);
     }
     return false;
 }
 
-}  // namespace
-
-namespace {
-
-// AICPU topology is a per-device hardware fact — OCCUPY bitmap and DSMI
-// CPU_TOPO don't change across runs of the same device, so probe once
-// per device_id and cache. Subsequent launches reuse the cached result;
-// only `compute_allowed_cpus` re-runs (it's pure logic, microseconds).
-std::mutex s_topo_cache_mu;
-std::unordered_map<uint32_t, std::vector<AicpuLogicalCpu>> s_topo_cache;
-
-bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus) {
+bool filter_user_pool_from_topo(
+    uint64_t occupy, const DsmiCpuTopology &topo, std::vector<AicpuLogicalCpu> &out_user_cpus
+) {
     out_user_cpus.clear();
-
-    uint64_t occupy = 0;
-    if (!query_occupy(device_id, occupy)) return false;
-
-    DsmiCpuTopo topo{};
-    if (!query_cpu_topo(device_id, topo)) {
-        const char *soc_name = query_soc_name();
-        LOG_WARN(
-            "aicpu_topology_probe: CPU_TOPO unavailable; checking OCCUPY fallback for soc=%s mask=0x%llx",
-            soc_name == nullptr ? "(unknown)" : soc_name, static_cast<unsigned long long>(occupy)
-        );
-        return derive_topology_from_occupy(soc_name, occupy, out_user_cpus);
-    }
-
     // Host-side OCCUPY includes the SMT pair reserved by the AICPU OS on a5,
     // whereas device-side user kernels cannot run on either sibling. Identify
     // shared physical cores from CPU_TOPO and exclude the whole pair so this
     // host-side reconstruction matches the device-visible dispatch pool.
     for (uint32_t i = 0; i < topo.total_nums; ++i) {
         const DsmiSingleCpu &c = topo.cpus[i];
-        // Skip any cpu_id not in the device-side OCCUPY pool. Guard the
-        // shift against cpu_id >= 64 (UB in C++) — no a5 SKU is expected
-        // to expose more than 64 logical AICPU cpus, but a driver bug or
-        // future SKU change shouldn't trip undefined behavior here.
         if (c.cpu_id >= 64 || ((occupy >> c.cpu_id) & 1ULL) == 0) continue;
         bool has_smt_sibling = false;
         for (uint32_t j = 0; j < topo.total_nums; ++j) {
@@ -196,7 +153,6 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
         e.cpu_id = static_cast<int32_t>(c.cpu_id);
         e.phy_cpu_id = static_cast<int32_t>(c.phy_cpu_id);
         e.hyperthread_id = static_cast<int32_t>(c.hyperthread_id);
-        // a5 cluster mapping: 2 phy/cluster, 2 cluster/die.
         e.cluster_id = e.phy_cpu_id / 2;
         e.die_id = e.phy_cpu_id / 4;
         out_user_cpus.push_back(e);
@@ -209,63 +165,182 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
 
 }  // namespace
 
-bool derive_topology_from_occupy(const char *soc_name, uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus) {
+namespace {
+
+bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus) {
     out_user_cpus.clear();
-#if defined(__aarch64__)
-    (void)soc_name;
-    (void)occupy;
-    return false;
-#elif defined(__x86_64__)
-    if (soc_name == nullptr || std::strcmp(soc_name, kVerifiedFallbackSoc) != 0 || occupy != kVerifiedFallbackOccupy) {
-        return false;
+
+    uint64_t occupy = 0;
+    if (!query_occupy(device_id, occupy)) return false;
+
+    DsmiCpuTopology topo{};
+    const char *source = "driver";
+    if (!query_cpu_topo(device_id, topo)) {
+        const char *soc_name = query_soc_name();
+        bool generic_selection_only = false;
+        if (fill_dsmi_topo_from_json(soc_name, occupy, topo, generic_selection_only)) {
+            source = "json_fallback";
+            LOG_INFO(
+                "aicpu_topology_probe: CPU_TOPO source=%s soc=%s total=%u", source,
+                soc_name == nullptr ? "(unknown)" : soc_name, topo.total_nums
+            );
+        } else {
+            LOG_WARN(
+                "aicpu_topology_probe: CPU_TOPO unavailable; checking OCCUPY fallback for soc=%s mask=0x%llx",
+                soc_name == nullptr ? "(unknown)" : soc_name, static_cast<unsigned long long>(occupy)
+            );
+            if (!enumerate_cpus_from_occupy(occupy, out_user_cpus)) return false;
+            LOG_INFO(
+                "aicpu_topology_probe: CPU_TOPO source=occupy_fallback soc=%s user_cpus=%zu",
+                soc_name == nullptr ? "(unknown)" : soc_name, out_user_cpus.size()
+            );
+            return true;
+        }
+    } else {
+        LOG_INFO("aicpu_topology_probe: CPU_TOPO source=%s total=%u", source, topo.total_nums);
     }
-#else
-    (void)soc_name;
-    (void)occupy;
-    return false;
-#endif
-    for (int32_t cpu_id = 0; cpu_id < static_cast<int32_t>(kCpuTopoMaxLogical); ++cpu_id) {
+
+    return filter_user_pool_from_topo(occupy, topo, out_user_cpus);
+}
+
+}  // namespace
+
+bool enumerate_cpus_from_occupy(uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus) {
+    out_user_cpus.clear();
+    for (int32_t cpu_id = 0; cpu_id < static_cast<int32_t>(kAicpuCpuMaskBits); ++cpu_id) {
         if (((occupy >> cpu_id) & 1ULL) == 0) continue;
         AicpuLogicalCpu cpu{};
         cpu.cpu_id = cpu_id;
-        cpu.phy_cpu_id = cpu_id;
-        cpu.hyperthread_id = 0;
-        cpu.cluster_id = cpu.phy_cpu_id / 2;
-        cpu.die_id = cpu.phy_cpu_id / 4;
+        cpu.phy_cpu_id = -1;
+        cpu.hyperthread_id = -1;
+        cpu.cluster_id = -1;
+        cpu.die_id = -1;
         out_user_cpus.push_back(cpu);
     }
     return !out_user_cpus.empty();
 }
 
 bool probe_aicpu_topology(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus) {
-    {
-        std::lock_guard<std::mutex> lk(s_topo_cache_mu);
-        auto it = s_topo_cache.find(device_id);
-        if (it != s_topo_cache.end()) {
-            out_user_cpus = it->second;
-            return !out_user_cpus.empty();
+    return probe_aicpu_topology_uncached(device_id, out_user_cpus);
+}
+
+namespace {
+bool validate_cpu_topology(const std::vector<AicpuLogicalCpu> &cpus);
+bool validate_cpu_ids(const std::vector<AicpuLogicalCpu> &cpus);
+std::vector<int32_t> clusters_of(const std::vector<AicpuLogicalCpu> &cpus);
+bool has_schedulable_smt_pair(const std::vector<AicpuLogicalCpu> &cpus);
+}  // namespace
+
+bool probe_aicpu_topology(
+    uint32_t device_id, const AicpuDeviceOccupancy &device_occupancy, AicpuTopology &out_topology
+) {
+    out_topology = {};
+    out_topology.device_occupancy = device_occupancy;
+    if (!device_occupancy.occupy_valid || device_occupancy.occupy == 0) return false;
+
+    const char *soc_name = query_soc_name();
+    if (soc_name != nullptr) out_topology.soc_name = soc_name;
+
+    DsmiCpuTopology topo{};
+    std::vector<AicpuLogicalCpu> all_cpus;
+    const char *source = "driver";
+    bool occupy_only_fallback = false;
+    if (!query_cpu_topo(device_id, topo)) {
+        if (load_cpu_topo_from_json(
+                soc_name, device_occupancy.occupy, all_cpus, &out_topology.generic_selection_only
+            )) {
+            source = "json_fallback";
+            out_topology.source = AicpuTopologySource::kJsonFallback;
+            out_topology.logical_cpu_count = static_cast<uint32_t>(all_cpus.size());
+        } else if (enumerate_cpus_from_occupy(device_occupancy.occupy, all_cpus)) {
+            source = "occupy_fallback";
+            out_topology.source = AicpuTopologySource::kOccupyFallback;
+            occupy_only_fallback = true;
+            out_topology.logical_cpu_count = static_cast<uint32_t>(all_cpus.size());
+        } else {
+            return false;
+        }
+    } else {
+        out_topology.logical_cpu_count = topo.total_nums;
+        all_cpus.reserve(topo.total_nums);
+        for (uint32_t i = 0; i < topo.total_nums; ++i) {
+            const DsmiSingleCpu &cpu = topo.cpus[i];
+            if (cpu.cpu_id >= kAicpuCpuMaskBits) return false;
+            AicpuLogicalCpu entry{};
+            entry.cpu_id = static_cast<int32_t>(cpu.cpu_id);
+            entry.phy_cpu_id = static_cast<int32_t>(cpu.phy_cpu_id);
+            entry.hyperthread_id = static_cast<int32_t>(cpu.hyperthread_id);
+            entry.cluster_id = entry.phy_cpu_id / 2;
+            entry.die_id = entry.phy_cpu_id / 4;
+            all_cpus.push_back(entry);
         }
     }
+    LOG_INFO(
+        "aicpu_topology_probe: CPU_TOPO source=%s soc=%s logical=%u", source,
+        out_topology.soc_name.empty() ? "(unknown)" : out_topology.soc_name.c_str(), out_topology.logical_cpu_count
+    );
 
-    // Cache miss — probe outside the lock so concurrent probes on different
-    // devices don't serialize on the driver calls.
-    std::vector<AicpuLogicalCpu> probed;
-    bool ok = probe_aicpu_topology_uncached(device_id, probed);
-    if (!ok) {
-        // Don't cache failures — caller (or next launch) can retry.
-        out_user_cpus.clear();
+    std::sort(all_cpus.begin(), all_cpus.end(), [](const auto &a, const auto &b) {
+        return a.cpu_id < b.cpu_id;
+    });
+    for (const auto &cpu : all_cpus) {
+        if (cpu.cpu_id < 64 && ((device_occupancy.occupy >> cpu.cpu_id) & 1ULL) != 0) {
+            out_topology.os_schedulable_cpus.push_back(cpu);
+        }
+    }
+    const bool valid_cpus = occupy_only_fallback ? validate_cpu_ids(all_cpus) : validate_cpu_topology(all_cpus);
+    const bool valid_schedulable = occupy_only_fallback ? validate_cpu_ids(out_topology.os_schedulable_cpus) :
+                                                          validate_cpu_topology(out_topology.os_schedulable_cpus);
+    if (!valid_cpus || !valid_schedulable || out_topology.os_schedulable_cpus.empty()) {
+        out_topology = {};
         return false;
     }
-
-    LOG_INFO("AICPU topology probed for device %u: %zu user-schedulable cpu_ids (cached)", device_id, probed.size());
+    if (!occupy_only_fallback) {
+        out_topology.surviving_cluster_ids = clusters_of(all_cpus);
+        out_topology.scheduler_smt_enabled = has_schedulable_smt_pair(out_topology.os_schedulable_cpus);
+        out_topology.scenario_type =
+            classify_aicpu_scenario(out_topology.logical_cpu_count, all_cpus, out_topology.os_schedulable_cpus);
+    }
 
     {
-        std::lock_guard<std::mutex> lk(s_topo_cache_mu);
-        // Last-writer-wins if another thread raced us. The probe is
-        // deterministic for a given device so any result is equivalent.
-        s_topo_cache[device_id] = probed;
+        std::ostringstream dies_os, clusters_os, smt_os, sched_os;
+        std::set<int32_t> dies;
+        for (const auto &cpu : all_cpus)
+            dies.insert(cpu.die_id);
+        for (int32_t d : dies) {
+            if (dies_os.tellp() > 0) dies_os << ',';
+            dies_os << d;
+        }
+        for (size_t i = 0; i < out_topology.surviving_cluster_ids.size(); ++i) {
+            if (i) clusters_os << ',';
+            clusters_os << out_topology.surviving_cluster_ids[i];
+        }
+        std::unordered_map<int32_t, std::vector<int32_t>> phy_to_cpus;
+        for (const auto &cpu : all_cpus)
+            phy_to_cpus[cpu.phy_cpu_id].push_back(cpu.cpu_id);
+        for (auto &entry : phy_to_cpus) {
+            auto &ids = entry.second;
+            if (ids.size() < 2) continue;
+            std::sort(ids.begin(), ids.end());
+            if (smt_os.tellp() > 0) smt_os << ',';
+            smt_os << "phy" << entry.first << ':';
+            for (size_t i = 0; i < ids.size(); ++i) {
+                if (i) smt_os << '+';
+                smt_os << ids[i];
+            }
+        }
+        for (size_t i = 0; i < out_topology.os_schedulable_cpus.size(); ++i) {
+            if (i) sched_os << ',';
+            sched_os << out_topology.os_schedulable_cpus[i].cpu_id;
+        }
+        LOG_DEBUG(
+            "aicpu_topology: scenario=%s dies=[%s] clusters=[%s] smt_pairs=[%s] "
+            "schedulable=[%s] scheduler_smt_enabled=%d logical=%u",
+            aicpu_scenario_name(out_topology.scenario_type), dies_os.str().c_str(), clusters_os.str().c_str(),
+            smt_os.str().c_str(), sched_os.str().c_str(), out_topology.scheduler_smt_enabled ? 1 : 0,
+            out_topology.logical_cpu_count
+        );
     }
-    out_user_cpus = std::move(probed);
     return true;
 }
 
@@ -428,6 +503,694 @@ bool compute_allowed_cpus(
     for (int32_t i : orch_indices)
         out_allowed_cpus.push_back(user_cpus[i].cpu_id);
     return true;
+}
+
+namespace {
+
+auto topology_key(const AicpuLogicalCpu &cpu) {
+    return std::make_tuple(cpu.die_id, cpu.cluster_id, cpu.phy_cpu_id, cpu.hyperthread_id, cpu.cpu_id);
+}
+
+bool validate_cpu_topology(const std::vector<AicpuLogicalCpu> &cpus) {
+    std::set<int32_t> cpu_ids;
+    std::set<std::pair<int32_t, int32_t>> physical_threads;
+    for (const auto &cpu : cpus) {
+        if (cpu.cpu_id < 0 || cpu.phy_cpu_id < 0 || cpu.cluster_id < 0 || cpu.die_id < 0) return false;
+        if (cpu.hyperthread_id < 0 || cpu.hyperthread_id > 1) return false;
+        if (!cpu_ids.insert(cpu.cpu_id).second) return false;
+        if (!physical_threads.emplace(cpu.phy_cpu_id, cpu.hyperthread_id).second) return false;
+    }
+    return true;
+}
+
+bool validate_cpu_ids(const std::vector<AicpuLogicalCpu> &cpus) {
+    std::set<int32_t> cpu_ids;
+    for (const auto &cpu : cpus) {
+        if (cpu.cpu_id < 0 || !cpu_ids.insert(cpu.cpu_id).second) return false;
+    }
+    return true;
+}
+
+std::vector<int32_t> clusters_of(const std::vector<AicpuLogicalCpu> &cpus) {
+    std::set<int32_t> clusters;
+    for (const auto &cpu : cpus)
+        clusters.insert(cpu.cluster_id);
+    return {clusters.begin(), clusters.end()};
+}
+
+bool has_schedulable_smt_pair(const std::vector<AicpuLogicalCpu> &cpus) {
+    std::set<std::pair<int32_t, int32_t>> threads;
+    for (const auto &cpu : cpus)
+        threads.emplace(cpu.phy_cpu_id, cpu.hyperthread_id);
+    for (const auto &cpu : cpus) {
+        if (threads.count({cpu.phy_cpu_id, 0}) != 0 && threads.count({cpu.phy_cpu_id, 1}) != 0) return true;
+    }
+    return false;
+}
+
+std::vector<AicpuLogicalCpu> sorted_cpus(const std::vector<AicpuLogicalCpu> &cpus) {
+    std::vector<AicpuLogicalCpu> ordered = cpus;
+    std::sort(ordered.begin(), ordered.end(), [](const auto &a, const auto &b) {
+        return topology_key(a) < topology_key(b);
+    });
+    return ordered;
+}
+
+int proximity_rank(const AicpuLogicalCpu &cpu, const AicpuLogicalCpu &orch) {
+    if (cpu.cluster_id == orch.cluster_id) return 0;
+    if (cpu.die_id == orch.die_id) return 1;
+    return 2;
+}
+
+// Prefer the die with the most schedulable threads; tie → higher die_id.
+int32_t preferred_die_id(const std::vector<AicpuLogicalCpu> &pool) {
+    std::unordered_map<int32_t, int32_t> counts;
+    for (const auto &cpu : pool)
+        ++counts[cpu.die_id];
+    int32_t best_die = -1;
+    int32_t best_count = -1;
+    for (const auto &entry : counts) {
+        if (entry.second > best_count || (entry.second == best_count && entry.first > best_die)) {
+            best_count = entry.second;
+            best_die = entry.first;
+        }
+    }
+    return best_die;
+}
+
+bool pick_orchestrator_primary(const std::vector<AicpuLogicalCpu> &pool, AicpuLogicalCpu &out_orch) {
+    const int32_t die = preferred_die_id(pool);
+    if (die < 0) return false;
+    std::vector<AicpuLogicalCpu> primaries;
+    for (const auto &cpu : pool) {
+        if (cpu.die_id == die && cpu.hyperthread_id == 0) primaries.push_back(cpu);
+    }
+    if (primaries.empty()) return false;
+    out_orch = sorted_cpus(primaries).back();
+    return true;
+}
+
+}  // namespace
+
+AicpuScenarioType classify_aicpu_scenario(
+    uint32_t logical_cpu_count, const std::vector<AicpuLogicalCpu> &all_logical_cpus,
+    const std::vector<AicpuLogicalCpu> &os_schedulable_cpus
+) {
+    // FG/PG1/PG2 come from cluster/die layout only. Scheduler SMT
+    // availability is an orthogonal topology property, not a scenario.
+    if (!validate_cpu_topology(all_logical_cpus) || !validate_cpu_topology(os_schedulable_cpus) ||
+        logical_cpu_count != all_logical_cpus.size()) {
+        return AicpuScenarioType::kUnknown;
+    }
+    for (const auto &candidate : os_schedulable_cpus) {
+        auto it = std::find_if(all_logical_cpus.begin(), all_logical_cpus.end(), [&](const auto &cpu) {
+            return cpu.cpu_id == candidate.cpu_id && cpu.phy_cpu_id == candidate.phy_cpu_id &&
+                   cpu.hyperthread_id == candidate.hyperthread_id;
+        });
+        if (it == all_logical_cpus.end()) return AicpuScenarioType::kUnknown;
+    }
+    const auto clusters = clusters_of(all_logical_cpus);
+    std::set<int32_t> dies;
+    std::unordered_map<int32_t, int32_t> clusters_per_die;
+    for (const auto &cpu : all_logical_cpus)
+        dies.insert(cpu.die_id);
+    for (int32_t cluster : clusters)
+        ++clusters_per_die[cluster / 2];
+
+    if (clusters.size() == 4 && dies == std::set<int32_t>({0, 1}) && clusters_per_die[0] == 2 &&
+        clusters_per_die[1] == 2) {
+        return AicpuScenarioType::kFg;
+    }
+    if (clusters.size() == 3 && dies == std::set<int32_t>({0, 1}) &&
+        ((clusters_per_die[0] == 2 && clusters_per_die[1] == 1) ||
+         (clusters_per_die[0] == 1 && clusters_per_die[1] == 2))) {
+        return AicpuScenarioType::kPg1;
+    }
+    if (clusters.size() == 2 && dies == std::set<int32_t>({0, 1}) && clusters_per_die[0] == 1 &&
+        clusters_per_die[1] == 1) {
+        return AicpuScenarioType::kPg2;
+    }
+    return AicpuScenarioType::kUnknown;
+}
+
+bool compute_unknown_allowed_cpus(
+    const AicpuTopology &topology, int32_t active_count, std::vector<int32_t> &out_allowed_cpus
+) {
+    out_allowed_cpus.clear();
+    if (active_count < 2 || active_count > 5 || !validate_cpu_ids(topology.os_schedulable_cpus) ||
+        topology.os_schedulable_cpus.size() < static_cast<size_t>(active_count)) {
+        return false;
+    }
+    const bool has_topology = validate_cpu_topology(topology.os_schedulable_cpus);
+    auto ordered = has_topology ? sorted_cpus(topology.os_schedulable_cpus) : topology.os_schedulable_cpus;
+    if (!has_topology) {
+        std::sort(ordered.begin(), ordered.end(), [](const auto &a, const auto &b) {
+            return a.cpu_id < b.cpu_id;
+        });
+    }
+    std::vector<int32_t> selected;
+    selected.reserve(static_cast<size_t>(active_count));
+    for (int32_t i = 0; i < active_count; ++i)
+        selected.push_back(ordered[i].cpu_id);
+    out_allowed_cpus = std::move(selected);
+    return true;
+}
+
+bool compute_scenario_allowed_cpus(
+    const AicpuTopology &topology, int32_t active_count, std::vector<int32_t> &out_allowed_cpus
+) {
+    out_allowed_cpus.clear();
+    const auto &pool = topology.os_schedulable_cpus;
+    if (active_count < 2 || active_count > 5 || !validate_cpu_topology(pool) ||
+        pool.size() < static_cast<size_t>(active_count) || topology.scenario_type == AicpuScenarioType::kUnknown ||
+        topology.scenario_type == AicpuScenarioType::kNotApplicable) {
+        return false;
+    }
+    const size_t scheduler_count = static_cast<size_t>(active_count - 1);
+    auto ordered = sorted_cpus(pool);
+    std::vector<int32_t> selected;
+    selected.reserve(static_cast<size_t>(active_count));
+
+    if (topology.scenario_type == AicpuScenarioType::kPg2) {
+        const AicpuLogicalCpu orch = ordered.back();
+        std::vector<AicpuLogicalCpu> sched;
+        for (const auto &cpu : ordered)
+            if (cpu.cpu_id != orch.cpu_id) sched.push_back(cpu);
+        std::sort(sched.begin(), sched.end(), [&](const auto &a, const auto &b) {
+            return std::make_tuple(proximity_rank(a, orch), topology_key(a)) <
+                   std::make_tuple(proximity_rank(b, orch), topology_key(b));
+        });
+        if (sched.size() < scheduler_count) return false;
+        for (size_t i = 0; i < scheduler_count; ++i)
+            selected.push_back(sched[i].cpu_id);
+        selected.push_back(orch.cpu_id);
+        out_allowed_cpus = std::move(selected);
+        return true;
+    }
+
+    // FG / PG1: O on the die with the most schedulable threads (ht0 only).
+    AicpuLogicalCpu orch{};
+    if (!pick_orchestrator_primary(pool, orch)) return false;
+
+    if (topology.scenario_type == AicpuScenarioType::kPg1) {
+        // Minimise scheduler SMT sharing: place one primary per physical CPU
+        // first, then consume siblings only when the requested scheduler count
+        // cannot fit on distinct physical CPUs. Never share O's physical CPU.
+        std::vector<AicpuLogicalCpu> sched;
+        for (const auto &cpu : pool)
+            if (cpu.phy_cpu_id != orch.phy_cpu_id) sched.push_back(cpu);
+        std::sort(sched.begin(), sched.end(), [&](const auto &a, const auto &b) {
+            return std::make_tuple(a.hyperthread_id, proximity_rank(a, orch), topology_key(a)) <
+                   std::make_tuple(b.hyperthread_id, proximity_rank(b, orch), topology_key(b));
+        });
+        if (sched.size() < scheduler_count) return false;
+        for (size_t i = 0; i < scheduler_count; ++i)
+            selected.push_back(sched[i].cpu_id);
+    } else {
+        // FG: use N-1 dedicated physical-core primaries near O.
+        std::vector<AicpuLogicalCpu> sched;
+        for (const auto &cpu : pool) {
+            if (cpu.hyperthread_id == 0 && cpu.phy_cpu_id != orch.phy_cpu_id) sched.push_back(cpu);
+        }
+        std::sort(sched.begin(), sched.end(), [&](const auto &a, const auto &b) {
+            return std::make_tuple(proximity_rank(a, orch), topology_key(a)) <
+                   std::make_tuple(proximity_rank(b, orch), topology_key(b));
+        });
+        if (sched.size() < scheduler_count) return false;
+        for (size_t i = 0; i < scheduler_count; ++i)
+            selected.push_back(sched[i].cpu_id);
+    }
+    selected.push_back(orch.cpu_id);
+    out_allowed_cpus = std::move(selected);
+    return true;
+}
+
+bool build_aicpu_launch_plan(
+    const AicpuTopology &topology, int32_t requested_active_count, AicpuLaunchPlan &out_plan, std::string &out_error
+) {
+    out_plan = {};
+    out_error.clear();
+    out_plan.requested_active_count = requested_active_count;
+    const bool automatic = requested_active_count == 0;
+    if (!automatic && (requested_active_count < 2 || requested_active_count > PLATFORM_MAX_AICPU_THREADS)) {
+        out_error = "requested active count must be in [2, " + std::to_string(PLATFORM_MAX_AICPU_THREADS) + "]";
+        return false;
+    }
+
+    const size_t stable_reachable = topology.os_schedulable_cpus.size();
+    out_plan.stable_reachable_count = static_cast<int32_t>(stable_reachable);
+    if (stable_reachable < 2) {
+        out_error = "fewer than two stable reachable AICPU CPUs";
+        return false;
+    }
+    if (stable_reachable > static_cast<size_t>(PLATFORM_MAX_AICPU_LAUNCH_THREADS)) {
+        out_error = "stable reachable AICPU count " + std::to_string(stable_reachable) + " exceeds launch capacity " +
+                    std::to_string(PLATFORM_MAX_AICPU_LAUNCH_THREADS);
+        return false;
+    }
+
+    const int32_t desired = automatic ? PLATFORM_MAX_AICPU_THREADS : requested_active_count;
+    const int32_t effective = automatic ? std::min<int32_t>(desired, out_plan.stable_reachable_count) : desired;
+    if (!automatic && stable_reachable < static_cast<size_t>(effective)) {
+        out_error = "stable reachable AICPU count " + std::to_string(stable_reachable) +
+                    " cannot satisfy requested active count " + std::to_string(effective);
+        return false;
+    }
+
+    out_plan.effective_active_count = effective;
+    out_plan.launch_count = out_plan.stable_reachable_count;
+    out_plan.warn_stable_reachable_below_default = stable_reachable < static_cast<size_t>(PLATFORM_MAX_AICPU_THREADS);
+    out_plan.warn_cpu_topology_unavailable = topology.source == AicpuTopologySource::kOccupyFallback;
+
+    bool selected = false;
+    if (topology.generic_selection_only) {
+        out_plan.selection_policy = AicpuSelectionPolicy::kGeneric;
+        selected = compute_allowed_cpus(topology.os_schedulable_cpus, effective - 1, 1, out_plan.allowed_cpus);
+    } else if (topology.scenario_type == AicpuScenarioType::kUnknown) {
+        out_plan.selection_policy = AicpuSelectionPolicy::kTopologyFallback;
+        selected = compute_unknown_allowed_cpus(topology, effective, out_plan.allowed_cpus);
+    } else {
+        out_plan.selection_policy = AicpuSelectionPolicy::kScenario;
+        selected = compute_scenario_allowed_cpus(topology, effective, out_plan.allowed_cpus);
+    }
+    if (!selected) {
+        out_error = "AICPU selection policy cannot satisfy effective active count " + std::to_string(effective);
+        out_plan.allowed_cpus.clear();
+        return false;
+    }
+    return true;
+}
+
+const char *aicpu_scenario_name(AicpuScenarioType scenario) {
+    switch (scenario) {
+    case AicpuScenarioType::kNotApplicable:
+        return "NOT_APPLICABLE";
+    case AicpuScenarioType::kFg:
+        return "FG";
+    case AicpuScenarioType::kPg1:
+        return "PG1";
+    case AicpuScenarioType::kPg2:
+        return "PG2";
+    case AicpuScenarioType::kUnknown:
+        return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+
+const char *aicpu_topology_source_name(AicpuTopologySource source) {
+    switch (source) {
+    case AicpuTopologySource::kDriver:
+        return "driver";
+    case AicpuTopologySource::kJsonFallback:
+        return "json_fallback";
+    case AicpuTopologySource::kOccupyFallback:
+        return "occupy_fallback";
+    }
+    return "unknown";
+}
+
+namespace {
+
+constexpr char kCpuTopoFallbackRelativePath[] = "src/a5/platform/onboard/host/aicpu_cpu_topo_fallback.json";
+constexpr char kCpuTopoFallbackFileName[] = "aicpu_cpu_topo_fallback.json";
+
+void skip_json_ws(const char *&p) {
+    while (*p != '\0' && std::isspace(static_cast<unsigned char>(*p)))
+        ++p;
+}
+
+bool parse_json_uint(const char *&p, unsigned int &out) {
+    skip_json_ws(p);
+    if (!std::isdigit(static_cast<unsigned char>(*p))) return false;
+    unsigned long v = 0;
+    while (std::isdigit(static_cast<unsigned char>(*p))) {
+        v = v * 10UL + static_cast<unsigned long>(*p - '0');
+        if (v > 0xffffffffUL) return false;
+        ++p;
+    }
+    out = static_cast<unsigned int>(v);
+    return true;
+}
+
+bool parse_json_string(const char *&p, std::string &out) {
+    skip_json_ws(p);
+    if (*p != '"') return false;
+    ++p;
+    out.clear();
+    while (*p != '\0' && *p != '"') {
+        if (*p == '\\') {
+            ++p;
+            if (*p == '\0') return false;
+        }
+        out.push_back(*p++);
+    }
+    if (*p != '"') return false;
+    ++p;
+    return true;
+}
+
+// Find `"key"` then `:`, leave `p` on the value.
+bool find_json_key(const char *&p, const char *key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const char *found = std::strstr(p, needle.c_str());
+    if (found == nullptr) return false;
+    p = found + needle.size();
+    skip_json_ws(p);
+    if (*p != ':') return false;
+    ++p;
+    skip_json_ws(p);
+    return true;
+}
+
+// Skip one JSON value (number / string / true / false / null). Nested
+// objects/arrays are not needed for cpu entries.
+bool skip_json_value(const char *&p) {
+    skip_json_ws(p);
+    if (*p == '"') {
+        std::string unused;
+        return parse_json_string(p, unused);
+    }
+    if (std::strncmp(p, "true", 4) == 0) {
+        p += 4;
+        return true;
+    }
+    if (std::strncmp(p, "false", 5) == 0) {
+        p += 5;
+        return true;
+    }
+    if (std::strncmp(p, "null", 4) == 0) {
+        p += 4;
+        return true;
+    }
+    if (*p == '-' || std::isdigit(static_cast<unsigned char>(*p))) {
+        if (*p == '-') ++p;
+        if (!std::isdigit(static_cast<unsigned char>(*p))) return false;
+        while (std::isdigit(static_cast<unsigned char>(*p))) ++p;
+        return true;
+    }
+    return false;
+}
+
+bool parse_one_cpu_object(const char *&p, DsmiSingleCpu &out) {
+    skip_json_ws(p);
+    if (*p != '{') return false;
+    ++p;
+    out = {};
+    bool got_cpu = false, got_phy = false, got_ht = false;
+    while (true) {
+        skip_json_ws(p);
+        if (*p == '}') {
+            ++p;
+            return got_cpu && got_phy && got_ht;
+        }
+        std::string key;
+        if (!parse_json_string(p, key)) return false;
+        skip_json_ws(p);
+        if (*p != ':') return false;
+        ++p;
+        skip_json_ws(p);
+        // Topology wire fields are uints; role/available and other annotations
+        // are documentation-only and must be skippable without failing the load.
+        if (key == "cpu_id" || key == "phy_cpu_id" || key == "hyperthread_id") {
+            unsigned int val = 0;
+            if (!parse_json_uint(p, val) || val > 255U) return false;
+            if (key == "cpu_id") {
+                out.cpu_id = static_cast<uint8_t>(val);
+                got_cpu = true;
+            } else if (key == "phy_cpu_id") {
+                out.phy_cpu_id = static_cast<uint8_t>(val);
+                got_phy = true;
+            } else {
+                out.hyperthread_id = static_cast<uint8_t>(val);
+                got_ht = true;
+            }
+        } else if (!skip_json_value(p)) {
+            return false;
+        }
+        skip_json_ws(p);
+        if (*p == ',') {
+            ++p;
+            continue;
+        }
+        if (*p == '}') {
+            ++p;
+            return got_cpu && got_phy && got_ht;
+        }
+        return false;
+    }
+}
+
+const char *host_arch_name() {
+#if defined(__x86_64__)
+    return "x86_64";
+#elif defined(__aarch64__)
+    return "aarch64";
+#else
+    return "unsupported";
+#endif
+}
+
+bool find_json_key_before(const char *start, const char *end, const char *key, const char *&value) {
+    value = start;
+    if (!find_json_key(value, key) || value >= end) return false;
+    return true;
+}
+
+bool parse_cpu_topo_json_for_soc(
+    const char *text, const char *soc_name, uint64_t occupy, DsmiCpuTopology &out, bool &out_generic_selection_only
+) {
+    if (text == nullptr || soc_name == nullptr || soc_name[0] == '\0') return false;
+    out_generic_selection_only = false;
+    const char *p = text;
+    if (!find_json_key(p, "socs")) return false;
+    if (*p != '{') return false;
+    ++p;
+
+    // Walk soc entries until we find soc_name.
+    while (true) {
+        skip_json_ws(p);
+        if (*p == '}') return false;
+        std::string key;
+        if (!parse_json_string(p, key)) return false;
+        skip_json_ws(p);
+        if (*p != ':') return false;
+        ++p;
+        skip_json_ws(p);
+        if (*p != '{') return false;
+
+        if (key != soc_name) {
+            // Skip this soc object by brace depth.
+            int depth = 0;
+            do {
+                if (*p == '{') ++depth;
+                else if (*p == '}') --depth;
+                else if (*p == '\0') return false;
+                ++p;
+            } while (depth > 0);
+            skip_json_ws(p);
+            if (*p == ',') {
+                ++p;
+                continue;
+            }
+            if (*p == '}') return false;
+            return false;
+        }
+
+        const char *obj_end = p;
+        int depth = 0;
+        do {
+            if (*obj_end == '{') ++depth;
+            else if (*obj_end == '}') --depth;
+            else if (*obj_end == '\0') return false;
+            ++obj_end;
+        } while (depth > 0);
+
+        const char *value = nullptr;
+        if (find_json_key_before(p, obj_end, "host_arch", value)) {
+            std::string required_arch;
+            if (!parse_json_string(value, required_arch) || required_arch != host_arch_name()) return false;
+        }
+        if (find_json_key_before(p, obj_end, "occupy_mask", value)) {
+            unsigned int required_occupy = 0;
+            if (!parse_json_uint(value, required_occupy) || occupy != required_occupy) return false;
+        }
+        if (find_json_key_before(p, obj_end, "selection_policy", value)) {
+            std::string selection_policy;
+            if (!parse_json_string(value, selection_policy) || selection_policy != "generic") return false;
+            out_generic_selection_only = true;
+        }
+
+        // Parse matching soc object: look for "cpus" array inside.
+        const char *obj = p;
+        if (!find_json_key_before(obj, obj_end, "cpus", obj)) return false;
+        if (*obj != '[') return false;
+        ++obj;
+        std::memset(&out, 0, sizeof(out));
+        uint32_t n = 0;
+        while (true) {
+            skip_json_ws(obj);
+            if (*obj == ']') {
+                ++obj;
+                out.total_nums = n;
+                return n > 0 && n <= kAicpuCpuMaskBits;
+            }
+            if (n >= kAicpuCpuMaskBits) return false;
+            if (!parse_one_cpu_object(obj, out.cpus[n])) return false;
+            ++n;
+            skip_json_ws(obj);
+            if (*obj == ',') {
+                ++obj;
+                continue;
+            }
+            if (*obj == ']') {
+                ++obj;
+                out.total_nums = n;
+                return n > 0;
+            }
+            return false;
+        }
+    }
+}
+
+bool read_cpu_topo_json_text(std::string &out_text) {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void *>(&read_cpu_topo_json_text), &info) == 0 || info.dli_fname == nullptr) {
+        return false;
+    }
+
+    std::filesystem::path root = std::filesystem::absolute(info.dli_fname).parent_path();
+    {
+        std::ifstream input(root / kCpuTopoFallbackFileName);
+        if (input) {
+            out_text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+            return input.good() || input.eof();
+        }
+    }
+    while (!root.empty()) {
+        const std::filesystem::path path = root / kCpuTopoFallbackRelativePath;
+        std::ifstream input(path);
+        if (input) {
+            out_text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+            return input.good() || input.eof();
+        }
+        const std::filesystem::path parent = root.parent_path();
+        if (parent == root) break;
+        root = parent;
+    }
+    return false;
+}
+
+bool fill_dsmi_topo_from_json(
+    const char *soc_name, uint64_t occupy, DsmiCpuTopology &out, bool &out_generic_selection_only
+) {
+    std::string text;
+    if (!read_cpu_topo_json_text(text)) return false;
+    return parse_cpu_topo_json_for_soc(text.c_str(), soc_name, occupy, out, out_generic_selection_only);
+}
+
+void dsmi_topo_to_logical(const DsmiCpuTopology &topo, std::vector<AicpuLogicalCpu> &out) {
+    out.clear();
+    out.reserve(topo.total_nums);
+    for (uint32_t i = 0; i < topo.total_nums; ++i) {
+        const DsmiSingleCpu &cpu = topo.cpus[i];
+        AicpuLogicalCpu entry{};
+        entry.cpu_id = static_cast<int32_t>(cpu.cpu_id);
+        entry.phy_cpu_id = static_cast<int32_t>(cpu.phy_cpu_id);
+        entry.hyperthread_id = static_cast<int32_t>(cpu.hyperthread_id);
+        entry.cluster_id = entry.phy_cpu_id / 2;
+        entry.die_id = entry.phy_cpu_id / 4;
+        out.push_back(entry);
+    }
+}
+
+std::string json_escape(const std::string &value) {
+    constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (unsigned char c : value) {
+        if (c == '"' || c == '\\') {
+            escaped.push_back('\\');
+            escaped.push_back(static_cast<char>(c));
+        } else if (c < 0x20) {
+            escaped.append("\\u00");
+            escaped.push_back(kHexDigits[c >> 4]);
+            escaped.push_back(kHexDigits[c & 0x0f]);
+        } else {
+            escaped.push_back(static_cast<char>(c));
+        }
+    }
+    return escaped;
+}
+
+}  // namespace
+
+bool load_cpu_topo_from_json(
+    const char *soc_name, uint64_t occupy, std::vector<AicpuLogicalCpu> &out_all_cpus, bool *out_generic_selection_only
+) {
+    out_all_cpus.clear();
+    DsmiCpuTopology topo{};
+    bool generic_selection_only = false;
+    if (!fill_dsmi_topo_from_json(soc_name, occupy, topo, generic_selection_only)) return false;
+    if (out_generic_selection_only != nullptr) *out_generic_selection_only = generic_selection_only;
+    for (uint32_t i = 0; i < topo.total_nums; ++i) {
+        if (topo.cpus[i].cpu_id >= kAicpuCpuMaskBits) {
+            out_all_cpus.clear();
+            return false;
+        }
+    }
+    dsmi_topo_to_logical(topo, out_all_cpus);
+    std::sort(out_all_cpus.begin(), out_all_cpus.end(), [](const AicpuLogicalCpu &a, const AicpuLogicalCpu &b) {
+        return a.cpu_id < b.cpu_id;
+    });
+    return !out_all_cpus.empty();
+}
+
+std::string format_aicpu_topology_json(
+    const AicpuTopology &topology, AicpuSelectionPolicy policy, const std::vector<int32_t> &allowed_cpus
+) {
+    const char *policy_name = "unknown";
+    switch (policy) {
+    case AicpuSelectionPolicy::kScenario:
+        policy_name = "scenario";
+        break;
+    case AicpuSelectionPolicy::kGeneric:
+        policy_name = "generic";
+        break;
+    case AicpuSelectionPolicy::kTopologyFallback:
+        policy_name = "topology_fallback";
+        break;
+    }
+    std::ostringstream out;
+    out << "{\n  \"architecture\": \"a5\",\n  \"soc_name\": \"" << json_escape(topology.soc_name)
+        << "\",\n  \"topology_source\": \"" << aicpu_topology_source_name(topology.source)
+        << "\",\n  \"scenario_type\": \"" << aicpu_scenario_name(topology.scenario_type)
+        << "\",\n  \"selection_policy\": \"" << policy_name
+        << "\",\n  \"scheduler_smt_enabled\": " << (topology.scheduler_smt_enabled ? "true" : "false")
+        << ",\n  \"logical_cpu_count\": " << topology.logical_cpu_count << ",\n  \"surviving_clusters\": [";
+    for (size_t i = 0; i < topology.surviving_cluster_ids.size(); ++i) {
+        if (i) out << ", ";
+        out << topology.surviving_cluster_ids[i];
+    }
+    out << "],\n  \"device_masks\": {\"occupy\": \"0x" << std::hex << topology.device_occupancy.occupy
+        << "\", \"pf_occupy\": \"0x" << topology.device_occupancy.pf_occupy << "\", \"os_sched\": \"0x"
+        << topology.device_occupancy.os_sched << "\"},\n"
+        << std::dec;
+    out << "  \"os_schedulable_cpus\": [";
+    for (size_t i = 0; i < topology.os_schedulable_cpus.size(); ++i) {
+        const auto &cpu = topology.os_schedulable_cpus[i];
+        if (i) out << ',';
+        out << "\n    {\"cpu_id\": " << cpu.cpu_id << ", \"phy_cpu_id\": " << cpu.phy_cpu_id
+            << ", \"hyperthread_id\": " << cpu.hyperthread_id << ", \"cluster_id\": " << cpu.cluster_id
+            << ", \"die_id\": " << cpu.die_id << '}';
+    }
+    if (!topology.os_schedulable_cpus.empty()) out << '\n';
+    out << "  ],\n  \"allowed_cpus\": [";
+    for (size_t i = 0; i < allowed_cpus.size(); ++i) {
+        if (i) out << ", ";
+        out << allowed_cpus[i];
+    }
+    out << "]\n}\n";
+    return out.str();
 }
 
 }  // namespace pto::a5
