@@ -68,16 +68,21 @@ def compile_collected_scene_tests(
         seen_classes.add(cls)
         selected_classes.append(cls)
 
-    def compile_one(cls) -> tuple[str, Exception] | None:
-        try:
-            _compile_scene_test_class(cls, platform)
-        except Exception as error:
-            logger.warning("[SceneTestCompile] %s failed to compile: %r", cls.__name__, error)
-            return (cls.__name__, error)
-        return None
+    from simpler_setup.scene_test import _use_compiler_executor  # noqa: PLC0415
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(compile_one, selected_classes))
+    with ThreadPoolExecutor(max_workers=max_workers) as compiler_executor:
+
+        def compile_one(cls) -> tuple[str, Exception] | None:
+            try:
+                with _use_compiler_executor(compiler_executor):
+                    _compile_scene_test_class(cls, platform)
+            except Exception as error:
+                logger.warning("[SceneTestCompile] %s failed to compile: %r", cls.__name__, error)
+                return (cls.__name__, error)
+            return None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as class_executor:
+            results = list(class_executor.map(compile_one, selected_classes))
     failures = [result for result in results if result is not None]
     return len(selected_classes) - len(failures), failures
 
@@ -90,7 +95,7 @@ class _CompilePlugin:
             action="store",
             type=int,
             default=_DEFAULT_COMPILE_WORKERS,
-            help="Maximum concurrent SceneTestCase compilations (default: 1)",
+            help="Maximum concurrent compiler processes across all SceneTestCase classes (default: 1)",
         )
 
     def pytest_collection_finish(self, session):

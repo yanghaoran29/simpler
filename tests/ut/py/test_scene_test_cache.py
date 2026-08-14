@@ -110,6 +110,7 @@ class _FakeKernelCompiler:
     cache_schema = 1
     orchestration_compiles = 0
     incore_compiles = 0
+    compile_barrier = None
 
     def __init__(self, platform):
         self.platform = platform
@@ -128,10 +129,14 @@ class _FakeKernelCompiler:
 
     def compile_orchestration(self, runtime, source):
         type(self).orchestration_compiles += 1
+        if type(self).compile_barrier is not None:
+            type(self).compile_barrier.wait(timeout=1)
         return Path(source).read_bytes()
 
     def compile_incore(self, source, **kwargs):
         type(self).incore_compiles += 1
+        if type(self).compile_barrier is not None:
+            type(self).compile_barrier.wait(timeout=1)
         return Path(source).read_bytes()
 
 
@@ -170,6 +175,7 @@ def _configure_fake_compilation(monkeypatch, tmp_path):
     _FakeKernelCompiler.cache_schema = 1
     _FakeKernelCompiler.orchestration_compiles = 0
     _FakeKernelCompiler.incore_compiles = 0
+    _FakeKernelCompiler.compile_barrier = None
     clear_compile_cache()
 
 
@@ -190,6 +196,26 @@ def test_compile_cache_survives_session_cache_clear(monkeypatch, tmp_path):
     assert second.func_name == first.func_name
     assert second.binary_size == first.binary_size
     assert second.child_count == first.child_count
+
+
+def test_compile_callable_parallelizes_units_with_shared_executor(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+    _FakeKernelCompiler.compile_barrier = Barrier(2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        compiled = _compile_chip_callable_from_spec(
+            spec,
+            "a2a3sim",
+            "host_build_graph",
+            cache_key,
+            compiler_executor=executor,
+        )
+
+    assert compiled.child_count == 1
+    assert _FakeKernelCompiler.orchestration_compiles == 1
+    assert _FakeKernelCompiler.incore_compiles == 1
 
 
 def test_compile_cache_invalidates_transitive_include(monkeypatch, tmp_path):

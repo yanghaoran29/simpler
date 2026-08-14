@@ -28,8 +28,12 @@ import logging
 import os
 import platform as host_platform
 import sys
+from collections.abc import Callable, Sequence
+from concurrent.futures import Executor, wait
 from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import IntEnum
+from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -40,6 +44,29 @@ from .scene_test_cache import compile_artifact_key, get_or_compile
 logger = logging.getLogger(__name__)
 
 _compile_cache: dict[tuple, object] = {}
+_compiler_executor: ContextVar[Executor | None] = ContextVar("scene_test_compiler_executor", default=None)
+
+
+@contextmanager
+def _use_compiler_executor(executor: Executor):
+    """Make one compiler executor available to callable compilation in this context."""
+    token = _compiler_executor.set(executor)
+    try:
+        yield
+    finally:
+        _compiler_executor.reset(token)
+
+
+def _compile_units(units: Sequence[Callable[[], bytes]], executor: Executor | None = None) -> list[bytes]:
+    """Compile independent units with the shared budget and preserve input order."""
+    if executor is None:
+        executor = _compiler_executor.get()
+    if executor is None:
+        return [unit() for unit in units]
+
+    futures = [executor.submit(unit) for unit in units]
+    wait(futures)
+    return [future.result() for future in futures]
 
 
 def _pto_isa_compile_cache_token() -> str:
@@ -1140,7 +1167,7 @@ def _compare_outputs(test_args, golden_args, output_names, rtol, atol):
             raise AssertionError(f"Golden mismatch on '{name}': max_diff={diff}, rtol={rtol}, atol={atol}")
 
 
-def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
+def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key, compiler_executor: Executor | None = None):
     """Compile a chip entry spec into a memory- and disk-cached ``ChipCallable``."""
     if cache_key in _compile_cache:
         return _compile_cache[cache_key]
@@ -1206,10 +1233,7 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
     )
 
     def compile_callable():
-        orch_binary = kc.compile_orchestration(runtime, orch["source"])
-        kernel_binaries = []
-        for k, extra in zip(incores, resolved_extra_dirs, strict=True):
-            signature = k.get("signature", [])
+        def compile_incore(k, extra):
             incore = kc.compile_incore(
                 k["source"],
                 core_type=k["core_type"],
@@ -1218,12 +1242,18 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
             )
             if not is_sim:
                 incore = extract_text_section(incore)
-            kernel_binaries.append(
-                (
-                    k["func_id"],
-                    CoreCallable.build(signature=signature, binary=incore),
-                )
+            return incore
+
+        units = [partial(kc.compile_orchestration, runtime, orch["source"])]
+        units.extend(partial(compile_incore, k, extra) for k, extra in zip(incores, resolved_extra_dirs, strict=True))
+        orch_binary, *incore_binaries = _compile_units(units, compiler_executor)
+        kernel_binaries = [
+            (
+                k["func_id"],
+                CoreCallable.build(signature=k.get("signature", []), binary=incore),
             )
+            for k, incore in zip(incores, incore_binaries, strict=True)
+        ]
 
         return ChipCallable.build(
             signature=orch.get("signature", []),

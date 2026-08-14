@@ -41,10 +41,11 @@ Compiled `ChipCallable` blobs are stored under `build/cache/kernels/`. A normal
 pytest or standalone scene-test run loads a matching blob from that directory;
 source, transitive-include, compiler, or compilation-logic changes produce a
 different content key, and entries unused for 14 days are pruned. Cache misses
-compile serially by default; pass `--compile-workers N` to opt into compiling
-up to `N` test classes concurrently, one compiler process per worker. A class
-that fails to compile is reported without aborting the rest of the pass. The
-warm-up does not inspect or access NPU devices.
+compile serially by default; pass `--compile-workers N` to allow up to `N`
+compiler processes across the entire warm-up. Classes coordinate concurrently,
+and each class submits its orchestration and incore units to the same bounded
+compiler pool. A class that fails to compile is reported without aborting the
+rest of the pass. The warm-up does not inspect or access NPU devices.
 
 ---
 

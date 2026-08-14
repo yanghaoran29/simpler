@@ -102,10 +102,12 @@ pytest collection, compiles each selected `SceneTestCase` class once, and
 stores the resulting `ChipCallable` under `build/cache/kernels/`. It does not
 create a `Worker` or access an NPU. Compilation is serial by default so callers
 with large models do not unexpectedly overload the host. Pass
-`--compile-workers N` to opt into compiling up to `N` test classes concurrently
-— each worker starts its own compiler process, so only raise it on a host whose
-CPU is yours. simpler's two onboard CI jobs (a2a3, a5) use eight; the sim jobs
-have no warm-up step.
+`--compile-workers N` to allow up to `N` compiler processes across the entire
+warm-up. Test classes coordinate concurrently, and each class submits its
+orchestration and incore units to the same bounded pool, so a single large
+callable can use the configured budget without multiplying it across classes.
+Only raise it on a host whose CPU is yours. simpler's two onboard CI jobs
+(a2a3, a5) use eight; the sim jobs have no warm-up step.
 
 A class that fails to compile is reported and skipped rather than aborting the
 pass, so the run that follows still recompiles it and reports the error against

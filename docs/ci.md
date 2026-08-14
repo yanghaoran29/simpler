@@ -289,8 +289,11 @@ keeps the existing batch-level device allocation and reconstructs each
 `ChipCallable` from that cache. The warm-up does not acquire one lock per case,
 and runners with exclusive devices continue to execute pytest directly.
 Compilation is serial by default; both onboard jobs pass `--compile-workers 8`,
-which assumes the runner's CPU is theirs alone — it starts eight `ccec`
-processes at once. The sim jobs run on ephemeral GitHub-hosted runners with no
+which assumes the runner's CPU is theirs alone. The option is one global bound
+on compiler processes: selected classes coordinate concurrently and submit
+their orchestration and incore units to the same eight-worker pool. A large
+callable can therefore use all eight workers without nested class-by-kernel
+oversubscription. The sim jobs run on ephemeral GitHub-hosted runners with no
 restored cache, so they compile cold every time and get no warm-up step.
 
 The DFX smokes reuse the runner's device allocation after the main scene-test

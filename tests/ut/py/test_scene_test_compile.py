@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
-from threading import Barrier
+from threading import Barrier, Lock
 
 import pytest
 
+from simpler_setup.scene_test import _compile_units
 from simpler_setup.tools import scene_test_compile
 
 
@@ -118,13 +119,52 @@ def test_compile_collected_scene_tests_runs_classes_concurrently():
     )
 
 
+def test_compile_collected_scene_tests_shares_compiler_budget_across_classes():
+    active = 0
+    peak_active = 0
+    active_lock = Lock()
+    compile_pair = Barrier(2, timeout=1)
+
+    def compile_unit():
+        nonlocal active, peak_active
+        with active_lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        try:
+            compile_pair.wait()
+            return b"compiled"
+        finally:
+            with active_lock:
+                active -= 1
+
+    class First:
+        _st_level = 2
+
+        @classmethod
+        def compile_chip_callable(cls, platform):
+            _compile_units([compile_unit, compile_unit, compile_unit])
+
+    class Second:
+        _st_level = 2
+
+        @classmethod
+        def compile_chip_callable(cls, platform):
+            _compile_units([compile_unit, compile_unit, compile_unit])
+
+    assert scene_test_compile.compile_collected_scene_tests([_Item(First), _Item(Second)], "a2a3", max_workers=2) == (
+        2,
+        [],
+    )
+    assert peak_active == 2
+
+
 @pytest.mark.parametrize(("max_workers", "expected"), [(None, 1), (8, 8)])
 def test_compile_collected_scene_tests_uses_configured_workers(monkeypatch, max_workers, expected):
-    captured = {}
+    captured = []
 
     class RecordingExecutor:
         def __init__(self, max_workers):
-            captured["max_workers"] = max_workers
+            captured.append(max_workers)
 
         def __enter__(self):
             return self
@@ -146,7 +186,7 @@ def test_compile_collected_scene_tests_uses_configured_workers(monkeypatch, max_
 
     kwargs = {} if max_workers is None else {"max_workers": max_workers}
     assert scene_test_compile.compile_collected_scene_tests([_Item(Scene)], "a2a3", **kwargs) == (1, [])
-    assert captured == {"max_workers": expected}
+    assert captured == [expected, expected]
 
 
 def test_compile_collected_scene_tests_reports_failures_without_raising():
