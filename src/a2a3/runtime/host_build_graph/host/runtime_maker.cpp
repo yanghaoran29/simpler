@@ -45,6 +45,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -67,6 +68,7 @@
 #include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
 #include "common/platform_config.h"
+#include "acl/acl_rt.h"
 #include "common/unified_log.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
@@ -401,10 +403,81 @@ static bool relocate_host_orch_image(
     return ok;
 }
 
-bool upload_graph_submissions(Runtime *runtime, const HostApi *api, GraphHostState &graph_state) {
+// Retained pinned bump arena for Graph POD images. Orch writes each layer
+// in place; upload_one synchronously H2Ds that POD (source is already pinned).
+struct GraphPinnedPack {
+    void *host = nullptr;
+    size_t cap = 0;
+};
+
+static GraphPinnedPack g_graph_pack;
+static std::mutex g_graph_pack_mu;
+constexpr size_t kGraphPinnedArenaBytes = 16ull * 1024ull * 1024ull;
+
+static bool ensure_graph_pinned_pack(size_t cap) {
+    std::lock_guard<std::mutex> lock(g_graph_pack_mu);
+    if (g_graph_pack.cap >= cap && g_graph_pack.host != nullptr) {
+        return true;
+    }
+    if (g_graph_pack.host != nullptr) {
+        (void)aclrtFreeHost(g_graph_pack.host);
+        g_graph_pack.host = nullptr;
+    }
+    g_graph_pack.cap = 0;
+    void *host = nullptr;
+    const aclError mrc = aclrtMallocHost(&host, cap);
+    if (mrc != ACL_SUCCESS || host == nullptr) {
+        LOG_ERROR("host-orch: aclrtMallocHost(%zu) failed rc=%d", cap, static_cast<int>(mrc));
+        return false;
+    }
+    std::memset(host, 0, cap);
+    g_graph_pack.host = host;
+    g_graph_pack.cap = cap;
+    return true;
+}
+
+struct GraphPodH2d {
+    const HostApi *api = nullptr;
     std::unordered_map<uint64_t, uint32_t> occurrences;
-    const size_t count = graph_host_upload_count(graph_state);
-    for (size_t index = 0; index < count; ++index) {
+
+    struct RetainedSubmission {
+        void *ptr = nullptr;
+        size_t bytes = 0;
+    };
+
+    static std::mutex &subs_mu() {
+        static std::mutex mu;
+        return mu;
+    }
+    static std::unordered_map<uint64_t, RetainedSubmission> &retained_subs() {
+        static std::unordered_map<uint64_t, RetainedSubmission> m;
+        return m;
+    }
+
+    void *acquire_submission(uint64_t graph_key, uint32_t occurrence, size_t bytes) {
+        const uint64_t key = (graph_key << 32) ^ static_cast<uint64_t>(occurrence);
+        std::lock_guard<std::mutex> lock(subs_mu());
+        RetainedSubmission &slot = retained_subs()[key];
+        if (slot.ptr != nullptr && slot.bytes == bytes) {
+            return slot.ptr;
+        }
+        if (slot.ptr != nullptr) {
+            api->device_free(slot.ptr);
+            slot.ptr = nullptr;
+            slot.bytes = 0;
+        }
+        slot.ptr = api->device_malloc(bytes);
+        if (slot.ptr == nullptr) {
+            return nullptr;
+        }
+        slot.bytes = bytes;
+        return slot.ptr;
+    }
+
+    bool upload_one(GraphHostState &graph_state, size_t index) {
+        if (graph_host_upload_h2d_done(graph_state, index)) {
+            return true;
+        }
         std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
         if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
             upload->bytes < sizeof(GraphSubmission) || upload->outer_slot->task_kind != TaskKind::GRAPH ||
@@ -433,10 +506,7 @@ bool upload_graph_submissions(Runtime *runtime, const HostApi *api, GraphHostSta
             submission->graph_key, occurrence, execution_bytes, alignof(GraphNodeStorage)
         );
         if (execution_storage == nullptr) {
-            LOG_ERROR(
-                "host-orch: failed to retain %zu bytes for Graph execution key=%#llx occurrence=%u", execution_bytes,
-                static_cast<unsigned long long>(submission->graph_key), occurrence
-            );
+            LOG_ERROR("host-orch: failed to retain Graph execution storage");
             return false;
         }
         submission->execution_storage = reinterpret_cast<uint64_t>(execution_storage);
@@ -444,18 +514,37 @@ bool upload_graph_submissions(Runtime *runtime, const HostApi *api, GraphHostSta
         submission->local_execution = 0;
         submission->activation_gate = 0;
 
-        void *device_submission = api->device_malloc(upload->bytes);
+        void *device_submission = acquire_submission(submission->graph_key, occurrence, upload->bytes);
         if (device_submission == nullptr) {
-            LOG_ERROR("host-orch: failed to allocate %zu bytes for Graph submission", upload->bytes);
+            LOG_ERROR("host-orch: failed to allocate Graph submission");
             return false;
         }
         if (api->copy_to_device(device_submission, upload->data, upload->bytes) != 0) {
             LOG_ERROR("host-orch: failed to upload Graph submission POD image");
-            api->device_free(device_submission);
             return false;
         }
+
         upload->outer_slot->graph_context = device_submission;
-        runtime->tensor_pairs_.push_back({nullptr, device_submission, upload->bytes, false});
+        // Device POD is retained across binds; do not record it in tensor_pairs_
+        // or validate would device_free it each round.
+        graph_host_mark_upload_h2d_done(graph_state, index);
+        return true;
+    }
+
+    static bool eager_cb(void *ctx, GraphHostState &state, size_t index) {
+        return static_cast<GraphPodH2d *>(ctx)->upload_one(state, index);
+    }
+};
+
+static bool upload_leftover_graph_submissions(GraphPodH2d &h2d, GraphHostState &graph_state) {
+    const size_t count = graph_host_upload_count(graph_state);
+    for (size_t index = 0; index < count; ++index) {
+        if (graph_host_upload_h2d_done(graph_state, index)) {
+            continue;
+        }
+        if (!h2d.upload_one(graph_state, index)) {
+            return false;
+        }
     }
     return true;
 }
@@ -511,6 +600,18 @@ int32_t run_host_orchestration(
     }
     GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
 
+    GraphPodH2d graph_h2d;
+    graph_h2d.api = api;
+    struct PinnedArenaClear {
+        ~PinnedArenaClear() { graph_host_clear_pinned_arena(); }
+    } pinned_arena_clear;
+    if (ensure_graph_pinned_pack(kGraphPinnedArenaBytes)) {
+        graph_host_set_pinned_arena(static_cast<std::byte *>(g_graph_pack.host), g_graph_pack.cap);
+    } else {
+        LOG_WARN("host-orch: pinned Graph arena unavailable; POD H2D may stage");
+    }
+    graph_host_set_eager_upload(&GraphPodH2d::eager_cb, &graph_h2d);
+
     const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
     if (block_dim < 1) {
         LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
@@ -539,9 +640,10 @@ int32_t run_host_orchestration(
     entry_points->entry(orch_l2);
     rt_scope_end(rt);
     rt_orchestration_done(rt);
+    graph_host_set_eager_upload(nullptr, nullptr);
 
     const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
-    if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
+    if (!upload_leftover_graph_submissions(graph_h2d, *graph_state)) return -1;
 
     // total_tasks sizes the bounded per-segment H2D copies below; a value outside
     // [0, task_window] would make those copies read/write out of bounds.
