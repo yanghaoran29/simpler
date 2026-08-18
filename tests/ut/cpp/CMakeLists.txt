@@ -459,6 +459,8 @@ set_tests_properties(test_native_run_acceptance PROPERTIES LABELS "no_hardware")
 # A HostApi value keeps one runner and one run's resource selection even when
 # callers invoke it from different host threads.
 add_common_utils_test(test_host_api common/test_host_api.cpp)
+add_common_utils_test(test_hbg_graph_pinned_pool common/test_hbg_graph_pinned_pool.cpp)
+target_link_libraries(test_hbg_graph_pinned_pool PRIVATE ${CMAKE_DL_LIBS})
 
 # Sim kernel threads publish one sticky completion state. A gated unit test
 # proves submission and completion are separate without relying on kernel
@@ -855,6 +857,8 @@ target_sources(test_hbg_submit_poison PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a2a3_hbg_runtime_test(test_hbg_graph_submit_failure common/test_hbg_graph_submit_failure.cpp)
+add_a2a3_hbg_runtime_test(test_hbg_graph_fallback common/test_hbg_graph_fallback.cpp)
+add_a5_hbg_runtime_test(test_a5_hbg_graph_fallback common/test_hbg_graph_fallback.cpp)
 target_sources(test_hbg_graph_submit_failure PRIVATE
     ${HBG_RUNTIME_DIR}/orchestrator_core/pto_orchestrator.cpp
     ${HBG_RUNTIME_DIR}/orchestrator_core/pto_ring_buffer.cpp
@@ -874,6 +878,26 @@ target_sources(test_a5_hbg_graph_submit_failure PRIVATE
     ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
+add_a2a3_hbg_runtime_test(test_hbg_graph_upload common/test_hbg_graph_upload.cpp)
+add_a5_hbg_runtime_test(test_a5_hbg_graph_upload common/test_hbg_graph_upload.cpp)
+function(configure_hbg_upload_test target submit_target runtime_dir platform)
+    get_target_property(runtime_sources ${submit_target} SOURCES)
+    list(FILTER runtime_sources INCLUDE REGEX "/src/")
+    target_sources(${target} PRIVATE
+        ${runtime_sources}
+        ${runtime_dir}/orchestrator_core/pto_runtime2.cpp
+        ${runtime_dir}/../host/host_tensor_access.cpp
+        ${runtime_dir}/../host/host_phase_trace.cpp
+        ${runtime_dir}/../host/dep_gen_host_graph.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/common/log/host_log.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/platform_compile_info.cpp
+    )
+    target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/../../../src/common/log)
+    target_compile_definitions(${target} PRIVATE SIMPLER_PLATFORM_NAME="${platform}")
+    target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
+endfunction()
+configure_hbg_upload_test(test_hbg_graph_upload test_hbg_graph_submit_failure ${HBG_RUNTIME_DIR} a2a3sim)
+configure_hbg_upload_test(test_a5_hbg_graph_upload test_a5_hbg_graph_submit_failure ${A5_HBG_RUNTIME_DIR} a5sim)
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_aicore_completion_mailbox a5/test_aicore_completion_mailbox.cpp)
 set(HBG_A5_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime)
@@ -1146,6 +1170,37 @@ if(SIMPLER_ENABLE_HARDWARE_TESTS)
             ${ASCEND_HOME_PATH}/runtime/lib64
             ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/lib64
         NO_DEFAULT_PATH REQUIRED)
+
+    add_executable(test_graph_buffer_abandon hardware/test_graph_buffer_abandon.cpp)
+    target_include_directories(test_graph_buffer_abandon PRIVATE
+        ${GTEST_INCLUDE_DIRS}
+        ${PROJECT_ROOT}/src/a2a3/platform/onboard/host
+        ${PROJECT_ROOT}/src/a2a3/platform/include
+        ${PROJECT_ROOT}/src/a2a3/runtime/host_build_graph/runtime
+        ${PROJECT_ROOT}/src/a2a3/runtime/host_build_graph/common
+        ${PROJECT_ROOT}/src/a2a3/runtime/host_build_graph/orchestration
+        ${PROJECT_ROOT}/src/common/platform/onboard/host
+        ${PROJECT_ROOT}/src/common/platform/shared/host
+        ${PROJECT_ROOT}/src/common/platform/include
+        ${PROJECT_ROOT}/src/common/task_interface
+        ${PROJECT_ROOT}/src/common/worker
+        ${PROJECT_ROOT}/src/common/log/include
+        ${PROJECT_ROOT}/src/common
+        ${ASCEND_HOME_PATH}/include
+        ${ASCEND_HOME_PATH}/pkg_inc/runtime
+        ${ASCEND_HOME_PATH}/pkg_inc/runtime/runtime
+        ${ASCEND_HOME_PATH}/pkg_inc
+        ${ASCEND_HOME_PATH}/pkg_inc/profiling
+    )
+    target_link_libraries(test_graph_buffer_abandon PRIVATE
+        ${GTEST_MAIN_LIB} ${GTEST_LIB} ${ASCENDCL_LIB} ${RUNTIME_LIB} pthread
+        ${PROJECT_ROOT}/build/lib/a2a3/onboard/host_build_graph/libhost_runtime.so
+    )
+    add_test(NAME test_graph_buffer_abandon COMMAND test_graph_buffer_abandon)
+    set_tests_properties(test_graph_buffer_abandon PROPERTIES
+        LABELS "requires_hardware_a2a3"
+        RESOURCE_GROUPS "1,npus:1"
+    )
 
     # Black-box lifecycle UT for the comm_* C API on Path D. See the file
     # header for the contract it pins down.

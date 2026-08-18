@@ -149,6 +149,9 @@ public:
     );
     void *
     acquire_graph_definition_buffer(uint32_t pipeline_slot, uint64_t key, std::size_t bytes, std::size_t alignment);
+    void *acquire_graph_submission_buffer(
+        uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, std::size_t bytes, std::size_t alignment
+    );
     void clear_temporary_buffer();
     /**
      * Map a device buffer into the host address space and return a
@@ -919,7 +922,7 @@ protected:
     void release_graph_execution_buffers();
 
     /**
-     * Drop the retained graph-execution buffers without freeing them.
+     * Drop retained execution, definition and submission records without freeing device memory.
      *
      * The fatal counterpart of release_graph_execution_buffers(): a force reset
      * has already invalidated every allocation, so only the host-side map is
@@ -1083,6 +1086,9 @@ protected:
     };
     using GraphExecutionBufferMap = std::unordered_map<uint64_t, std::vector<RetainedGraphExecutionBuffer>>;
     std::array<GraphExecutionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_execution_buffers_{};
+    // Graph submission POD storage, one retained block per (pipeline slot,
+    // graph_key, occurrence) — see HostApi acquire_graph_submission_buffer.
+    std::array<GraphExecutionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_submission_buffers_{};
     // Graph Definition storage, one retained block per (pipeline slot,
     // definition key) — see HostApi acquire_graph_definition_buffer. Keyed by
     // content identity rather than occurrence: every submission of one run

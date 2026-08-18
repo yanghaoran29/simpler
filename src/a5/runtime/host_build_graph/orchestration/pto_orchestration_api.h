@@ -231,7 +231,8 @@ static inline bool rt_graph_end() {
     if (rt->ops->is_fatal(rt) || rt->ops->graph_end == nullptr) {
         return true;
     }
-    return rt->ops->graph_end(rt);
+    const bool submitted = rt->ops->graph_end(rt);
+    return submitted || rt->ops->is_fatal(rt);
 }
 
 static inline void rt_graph_commit() {
@@ -394,6 +395,7 @@ static inline uint64_t rt_graph_function_id(Function function) {
 
 template <typename Invoke>
 static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const CoreTaskArgs &args, Invoke invoke) {
+    if (rt_is_fatal()) return GraphSubmitResult{};
     debug_assert(!args.has_error && "Graph boundary CoreTaskArgs construction failed");
     debug_assert(
         args.tensor_count() <= static_cast<int32_t>(GRAPH_MAX_TENSOR_ARGS) && "Graph boundary exceeds the tensor limit"
@@ -420,8 +422,11 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const C
         invoke();
         if (!rt_graph_end()) invoke();
     } else if (result.execute_block) {
-        // Un-cacheable at begin, or the Definition cache is full: ordinary path.
-        invoke();
+        // Un-cacheable at begin, the Definition cache is full, or the runtime
+        // went fatal (e.g. the eager Graph POD upload failed after the outer
+        // task was published): ordinary path, except that a fatal runtime must
+        // not re-run the body — its run is already doomed.
+        if (!current_runtime()->ops->is_fatal(current_runtime())) invoke();
     }
     // Cache hit: execute_block and recording are both false; the body is skipped.
     rt_graph_commit();
