@@ -338,9 +338,6 @@ struct GraphHostState {
     std::vector<GraphPendingUpload> pending_uploads;
 };
 
-static GraphHostEagerUploadFn g_eager_upload_fn = nullptr;
-static void *g_eager_upload_ctx = nullptr;
-
 namespace {
 std::byte *g_pin_base = nullptr;
 size_t g_pin_cap = 0;
@@ -714,11 +711,6 @@ std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t i
     }
     if (upload.image.empty()) return std::nullopt;
     return GraphHostUpload{upload.outer_slot, upload.image.data(), upload.image.size()};
-}
-
-void graph_host_set_eager_upload(GraphHostEagerUploadFn fn, void *ctx) {
-    g_eager_upload_fn = fn;
-    g_eager_upload_ctx = ctx;
 }
 
 bool graph_host_upload_h2d_done(const GraphHostState &state, size_t index) {
@@ -1611,10 +1603,6 @@ bool graph_submit_definition(
 
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(std::move(pending));
-    if (g_eager_upload_fn != nullptr) {
-        const size_t index = state->pending_uploads.size() - 1;
-        if (!g_eager_upload_fn(g_eager_upload_ctx, *state, index)) return false;
-    }
     if (submitted_id != nullptr) *submitted_id = task_id;
 #if SIMPLER_DFX
     orch->tasks_submitted++;

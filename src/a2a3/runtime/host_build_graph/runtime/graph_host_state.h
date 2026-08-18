@@ -35,11 +35,6 @@ struct GraphHostUpload {
 GraphHostStatePtr make_graph_host_state();
 size_t graph_host_upload_count(const GraphHostState &state);
 std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index);
-
-// Optional eager H2D hook: invoked right after each Graph POD image is appended
-// during orch entry (compute-one-layer, copy-that-layer).
-using GraphHostEagerUploadFn = bool (*)(void *ctx, GraphHostState &state, size_t index);
-void graph_host_set_eager_upload(GraphHostEagerUploadFn fn, void *ctx);
 bool graph_host_upload_h2d_done(const GraphHostState &state, size_t index);
 void graph_host_mark_upload_h2d_done(GraphHostState &state, size_t index);
 
