@@ -54,6 +54,7 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
     calls = []
 
     monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
+    monkeypatch.setattr(pto_isa, "_local_mirror_remote", lambda: None)
 
     def fake_run_git(args, cwd=None, timeout=30, check=False):
         calls.append(args)
@@ -76,6 +77,7 @@ def test_clone_falls_back_to_gitcode_after_three_github_pin_failures(tmp_path, m
     sleeps = []
 
     monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
+    monkeypatch.setattr(pto_isa, "_local_mirror_remote", lambda: None)
     monkeypatch.setattr(pto_isa.time, "sleep", sleeps.append)
 
     def fake_run_git(args, cwd=None, timeout=30, check=False):
@@ -101,6 +103,7 @@ def test_clone_falls_back_to_gitcode_after_three_github_clone_failures(tmp_path,
     clone_remotes = []
 
     monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
+    monkeypatch.setattr(pto_isa, "_local_mirror_remote", lambda: None)
     monkeypatch.setattr(pto_isa.time, "sleep", lambda _seconds: None)
 
     def fake_run_git(args, cwd=None, timeout=30, check=False):

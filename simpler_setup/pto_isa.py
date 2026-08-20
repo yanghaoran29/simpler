@@ -36,11 +36,16 @@ Two deliberate choices:
   checkout of the pin sidesteps that entirely.
 
 Lock file under build/ serializes concurrent clones from parallel processes.
+
+When ``PTO_ISA_LOCAL_MIRROR`` points at a local git checkout (e.g. an unpushed
+TCI fix branch), clone acquisition falls back to ``file://`` that mirror after
+GitHub and GitCode cannot provide the pinned commit.
 """
 
 import fcntl
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -61,6 +66,7 @@ logger = logging.getLogger(__name__)
 
 _PTO_ISA_GITHUB_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
 _PTO_ISA_GITCODE_HTTPS = "https://gitcode.com/luohuan40/pto-isa.git"
+_PTO_ISA_LOCAL_MIRROR_ENV = "PTO_ISA_LOCAL_MIRROR"
 _PTO_ISA_PIN_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 PTO_ISA_PIN_FILE = "pto_isa.pin"
 PTO_ISA_BUILD_METADATA = "pto_isa_build.json"
@@ -232,6 +238,18 @@ def validate_runtime_pto_isa_current_pin(lib_dir: Path, runtime_key: Optional[st
 def get_pto_isa_clone_path() -> Path:
     """Managed auto-clone target for PTO-ISA, anchored to PROJECT_ROOT."""
     return PROJECT_ROOT / "build" / "pto-isa"
+
+
+def _local_mirror_remote() -> Optional[str]:
+    """Return a file:// remote when PTO_ISA_LOCAL_MIRROR is a git checkout."""
+    raw = os.environ.get(_PTO_ISA_LOCAL_MIRROR_ENV, "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser().resolve()
+    if not (path / ".git").exists():
+        logger.warning(f"{_PTO_ISA_LOCAL_MIRROR_ENV} ignored: {path} is not a git repository")
+        return None
+    return f"file://{path}"
 
 
 def _is_cloned(path: Path) -> bool:
@@ -444,6 +462,10 @@ def _clone(target: Path, commit: str, verbose: bool) -> bool:
         return False
 
     try:
+        local_remote = _local_mirror_remote()
+        if local_remote and _clone_from_remote(target, commit, local_remote, attempts=1, verbose=verbose):
+            return True
+
         if _clone_from_remote(
             target,
             commit,
@@ -457,7 +479,16 @@ def _clone(target: Path, commit: str, verbose: bool) -> bool:
             f"GitHub could not provide PTO-ISA commit {commit} after {_CLONE_ATTEMPTS} attempts; "
             f"falling back to {_PTO_ISA_GITCODE_HTTPS}"
         )
-        return _clone_from_remote(target, commit, _PTO_ISA_GITCODE_HTTPS, attempts=1, verbose=verbose)
+        if _clone_from_remote(target, commit, _PTO_ISA_GITCODE_HTTPS, attempts=1, verbose=verbose):
+            return True
+
+        if local_remote:
+            logger.warning(
+                f"Remote PTO-ISA sources could not provide commit {commit}; "
+                f"retrying local mirror {_PTO_ISA_LOCAL_MIRROR_ENV}={local_remote}"
+            )
+            return _clone_from_remote(target, commit, local_remote, attempts=1, verbose=verbose)
+        return False
     except Exception as e:  # noqa: BLE001
         if verbose:
             logger.warning(f"Failed to clone pto-isa: {e}")
@@ -483,7 +514,8 @@ def ensure_pto_isa_root(verbose: bool = False) -> str:
             f"  If auto-clone failed, manually run:\n"
             f"    git clone {_PTO_ISA_GITHUB_HTTPS} {clone_path}\n"
             f"  Or use the fallback mirror:\n"
-            f"    git clone {_PTO_ISA_GITCODE_HTTPS} {clone_path}"
+            f"    git clone {_PTO_ISA_GITCODE_HTTPS} {clone_path}\n"
+            f"  For unpushed pins, set {_PTO_ISA_LOCAL_MIRROR_ENV} to a local git checkout."
         )
     return resolved
 

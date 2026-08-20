@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import typing
+from pathlib import Path
 
 # Make simpler's TIMING and NUL levels acceptable to pytest's `--log-level` validator.
 # pytest does `int(getattr(logging, level.upper(), level))`, so the value must
@@ -514,6 +515,10 @@ def pytest_configure(config):
 
     # Pre-clone / refresh PTO-ISA up front so scene-test children inherit the
     # pinned managed checkout resolved from pto_isa.pin.
+    if config.getoption("--require-pto-isa") and "PTO_ISA_LOCAL_MIRROR" not in os.environ:
+        local_mirror = Path(__file__).resolve().parent.parent.parent / "pto-isa-tci-fix"
+        if (local_mirror / ".git").is_dir():
+            os.environ["PTO_ISA_LOCAL_MIRROR"] = str(local_mirror)
     # Pre-clone is an optimization, not a requirement: jobs that don't actually
     # need PTO-ISA (e.g. pytest tests/ut on a runner without SSH keys) must not
     # be aborted when the eager clone fails. If an actual scene test later needs
