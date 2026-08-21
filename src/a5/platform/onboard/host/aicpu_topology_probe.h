@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -47,6 +48,17 @@ enum class AicpuSelectionPolicy {
     kSequentialFallback,
 };
 
+enum class SchedulerAicpuDieLayout { kAllOnOneDie, kSplit1_3, kSplit2_2, kUnsupported };
+
+enum class SchedAicoreAssignmentMode { kSequential, kDieAware, kRttDieAware };
+
+constexpr int32_t kSchedAicoreAssignmentSequential = 0;
+constexpr int32_t kSchedAicoreAssignmentDieAware = 1;
+// Mainline baseline: cluster ci -> sched (ci % 4), no die-aware host renumbering.
+constexpr int32_t kSchedAicoreAssignmentRoundRobin = 2;
+// Device-side MMIO RTT preflight ranks scheduler pthreads by die affinity.
+constexpr int32_t kSchedAicoreAssignmentRttDieAware = 3;
+
 struct AicpuDeviceOccupancy {
     uint64_t occupy{0};
     uint64_t pf_occupy{0};
@@ -76,6 +88,7 @@ struct AicpuLaunchPlan {
     int32_t stable_reachable_count{0};
     int32_t launch_count{0};
     std::vector<int32_t> allowed_cpus;
+    SchedAicoreAssignmentMode sched_aicore_assignment_mode{SchedAicoreAssignmentMode::kSequential};
     bool warn_stable_reachable_below_default{false};
     bool warn_cpu_topology_unavailable{false};
 };
@@ -113,11 +126,10 @@ bool load_cpu_topo_from_json(
 //   * `n_orch`     — number of orchestrator threads (currently always 1)
 //
 // Output:
-//   * `out_allowed_cpus` — n_sched + n_orch cpu_ids, ordered as
-//     [sched 0..n_sched-1, orch 0..n_orch-1].  The on-device gate uses
-//     this as `ALLOWED_CPUS[]`; the index in this array IS the deterministic
-//     `exec_idx` the surviving thread receives, so the role assignment in
-//     `aicpu_executor.cpp` (sched / orch) is fully driven by the order here.
+//   * `out_allowed_cpus` — n_sched + n_orch cpu_ids as [selected sched..., orch].
+//     Indices are placement-only until assign_scheduler_exec_order_by_die()
+//     runs for 1O+4S die-aware launches; until then they must not be treated
+//     as final exec_idx / contiguous AICore block ownership.
 //
 // Placement policy:
 //   Step 1 (sched): smallest containing unit wins —
@@ -171,7 +183,24 @@ bool build_aicpu_launch_plan(
     const AicpuTopology &topology, int32_t requested_active_count, AicpuLaunchPlan &out_plan, std::string &out_error
 );
 
+// Map each of the four scheduler cpu_ids to the AICore die (0/1) it manages.
+// Requires full CPU_TOPO metadata on every scheduler slot.
+bool compute_scheduler_aicore_die_map(
+    const AicpuTopology &topology, const std::vector<int32_t> &sched_cpu_ids,
+    std::array<int32_t, 4> &out_aicore_die_per_sched, SchedulerAicpuDieLayout &out_layout
+);
+
+// Phase-2 exec assignment: after scheduler CPUs are selected (phase 1), inspect
+// each scheduler's AICPU die and assign exec_idx 0..3 so that exec i owns
+// contiguous AICore block i (block size = ceil(cluster_count / 4) on device).
+// Returns false when die metadata or layout is unsupported.
+bool assign_scheduler_exec_order_by_die(
+    const AicpuTopology &topology, const std::vector<int32_t> &selected_sched_cpu_ids,
+    std::vector<int32_t> &allowed_cpus, SchedulerAicpuDieLayout *out_layout = nullptr
+);
+
 const char *aicpu_scenario_name(AicpuScenarioType scenario);
+const char *sched_aicore_assignment_mode_name(SchedAicoreAssignmentMode mode);
 const char *aicpu_topology_source_name(AicpuTopologySource source);
 
 // Serialize the complete topology and launch decision for diagnostic tooling.

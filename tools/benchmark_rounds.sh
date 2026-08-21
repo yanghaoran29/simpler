@@ -388,6 +388,21 @@ for example_case in "${EXAMPLE_CASES[@]}"; do
     fi
 done
 
+# Optional comma-separated example directory names to skip (e.g. qwen3_14b_decode).
+if [[ -n "${BENCHMARK_SKIP_EXAMPLES:-}" ]]; then
+    IFS=',' read -ra _skip_list <<< "$BENCHMARK_SKIP_EXAMPLES"
+    _filtered=()
+    for example_case in "${EXAMPLE_CASES[@]}"; do
+        example="${example_case%%=*}"
+        _skip=0
+        for _s in "${_skip_list[@]}"; do
+            if [[ "$example" == "$_s" ]]; then _skip=1; break; fi
+        done
+        [[ $_skip -eq 0 ]] && _filtered+=("$example_case")
+    done
+    EXAMPLE_CASES=("${_filtered[@]}")
+fi
+
 echo ""
 echo "Runtime: $RUNTIME"
 

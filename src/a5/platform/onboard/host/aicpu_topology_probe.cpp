@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -700,6 +701,172 @@ bool compute_scenario_allowed_cpus(
     return true;
 }
 
+namespace {
+
+const AicpuLogicalCpu *lookup_schedulable_cpu(const AicpuTopology &topology, int32_t cpu_id) {
+    for (const auto &cpu : topology.os_schedulable_cpus) {
+        if (cpu.cpu_id == cpu_id) return &cpu;
+    }
+    return nullptr;
+}
+
+bool topology_has_die_metadata(const AicpuTopology &topology) {
+    if (topology.source == AicpuTopologySource::kOccupyFallback) return false;
+    return validate_cpu_topology(topology.os_schedulable_cpus);
+}
+
+bool resolve_scheduler_cpus(
+    const AicpuTopology &topology, const std::vector<int32_t> &sched_cpu_ids, std::vector<AicpuLogicalCpu> &out_cpus
+) {
+    out_cpus.clear();
+    if (sched_cpu_ids.size() != 4) return false;
+    for (int32_t cpu_id : sched_cpu_ids) {
+        const AicpuLogicalCpu *cpu = lookup_schedulable_cpu(topology, cpu_id);
+        if (cpu == nullptr) return false;
+        out_cpus.push_back(*cpu);
+    }
+    return true;
+}
+
+SchedulerAicpuDieLayout classify_scheduler_aicpu_die_layout(const std::vector<AicpuLogicalCpu> &sched_cpus) {
+    std::unordered_map<int32_t, int32_t> counts;
+    for (const auto &cpu : sched_cpus)
+        ++counts[cpu.die_id];
+    if (counts.size() != 1 && counts.size() != 2) return SchedulerAicpuDieLayout::kUnsupported;
+    int32_t die0 = counts.count(0) != 0 ? counts[0] : 0;
+    int32_t die1 = counts.count(1) != 0 ? counts[1] : 0;
+    if (die0 == 4 || die1 == 4) return SchedulerAicpuDieLayout::kAllOnOneDie;
+    if ((die0 == 1 && die1 == 3) || (die0 == 3 && die1 == 1)) return SchedulerAicpuDieLayout::kSplit1_3;
+    if (die0 == 2 && die1 == 2) return SchedulerAicpuDieLayout::kSplit2_2;
+    return SchedulerAicpuDieLayout::kUnsupported;
+}
+
+bool is_better_cross_die_candidate(const AicpuLogicalCpu &candidate, const AicpuLogicalCpu &current_best) {
+    if (candidate.hyperthread_id != current_best.hyperthread_id)
+        return candidate.hyperthread_id < current_best.hyperthread_id;
+    if (candidate.die_id == 0) return candidate.cpu_id < current_best.cpu_id;
+    if (candidate.die_id == 1) return candidate.cpu_id > current_best.cpu_id;
+    return candidate.cpu_id < current_best.cpu_id;
+}
+
+int32_t opposite_die_id(int32_t die_id) { return die_id == 0 ? 1 : 0; }
+
+void assign_split13_aicore_dies(
+    const std::vector<AicpuLogicalCpu> &sched_cpus, std::array<int32_t, 4> &out_aicore_die_per_sched
+) {
+    std::unordered_map<int32_t, int32_t> counts;
+    for (const auto &cpu : sched_cpus)
+        ++counts[cpu.die_id];
+    const int32_t minority_die = counts[0] == 1 ? 0 : 1;
+    const int32_t majority_die = opposite_die_id(minority_die);
+    const int32_t target_aicore_die_for_majority = majority_die;
+
+    int32_t cross_idx = -1;
+    for (int32_t i = 0; i < 4; ++i) {
+        if (sched_cpus[i].die_id != majority_die) continue;
+        if (cross_idx < 0 || is_better_cross_die_candidate(sched_cpus[i], sched_cpus[cross_idx])) cross_idx = i;
+    }
+    if (cross_idx < 0) return;
+
+    for (int32_t i = 0; i < 4; ++i) {
+        if (sched_cpus[i].die_id == minority_die) {
+            out_aicore_die_per_sched[i] = minority_die;
+            continue;
+        }
+        if (i == cross_idx) {
+            out_aicore_die_per_sched[i] = minority_die;
+            continue;
+        }
+        out_aicore_die_per_sched[i] = target_aicore_die_for_majority;
+    }
+}
+
+}  // namespace
+
+bool compute_scheduler_aicore_die_map(
+    const AicpuTopology &topology, const std::vector<int32_t> &sched_cpu_ids,
+    std::array<int32_t, 4> &out_aicore_die_per_sched, SchedulerAicpuDieLayout &out_layout
+) {
+    out_aicore_die_per_sched.fill(-1);
+    out_layout = SchedulerAicpuDieLayout::kUnsupported;
+    if (!topology_has_die_metadata(topology)) return false;
+
+    std::vector<AicpuLogicalCpu> sched_cpus;
+    if (!resolve_scheduler_cpus(topology, sched_cpu_ids, sched_cpus)) return false;
+
+    out_layout = classify_scheduler_aicpu_die_layout(sched_cpus);
+    switch (out_layout) {
+    case SchedulerAicpuDieLayout::kAllOnOneDie:
+        out_aicore_die_per_sched = {0, 0, 1, 1};
+        return true;
+    case SchedulerAicpuDieLayout::kSplit2_2:
+        for (int32_t i = 0; i < 4; ++i) out_aicore_die_per_sched[i] = sched_cpus[i].die_id;
+        return true;
+    case SchedulerAicpuDieLayout::kSplit1_3:
+        assign_split13_aicore_dies(sched_cpus, out_aicore_die_per_sched);
+        return out_aicore_die_per_sched[0] >= 0;
+    case SchedulerAicpuDieLayout::kUnsupported:
+        return false;
+    }
+    return false;
+}
+
+bool assign_scheduler_exec_order_by_die(
+    const AicpuTopology &topology, const std::vector<int32_t> &selected_sched_cpu_ids,
+    std::vector<int32_t> &allowed_cpus, SchedulerAicpuDieLayout *out_layout
+) {
+    if (selected_sched_cpu_ids.size() != 4 || allowed_cpus.size() != 5) return false;
+
+    std::array<int32_t, 4> aicore_die_map{};
+    SchedulerAicpuDieLayout layout = SchedulerAicpuDieLayout::kUnsupported;
+    if (!compute_scheduler_aicore_die_map(topology, selected_sched_cpu_ids, aicore_die_map, layout)) return false;
+    if (out_layout != nullptr) *out_layout = layout;
+
+    const int32_t orch_cpu = allowed_cpus.back();
+
+    // All schedulers on one AICPU die: selection order already maps
+    // sched[i] → exec i → contiguous block i (first two blocks die0, last two die1).
+    if (layout == SchedulerAicpuDieLayout::kAllOnOneDie) {
+        for (int32_t i = 0; i < 4; ++i) allowed_cpus[i] = selected_sched_cpu_ids[i];
+        allowed_cpus[4] = orch_cpu;
+        return true;
+    }
+
+    struct SchedSlot {
+        int32_t cpu_id;
+        int32_t aicore_die;
+        AicpuLogicalCpu meta{};
+    };
+    std::vector<SchedSlot> die0_slots;
+    std::vector<SchedSlot> die1_slots;
+    die0_slots.reserve(2);
+    die1_slots.reserve(2);
+    for (int32_t i = 0; i < 4; ++i) {
+        const AicpuLogicalCpu *cpu = lookup_schedulable_cpu(topology, selected_sched_cpu_ids[i]);
+        if (cpu == nullptr) return false;
+        SchedSlot slot{selected_sched_cpu_ids[i], aicore_die_map[i], *cpu};
+        if (slot.aicore_die == 0)
+            die0_slots.push_back(slot);
+        else
+            die1_slots.push_back(slot);
+    }
+    if (die0_slots.size() != 2 || die1_slots.size() != 2) return false;
+
+    auto by_topology = [](const SchedSlot &a, const SchedSlot &b) {
+        return topology_key(a.meta) < topology_key(b.meta);
+    };
+    std::sort(die0_slots.begin(), die0_slots.end(), by_topology);
+    std::sort(die1_slots.begin(), die1_slots.end(), by_topology);
+
+    // exec 0/1 → die0 AICore blocks; exec 2/3 → die1 AICore blocks.
+    allowed_cpus[0] = die0_slots[0].cpu_id;
+    allowed_cpus[1] = die0_slots[1].cpu_id;
+    allowed_cpus[2] = die1_slots[0].cpu_id;
+    allowed_cpus[3] = die1_slots[1].cpu_id;
+    allowed_cpus[4] = orch_cpu;
+    return true;
+}
+
 bool build_aicpu_launch_plan(
     const AicpuTopology &topology, int32_t requested_active_count, AicpuLaunchPlan &out_plan, std::string &out_error
 ) {
@@ -764,6 +931,28 @@ bool build_aicpu_launch_plan(
         out_plan.allowed_cpus.clear();
         return false;
     }
+
+    out_plan.sched_aicore_assignment_mode = SchedAicoreAssignmentMode::kSequential;
+    const char *assignment_override = std::getenv("SIMPLER_SCHED_AICORE_ASSIGNMENT_OVERRIDE");
+    const bool force_round_robin =
+        assignment_override != nullptr &&
+        std::atoi(assignment_override) == kSchedAicoreAssignmentRoundRobin;
+    const bool force_rtt_die_aware =
+        assignment_override != nullptr &&
+        std::atoi(assignment_override) == kSchedAicoreAssignmentRttDieAware;
+    if (force_rtt_die_aware) {
+        out_plan.sched_aicore_assignment_mode = SchedAicoreAssignmentMode::kRttDieAware;
+    } else if (!force_round_robin && effective == PLATFORM_DEFAULT_AICPU_THREAD_NUM && topology_has_die_metadata(topology)) {
+        const size_t sched_count = out_plan.allowed_cpus.size() - 1;
+        if (sched_count == 4) {
+            const std::vector<int32_t> selected_sched(
+                out_plan.allowed_cpus.begin(), out_plan.allowed_cpus.begin() + static_cast<std::ptrdiff_t>(sched_count)
+            );
+            if (assign_scheduler_exec_order_by_die(topology, selected_sched, out_plan.allowed_cpus, nullptr)) {
+                out_plan.sched_aicore_assignment_mode = SchedAicoreAssignmentMode::kDieAware;
+            }
+        }
+    }
     return true;
 }
 
@@ -793,6 +982,18 @@ const char *aicpu_topology_source_name(AicpuTopologySource source) {
         return "occupy_fallback";
     }
     return "unknown";
+}
+
+const char *sched_aicore_assignment_mode_name(SchedAicoreAssignmentMode mode) {
+    switch (mode) {
+    case SchedAicoreAssignmentMode::kSequential:
+        return "sequential";
+    case SchedAicoreAssignmentMode::kDieAware:
+        return "die_aware";
+    case SchedAicoreAssignmentMode::kRttDieAware:
+        return "rtt_die_aware";
+    }
+    return "sequential";
 }
 
 namespace {
@@ -1222,6 +1423,8 @@ std::string format_aicpu_topology_json(
         << "    \"effective_active_count\": " << launch_plan.effective_active_count << ",\n"
         << "    \"stable_reachable_count\": " << launch_plan.stable_reachable_count << ",\n"
         << "    \"launch_count\": " << launch_plan.launch_count << ",\n"
+        << "    \"sched_aicore_assignment_mode\": \""
+        << sched_aicore_assignment_mode_name(launch_plan.sched_aicore_assignment_mode) << "\",\n"
         << "    \"allowed_cpus\": [";
     append_json_int_array(out, launch_plan.allowed_cpus);
     out << "]\n  }\n}\n";

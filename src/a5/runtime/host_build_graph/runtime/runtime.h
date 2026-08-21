@@ -162,6 +162,10 @@ public:
     int32_t aicpu_allowed_cpus[MAX_GATE_THREADS];
     int32_t aicpu_allowed_cpu_count;
     int32_t aicpu_launch_count;
+    // 0 = contiguous blocks + FG host order; 1 = contiguous + die-aware host order
+    //    (AICore die: first half of clusters -> die0, second half -> die1);
+    // 2 = cluster round-robin (mainline baseline).
+    int32_t sched_aicore_assignment_mode;
 
     // PTO2 integration: kernel_id -> GM function_bin_addr mapping
     // NOTE: Made public for direct access from aicore code
@@ -224,6 +228,8 @@ public:
     void set_aicpu_allowed_cpu_count(int32_t n) { aicpu_allowed_cpu_count = n; }
     int32_t get_aicpu_launch_count() const { return aicpu_launch_count; }
     void set_aicpu_launch_count(int32_t n) { aicpu_launch_count = n; }
+    int32_t get_sched_aicore_assignment_mode() const { return sched_aicore_assignment_mode; }
+    void set_sched_aicore_assignment_mode(int32_t mode) { sched_aicore_assignment_mode = mode; }
     int32_t *get_aicpu_allowed_cpus() { return aicpu_allowed_cpus; }
     size_t aicpu_allowed_cpus_capacity() const { return sizeof(aicpu_allowed_cpus) / sizeof(aicpu_allowed_cpus[0]); }
 

@@ -50,6 +50,7 @@
 #include "aicpu/platform_aicpu_affinity.h"
 #include "aicpu/platform_regs.h"
 #include "common/platform_config.h"
+#include "common/sched_aicore_assignment.h"
 
 // Core type definitions
 #include "common/core_type.h"
@@ -267,20 +268,18 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     // run(). The remaining (nthreads-1) threads re-partition ALL cores among
     // themselves, so every core still gets its register window opened.
     const bool decouple_orch = (nthreads > 1) && !serial_orch_sched_;
+    const bool rtt_die_preflight =
+        runtime->get_sched_aicore_assignment_mode() == kSchedAicoreAssignmentRttDieAware &&
+        (decouple_orch ? (nthreads - 1) : nthreads) == 4;
     const bool is_orchestrator = (tidx == nthreads - 1);
     if (decouple_orch && is_orchestrator) {
         return 0;  // do NOT touch the handshake or hs_arrived_ barrier
     }
     const int32_t hs_nthreads = decouple_orch ? (nthreads - 1) : nthreads;
 
-    // Barrier-free scheduler init (the decoupled default). Each scheduler thread
-    // handshakes exactly the clusters it will dispatch to (blocked-layout
-    // ownership: cluster ci = {ci, N/3+2ci, N/3+2ci+1}, owned by ci % hs_nthreads)
-    // and self-assigns them, then returns straight to run(). With no all-thread
-    // barrier a thread starts dispatching to its own cores as soon as they come
-    // up, independent of peers still handshaking. hs_nthreads == active_sched_threads_
-    // in this branch, so handshake ownership matches assign_own_clusters'.
-    if (decouple_orch) {
+    // Barrier-free scheduler init (the decoupled default). RTT die preflight needs
+    // all cores handshaked and a global ranking barrier, so mode 3 falls through.
+    if (decouple_orch && !rtt_die_preflight) {
         sched_ctx_.handshake_owned_clusters(runtime, tidx, hs_nthreads);
         sched_ctx_.assign_own_clusters(tidx);
 #if SIMPLER_DFX
@@ -328,7 +327,35 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     hs_arrived_.fetch_add(1, std::memory_order_acq_rel);
     if (is_leader) {
         while (hs_arrived_.load(std::memory_order_acquire) < hs_nthreads) {}
+        if (sched_ctx_.handshake_failed()) {
+            init_failed_.store(true, std::memory_order_release);
+            init_done_.store(true, std::memory_order_release);
+            return -1;
+        }
         finished_count_.store(0, std::memory_order_release);
+    } else {
+        while (hs_arrived_.load(std::memory_order_acquire) < hs_nthreads) {}
+        if (sched_ctx_.handshake_failed()) {
+            init_failed_.store(true, std::memory_order_release);
+            return -1;
+        }
+    }
+
+    if (rtt_die_preflight) {
+        sched_ctx_.run_die_rtt_preflight(tidx);
+        sched_ctx_.rtt_probe_arrived().fetch_add(1, std::memory_order_acq_rel);
+        if (is_leader) {
+            while (sched_ctx_.rtt_probe_arrived().load(std::memory_order_acquire) < hs_nthreads) {}
+            sched_ctx_.finalize_rtt_die_assignment(hs_nthreads);
+            sched_ctx_.set_rtt_probe_done(true);
+        } else {
+            while (!sched_ctx_.rtt_probe_done()) {
+                if (init_failed_.load(std::memory_order_acquire)) return -1;
+            }
+        }
+    }
+
+    if (is_leader) {
         if (sched_ctx_.post_handshake_init(runtime) != 0) {
             init_failed_.store(true, std::memory_order_release);
             init_done_.store(true, std::memory_order_release);

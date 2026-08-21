@@ -86,6 +86,14 @@ public:
     // Leader-only profiling-subsystem init (DFX builds); called behind a barrier
     // in the barrier-free path since pmu_aicpu_init needs all physical_core_ids_.
     void post_handshake_profiling_init();
+    // RTT die preflight (mode 3): each scheduler pthread probes die0/die1 AICore
+    // COND latency via physical-core-indexed MMIO, then the leader ranks pthreads.
+    void run_die_rtt_preflight(int32_t tidx);
+    void finalize_rtt_die_assignment(int32_t active_threads);
+    void reset_rtt_die_assignment_state();
+    bool rtt_probe_done() const { return rtt_probe_done_.load(std::memory_order_acquire); }
+    void set_rtt_probe_done(bool done) { rtt_probe_done_.store(done, std::memory_order_release); }
+    std::atomic<int32_t> &rtt_probe_arrived() { return rtt_probe_arrived_; }
     bool handshake_failed() const { return handshake_failed_.load(std::memory_order_acquire); }
     // Leader-only, after the handshake barrier: build worker-id lists, assign
     // cores, init profiling subsystems, read task counts, init payloads.
@@ -191,6 +199,15 @@ private:
     int32_t aiv_worker_ids_[RUNTIME_MAX_WORKER]{};
     int32_t aic_count_{0};
     int32_t aiv_count_{0};
+    int32_t sched_aicore_assignment_mode_{0};
+
+    // RTT die preflight remaps pthread tidx -> logical exec (0..3). Identity by
+    // default; mode 3 reorders so logical 0-1 manage die0 clusters and 2-3 die1.
+    int32_t sched_pthread_to_logical_[MAX_AICPU_THREADS]{};
+    int32_t sched_logical_to_pthread_[MAX_AICPU_THREADS]{};
+    int64_t sched_rtt_die_delta_[MAX_AICPU_THREADS]{};
+    std::atomic<int32_t> rtt_probe_arrived_{0};
+    std::atomic<bool> rtt_probe_done_{false};
 
     // Compact per-core CoreType, packed contiguously (~2 cache lines total) so
     // post_handshake_init's ordered discovery scan reads it instead of taking a
@@ -218,7 +235,7 @@ private:
     // Core management (scheduler_cold_path.cpp)
     // =========================================================================
 
-    // Assign discovered cores (cluster = 1 AIC + 2 AIV) round-robin across scheduler threads.
+    // Assign discovered cores (cluster = 1 AIC + 2 AIV) in contiguous blocks per scheduler thread.
     bool assign_cores_to_threads();
 
     // Emergency shutdown: broadcast exit signal to every handshake'd core and

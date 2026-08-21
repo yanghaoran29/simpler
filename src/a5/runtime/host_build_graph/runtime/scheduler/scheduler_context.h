@@ -123,6 +123,13 @@ public:
     // Leader-only, after the handshake barrier: build worker-id lists, assign
     // cores, init profiling subsystems, read task counts, init payloads.
     int32_t post_handshake_init(Runtime *runtime);
+    void run_die_rtt_preflight(int32_t tidx);
+    void finalize_rtt_die_assignment(int32_t active_threads);
+    void reset_rtt_die_assignment_state();
+    bool rtt_probe_done() const { return rtt_probe_done_.load(std::memory_order_acquire); }
+    void set_rtt_probe_done(bool done) { rtt_probe_done_.store(done, std::memory_order_release); }
+    std::atomic<int32_t> &rtt_probe_arrived() { return rtt_probe_arrived_; }
+    bool handshake_failed() const { return handshake_failed_.load(std::memory_order_acquire); }
 
     // Reset all SchedulerContext-owned state to its post-construction defaults.
     // Called by AicpuExecutor::deinit() during per-run teardown.
@@ -239,6 +246,13 @@ private:
     int32_t aiv_worker_ids_[RUNTIME_MAX_WORKER]{};
     int32_t aic_count_{0};
     int32_t aiv_count_{0};
+    int32_t sched_aicore_assignment_mode_{0};
+
+    int32_t sched_pthread_to_logical_[MAX_AICPU_THREADS]{};
+    int32_t sched_logical_to_pthread_[MAX_AICPU_THREADS]{};
+    int64_t sched_rtt_die_delta_[MAX_AICPU_THREADS]{};
+    std::atomic<int32_t> rtt_probe_arrived_{0};
+    std::atomic<bool> rtt_probe_done_{false};
 
     // Compact per-core CoreType, packed contiguously (~2 cache lines total) so
     // post_handshake_init's ordered discovery scan reads it instead of taking a
