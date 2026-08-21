@@ -37,6 +37,7 @@
 #include "aicpu/scope_stats_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
 #include "common/chip_swimlane_profiling.h"
+#include "common/sched_aicore_assignment.h"
 #include "common/unified_log.h"
 
 // Register-based communication
@@ -193,9 +194,43 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
 
     // Barrier: leader waits for every slice to finish, then completes init.
     hs_arrived_.fetch_add(1, std::memory_order_acq_rel);
+    const int32_t sched_thread_count = nthreads > 1 ? nthreads - 1 : nthreads;
+    const bool rtt_die_preflight =
+        runtime->get_sched_aicore_assignment_mode() == kSchedAicoreAssignmentRttDieAware &&
+        sched_thread_count == 4;
     if (is_leader) {
         while (hs_arrived_.load(std::memory_order_acquire) < nthreads) {}
+        if (sched_ctx_.handshake_failed()) {
+            init_failed_.store(true, std::memory_order_release);
+            init_done_.store(true, std::memory_order_release);
+            return -1;
+        }
         completion_gate_.reset();
+    } else {
+        while (hs_arrived_.load(std::memory_order_acquire) < nthreads) {}
+        if (sched_ctx_.handshake_failed()) {
+            init_failed_.store(true, std::memory_order_release);
+            return -1;
+        }
+    }
+
+    if (rtt_die_preflight && tidx < sched_thread_count) {
+        sched_ctx_.run_die_rtt_preflight(tidx);
+        sched_ctx_.rtt_probe_arrived().fetch_add(1, std::memory_order_acq_rel);
+    }
+    if (rtt_die_preflight) {
+        if (is_leader) {
+            while (sched_ctx_.rtt_probe_arrived().load(std::memory_order_acquire) < sched_thread_count) {}
+            sched_ctx_.finalize_rtt_die_assignment(sched_thread_count);
+            sched_ctx_.set_rtt_probe_done(true);
+        } else {
+            while (!sched_ctx_.rtt_probe_done()) {
+                if (init_failed_.load(std::memory_order_acquire)) return -1;
+            }
+        }
+    }
+
+    if (is_leader) {
         if (sched_ctx_.post_handshake_init(runtime) != 0) {
             init_failed_.store(true, std::memory_order_release);
             init_done_.store(true, std::memory_order_release);

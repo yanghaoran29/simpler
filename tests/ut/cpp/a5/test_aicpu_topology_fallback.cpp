@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -34,15 +35,19 @@ using pto::a5::AicpuScenarioType;
 using pto::a5::AicpuSelectionPolicy;
 using pto::a5::AicpuTopology;
 using pto::a5::AicpuTopologySource;
+using pto::a5::SchedAicoreAssignmentMode;
+using pto::a5::SchedulerAicpuDieLayout;
 using pto::a5::build_aicpu_launch_plan;
 using pto::a5::classify_aicpu_scenario;
 using pto::a5::compute_allowed_cpus;
+using pto::a5::compute_scheduler_aicore_die_map;
 using pto::a5::compute_scenario_allowed_cpus;
 using pto::a5::compute_unknown_allowed_cpus;
 using pto::a5::derive_topology_from_occupy;
 using pto::a5::enumerate_cpus_from_occupy;
 using pto::a5::format_aicpu_topology_json;
 using pto::a5::load_cpu_topo_from_json;
+using pto::a5::assign_scheduler_exec_order_by_die;
 
 std::vector<AicpuLogicalCpu> make_physical_range(int32_t first_phy, int32_t last_phy) {
     std::vector<AicpuLogicalCpu> cpus;
@@ -527,6 +532,120 @@ TEST(A5AicpuTopologySelection, KnownScenarioRejectsUnsupportedActiveCount) {
     EXPECT_TRUE(allowed.empty());
     EXPECT_FALSE(compute_scenario_allowed_cpus(topology, 6, allowed));
     EXPECT_TRUE(allowed.empty());
+}
+
+TEST(A5SchedAicoreDieMap, AllOnOneDieUsesFirstTwoForDie0) {
+    AicpuTopology topology;
+    topology.source = AicpuTopologySource::kDriver;
+    topology.os_schedulable_cpus = primaries(make_physical_range(4, 7));
+
+    std::vector<int32_t> sched_cpu_ids = {8, 10, 12, 14};
+    std::array<int32_t, 4> aicore_die_map{};
+    SchedulerAicpuDieLayout layout = SchedulerAicpuDieLayout::kUnsupported;
+    ASSERT_TRUE(compute_scheduler_aicore_die_map(topology, sched_cpu_ids, aicore_die_map, layout));
+    EXPECT_EQ(layout, SchedulerAicpuDieLayout::kAllOnOneDie);
+    EXPECT_EQ(aicore_die_map, (std::array<int32_t, 4>{0, 0, 1, 1}));
+}
+
+TEST(A5SchedAicoreDieMap, Split22UsesLocalAicpuDieAffinity) {
+    AicpuTopology topology;
+    topology.source = AicpuTopologySource::kDriver;
+    topology.os_schedulable_cpus = primaries(make_physical_range(0, 7));
+
+    std::vector<int32_t> sched_cpu_ids = {0, 2, 8, 10};
+    std::array<int32_t, 4> aicore_die_map{};
+    SchedulerAicpuDieLayout layout = SchedulerAicpuDieLayout::kUnsupported;
+    ASSERT_TRUE(compute_scheduler_aicore_die_map(topology, sched_cpu_ids, aicore_die_map, layout));
+    EXPECT_EQ(layout, SchedulerAicpuDieLayout::kSplit2_2);
+    EXPECT_EQ(aicore_die_map, (std::array<int32_t, 4>{0, 0, 1, 1}));
+}
+
+TEST(A5SchedAicoreDieMap, Split13UsesDie0MinAndDie1MaxCrossPicker) {
+    AicpuTopology topology;
+    topology.source = AicpuTopologySource::kDriver;
+    topology.os_schedulable_cpus = make_physical_range(0, 5);
+
+    // 3 schedulers on die0, 1 on die1.
+    std::vector<int32_t> sched_cpu_ids = {4, 0, 2, 8};
+    std::array<int32_t, 4> aicore_die_map{};
+    SchedulerAicpuDieLayout layout = SchedulerAicpuDieLayout::kUnsupported;
+    ASSERT_TRUE(compute_scheduler_aicore_die_map(topology, sched_cpu_ids, aicore_die_map, layout));
+    EXPECT_EQ(layout, SchedulerAicpuDieLayout::kSplit1_3);
+    EXPECT_EQ(aicore_die_map, (std::array<int32_t, 4>{0, 1, 0, 1}));
+
+    std::vector<int32_t> allowed = {4, 0, 2, 8, 6};
+    SchedulerAicpuDieLayout assign_layout = SchedulerAicpuDieLayout::kUnsupported;
+    ASSERT_TRUE(assign_scheduler_exec_order_by_die(topology, {4, 0, 2, 8}, allowed, &assign_layout));
+    EXPECT_EQ(assign_layout, SchedulerAicpuDieLayout::kSplit1_3);
+    EXPECT_EQ(allowed, (std::vector<int32_t>{2, 4, 0, 8, 6}));
+
+    // Mirror layout with minority on die1: cross picker on die0 uses min cpu_id.
+    sched_cpu_ids = {0, 2, 4, 9};
+    ASSERT_TRUE(compute_scheduler_aicore_die_map(topology, sched_cpu_ids, aicore_die_map, layout));
+    EXPECT_EQ(aicore_die_map, (std::array<int32_t, 4>{1, 0, 0, 1}));
+}
+
+TEST(A5SchedAicoreDieMap, AllOnOneDiePreservesSelectionOrderForExecIdx) {
+    AicpuTopology topology;
+    topology.source = AicpuTopologySource::kDriver;
+    topology.os_schedulable_cpus = primaries(make_physical_range(4, 7));
+
+    const std::vector<int32_t> selected = {8, 10, 12, 14};
+    std::vector<int32_t> allowed = {8, 10, 12, 14, 6};
+    SchedulerAicpuDieLayout layout = SchedulerAicpuDieLayout::kUnsupported;
+    ASSERT_TRUE(assign_scheduler_exec_order_by_die(topology, selected, allowed, &layout));
+    EXPECT_EQ(layout, SchedulerAicpuDieLayout::kAllOnOneDie);
+    EXPECT_EQ(allowed, (std::vector<int32_t>{8, 10, 12, 14, 6}));
+}
+
+TEST(A5AicpuLaunchPlan, EnablesDieAwareRenumberingForFiveThreadFg) {
+    const auto all = make_physical_range(0, 7);
+    AicpuTopology topology;
+    topology.source = AicpuTopologySource::kDriver;
+    topology.scenario_type = AicpuScenarioType::kFg;
+    topology.os_schedulable_cpus = primaries(all);
+    std::reverse(topology.os_schedulable_cpus.begin(), topology.os_schedulable_cpus.end());
+    uint64_t occupy = 0;
+    for (const auto &cpu : topology.os_schedulable_cpus)
+        occupy |= 1ULL << cpu.cpu_id;
+    set_device_occupy(topology, occupy);
+
+    AicpuLaunchPlan plan;
+    std::string error;
+    ASSERT_TRUE(build_aicpu_launch_plan(topology, 0, plan, error)) << error;
+    EXPECT_EQ(plan.sched_aicore_assignment_mode, SchedAicoreAssignmentMode::kDieAware);
+    EXPECT_EQ(plan.allowed_cpus, (std::vector<int32_t>{0, 12, 8, 10, 14}));
+}
+
+TEST(A5AicpuLaunchPlan, OccupyOnlyStaysSequentialWithoutRenumbering) {
+    AicpuTopology topology;
+    topology.source = AicpuTopologySource::kOccupyFallback;
+    topology.scenario_type = AicpuScenarioType::kUnknown;
+    ASSERT_TRUE(enumerate_cpus_from_occupy(0x3eU, topology.os_schedulable_cpus));
+    set_device_occupy(topology, 0x3eU);
+    std::reverse(topology.os_schedulable_cpus.begin(), topology.os_schedulable_cpus.end());
+
+    AicpuLaunchPlan plan;
+    std::string error;
+    ASSERT_TRUE(build_aicpu_launch_plan(topology, 0, plan, error)) << error;
+    EXPECT_EQ(plan.sched_aicore_assignment_mode, SchedAicoreAssignmentMode::kSequential);
+    EXPECT_EQ(
+        std::vector<int32_t>(plan.allowed_cpus.begin(), plan.allowed_cpus.end() - 1), (std::vector<int32_t>{1, 2, 3, 4})
+    );
+}
+
+TEST(A5AicpuLaunchPlan, SkipsDieAwareWhenEffectiveCountIsNotFive) {
+    AicpuTopology topology;
+    topology.source = AicpuTopologySource::kDriver;
+    topology.scenario_type = AicpuScenarioType::kUnknown;
+    topology.os_schedulable_cpus = {{1, 0, 0, 0, 0}, {3, 2, 0, 1, 0}, {5, 4, 0, 2, 1}, {7, 6, 0, 3, 1}};
+    set_device_occupy(topology, (1ULL << 1) | (1ULL << 3) | (1ULL << 5) | (1ULL << 7));
+
+    AicpuLaunchPlan plan;
+    std::string error;
+    ASSERT_TRUE(build_aicpu_launch_plan(topology, 0, plan, error)) << error;
+    EXPECT_EQ(plan.effective_active_count, 4);
+    EXPECT_EQ(plan.sched_aicore_assignment_mode, SchedAicoreAssignmentMode::kSequential);
 }
 
 }  // namespace

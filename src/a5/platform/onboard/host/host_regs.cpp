@@ -26,8 +26,8 @@
  * Retrieve AICore register base addresses via HAL API
  *
  * DAV_3510 uses halResMap (per-core mapping) for resource management.
- * Each AICore has 3 sub-cores (1 AIC + 2 AIV), and the chip has 2 dies with
- * 18 AICores per die.
+ * Each AICore has 3 sub-cores (1 AIC + 2 AIV). AICore die follows the
+ * half-split policy in platform_config.h (first N/2 clusters -> die0).
  */
 static int get_aicore_reg_info(std::vector<int64_t> &regs, int64_t device_id) {
     // halResMap: Maps individual AICore resources (DAV_3510-specific)
@@ -42,10 +42,14 @@ static int get_aicore_reg_info(std::vector<int64_t> &regs, int64_t device_id) {
 
     const int64_t phys_device_id = pto::acl_to_hal_device_id(device_id);
 
-    // Calculate layout parameters from platform config
-    constexpr uint32_t SUB_CORE_PER_DIE = PLATFORM_AICORE_PER_DIE * PLATFORM_CORES_PER_BLOCKDIM;
-    constexpr uint32_t AIV_BASE_OFFSET = PLATFORM_AICORE_PER_DIE;
-    constexpr size_t MAX_INDEX = DAV_3510::PLATFORM_MAX_PHYSICAL_CORES * PLATFORM_CORES_PER_BLOCKDIM;
+    // Calculate die-based indices from the half-split AICore die policy
+    // (cluster ids [0, N/2) -> die0, [N/2, N) -> die1).
+    constexpr uint32_t kClusterCount = DAV_3510::PLATFORM_MAX_PHYSICAL_CORES;
+    constexpr uint32_t kClustersPerDie = kClusterCount / 2;
+    constexpr uint32_t SUB_CORE_PER_DIE = kClustersPerDie * PLATFORM_CORES_PER_BLOCKDIM;
+    constexpr uint32_t AIV_BASE_OFFSET = kClustersPerDie;
+
+    constexpr size_t MAX_INDEX = kClusterCount * PLATFORM_CORES_PER_BLOCKDIM;
 
     struct res_map_info map_info;
     map_info.target_proc_type = PROCESS_CP1;
@@ -68,12 +72,12 @@ static int get_aicore_reg_info(std::vector<int64_t> &regs, int64_t device_id) {
             return ret;
         }
 
-        // Calculate die-based indices
-        // DAV_3510 has 2 dies, each with 18 AICores
-        // Within each die: [AIC0...AIC17][AIV0_0, AIV0_1, AIV1_0, AIV1_1, ...]
-        uint32_t die_idx = core_idx / PLATFORM_AICORE_PER_DIE;
-        uint32_t local_idx = core_idx % PLATFORM_AICORE_PER_DIE;
-        uint32_t die_base = die_idx * SUB_CORE_PER_DIE;
+        // Half-split die map: [0, kClustersPerDie) -> die0, [kClustersPerDie, kClusterCount) -> die1
+        const uint32_t die_idx = static_cast<uint32_t>(
+            aicore_cluster_die(static_cast<int32_t>(core_idx), static_cast<int32_t>(kClusterCount))
+        );
+        const uint32_t local_idx = die_idx == 0 ? core_idx : (core_idx - kClustersPerDie);
+        const uint32_t die_base = die_idx * SUB_CORE_PER_DIE;
 
         uint32_t aicore_index = die_base + local_idx;
         uint32_t aiv_first_index = die_base + AIV_BASE_OFFSET + local_idx * 2;

@@ -22,10 +22,32 @@
 #include "common/memory_barrier.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
+#include "common/sched_aicore_assignment.h"
 #include "pto_runtime2.h"
 #include "pto_shared_memory.h"
 #include "runtime.h"
 #include "spin_hint.h"
+
+namespace {
+
+bool die_aware_core_assignment(int32_t mode, int32_t active_threads) {
+    return (mode == kSchedAicoreAssignmentDieAware || mode == kSchedAicoreAssignmentRttDieAware) &&
+           active_threads == 4;
+}
+
+int32_t pthread_for_cluster(
+    int32_t ci, int32_t cluster_count, int32_t active_threads, int32_t assignment_mode,
+    const int32_t *logical_to_pthread
+) {
+    const int32_t logical =
+        logical_sched_for_cluster(ci, cluster_count, active_threads, assignment_mode);
+    if (sched_assignment_uses_rtt_die_preflight(assignment_mode, active_threads)) {
+        return logical_to_pthread[logical];
+    }
+    return logical;
+}
+
+}  // namespace
 
 // =============================================================================
 // Cold-path helpers for the main dispatch loop (noinline to reduce hot-loop icache)
@@ -705,6 +727,91 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
 }
 
 // =============================================================================
+// RTT die preflight (mode 3): measure per-scheduler die0 vs die1 MMIO latency.
+// =============================================================================
+namespace {
+constexpr int32_t kRttProbeSamplesPerCore = 32;
+}  // namespace
+
+void SchedulerContext::reset_rtt_die_assignment_state() {
+    for (int32_t i = 0; i < MAX_AICPU_THREADS; ++i) {
+        sched_pthread_to_logical_[i] = i;
+        sched_logical_to_pthread_[i] = i;
+        sched_rtt_die_delta_[i] = 0;
+    }
+    rtt_probe_arrived_.store(0, std::memory_order_relaxed);
+    rtt_probe_done_.store(false, std::memory_order_relaxed);
+}
+
+void SchedulerContext::run_die_rtt_preflight(int32_t tidx) {
+    const int32_t active_threads = active_sched_threads_ > 0 ? active_sched_threads_ :
+                                     (aicpu_thread_num_ > 1 ? aicpu_thread_num_ - 1 : aicpu_thread_num_);
+    if (!sched_assignment_uses_rtt_die_preflight(sched_aicore_assignment_mode_, active_threads)) {
+        return;
+    }
+    const int32_t cluster_count = cores_total_num_ / PLATFORM_CORES_PER_BLOCKDIM;
+    uint64_t sum_die0 = 0;
+    uint64_t sum_die1 = 0;
+    int32_t count_die0 = 0;
+    int32_t count_die1 = 0;
+
+    for (int32_t ci = 0; ci < cluster_count; ++ci) {
+        const int32_t aic_wid = ci;
+        volatile uint32_t *cond = core_exec_states_[aic_wid].cond_ptr;
+        if (cond == nullptr) {
+            continue;
+        }
+#if SIMPLER_DFX
+        const uint32_t physical_core_id = physical_core_ids_[aic_wid];
+#else
+        const uint32_t physical_core_id = core_exec_states_[aic_wid].physical_core_id;
+#endif
+        (void)physical_core_id;
+
+        const uint64_t t0 = device_time_now_ticks();
+        volatile uint32_t sink = 0;
+        for (int32_t s = 0; s < kRttProbeSamplesPerCore; ++s) {
+            sink = *cond;
+        }
+        const uint64_t t1 = device_time_now_ticks();
+        (void)sink;
+        const uint64_t avg_ticks = (t1 - t0) / static_cast<uint64_t>(kRttProbeSamplesPerCore);
+        if (aicore_cluster_die(ci, cluster_count) == 0) {
+            sum_die0 += avg_ticks;
+            ++count_die0;
+        } else {
+            sum_die1 += avg_ticks;
+            ++count_die1;
+        }
+    }
+
+    const uint64_t avg_die0 = count_die0 > 0 ? sum_die0 / static_cast<uint64_t>(count_die0) : 0;
+    const uint64_t avg_die1 = count_die1 > 0 ? sum_die1 / static_cast<uint64_t>(count_die1) : 0;
+    sched_rtt_die_delta_[tidx] = static_cast<int64_t>(avg_die0) - static_cast<int64_t>(avg_die1);
+    LOG_INFO(
+        "RTT preflight thread %d: avg_die0=%" PRIu64 " avg_die1=%" PRIu64 " delta=%" PRId64 " ticks/core "
+        "(physical COND, %d samples/cluster)",
+        tidx, avg_die0, avg_die1, sched_rtt_die_delta_[tidx], kRttProbeSamplesPerCore
+    );
+}
+
+void SchedulerContext::finalize_rtt_die_assignment(int32_t active_threads) {
+    if (!sched_assignment_uses_rtt_die_preflight(sched_aicore_assignment_mode_, active_threads)) {
+        return;
+    }
+    assign_rtt_die_logical_order(
+        sched_rtt_die_delta_, active_threads, sched_pthread_to_logical_, sched_logical_to_pthread_
+    );
+    for (int32_t logical = 0; logical < active_threads; ++logical) {
+        const int32_t pthread = sched_logical_to_pthread_[logical];
+        LOG_INFO(
+            "RTT die map: logical exec %d -> pthread %d (delta=%" PRId64 " ticks, manages %s AICore half)",
+            logical, pthread, sched_rtt_die_delta_[pthread], logical < 2 ? "die0" : "die1"
+        );
+    }
+}
+
+// =============================================================================
 // Assign discovered cores to scheduler threads (cluster-aligned round-robin).
 // =============================================================================
 bool SchedulerContext::assign_cores_to_threads() {
@@ -736,18 +843,39 @@ bool SchedulerContext::assign_cores_to_threads() {
         return false;
     }
 
-    LOG_INFO(
-        "Assigning cores (round-robin): %d clusters across %d sched threads (%d AIC, %d AIV)", cluster_count,
-        active_sched_threads_, aic_count_, aiv_count_
-    );
+    if (sched_aicore_assignment_mode_ == 2) {
+        LOG_INFO(
+            "Assigning cores (round-robin baseline): %d clusters across %d sched threads (%d AIC, %d AIV)",
+            cluster_count, active_sched_threads_, aic_count_, aiv_count_
+        );
+    } else if (sched_aicore_assignment_mode_ == kSchedAicoreAssignmentRttDieAware) {
+        LOG_INFO(
+            "Assigning cores (contiguous, RTT die preflight): %d clusters across %d sched threads — "
+            "logical sched 0-1 die0 AICore half, 2-3 die1 AICore half (%d AIC, %d AIV)",
+            cluster_count, active_sched_threads_, aic_count_, aiv_count_
+        );
+    } else if (die_aware_core_assignment(sched_aicore_assignment_mode_, active_sched_threads_)) {
+        LOG_INFO(
+            "Assigning cores (contiguous, die-aware host order): %d clusters across %d sched threads — "
+            "sched 0-1 die0 AICore half, 2-3 die1 AICore half (%d AIC, %d AIV)",
+            cluster_count, active_sched_threads_, aic_count_, aiv_count_
+        );
+    } else {
+        LOG_INFO(
+            "Assigning cores (contiguous): %d clusters across %d sched threads (%d AIC, %d AIV)", cluster_count,
+            active_sched_threads_, aic_count_, aiv_count_
+        );
+    }
 
     // running_reg_task_id / pending_reg_task_id for every serviced core are reset
     // in handshake_partition's sweep.
 
-    // Count clusters per thread first (round-robin may distribute unevenly)
+    // Count clusters per thread first (contiguous blocks may distribute unevenly)
     int32_t clusters_per_thread[MAX_AICPU_THREADS] = {};
     for (int32_t ci = 0; ci < cluster_count; ci++) {
-        clusters_per_thread[ci % active_sched_threads_]++;
+        clusters_per_thread[pthread_for_cluster(
+            ci, cluster_count, active_sched_threads_, sched_aicore_assignment_mode_, sched_logical_to_pthread_
+        )]++;
     }
     for (int32_t i = 0; i < active_sched_threads_; i++) {
         core_trackers_[i].init(clusters_per_thread[i]);
@@ -756,7 +884,9 @@ bool SchedulerContext::assign_cores_to_threads() {
     int32_t cluster_idx_per_thread[MAX_AICPU_THREADS] = {};
 
     for (int32_t ci = 0; ci < cluster_count; ci++) {
-        int32_t t = ci % active_sched_threads_;
+        int32_t t = pthread_for_cluster(
+            ci, cluster_count, active_sched_threads_, sched_aicore_assignment_mode_, sched_logical_to_pthread_
+        );
 
         int32_t aic_wid = aic_worker_ids_[ci];
         int32_t aiv0_wid = aiv_worker_ids_[2 * ci];
@@ -815,6 +945,8 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
 
     // Wire thread configuration that handshake/assign need to read.
     aicpu_thread_num_ = aicpu_thread_num;
+    sched_aicore_assignment_mode_ = runtime->get_sched_aicore_assignment_mode();
+    reset_rtt_die_assignment_state();
     regs_ = regs_base;
 
 #if SIMPLER_DFX

@@ -632,14 +632,25 @@ def print_rounds_table(buckets, stream=sys.stdout):
     summary += f"  ({n} rounds)"
     print(summary, file=stream)
 
-    trim = 10
+    trim = n // 4 if n >= 20 else 10
     if n > 2 * trim:
         tc = n - 2 * trim
-        host_trim = sum(host_vals[trim:-trim]) / tc
-        msg = f"  Trimmed Avg Host: {host_trim:.1f} us"
-        if 1 in nz and len(nz[1]) > 2 * trim:
-            dev = nz[1]
-            msg += f"  |  Trimmed Avg Device: {sum(dev[trim:-trim]) / (len(dev) - 2 * trim):.1f} us"
+
+        def _trimmed_avg(idx):
+            if idx == 0:
+                vals = host_vals
+            elif idx not in nz:
+                return None
+            vals = nz[idx]
+            if len(vals) <= 2 * trim:
+                return None
+            return sum(vals[trim:-trim]) / (len(vals) - 2 * trim)
+
+        msg = f"  Trimmed Avg Host: {_trimmed_avg(0):.1f} us"
+        for idx, label in ((1, "Device"), (2, "Effective"), (3, "Orch"), (4, "Sched")):
+            avg = _trimmed_avg(idx)
+            if avg is not None:
+                msg += f"  |  Trimmed Avg {label}: {avg:.1f} us"
         msg += f"  (dropped {trim} low + {trim} high, {tc} rounds used)"
         print(msg, file=stream)
 

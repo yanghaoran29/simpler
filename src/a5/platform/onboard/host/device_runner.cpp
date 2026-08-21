@@ -332,6 +332,17 @@ int DeviceRunner::prepare_execution(
                 allowed_cpus[i] = allowed[i];
             runtime.set_aicpu_allowed_cpu_count(static_cast<int32_t>(allowed.size()));
             runtime.set_aicpu_launch_count(launch_plan.launch_count);
+            int32_t sched_assignment_mode = pto::a5::kSchedAicoreAssignmentSequential;
+            if (launch_plan.sched_aicore_assignment_mode == pto::a5::SchedAicoreAssignmentMode::kDieAware) {
+                sched_assignment_mode = pto::a5::kSchedAicoreAssignmentDieAware;
+            } else if (launch_plan.sched_aicore_assignment_mode == pto::a5::SchedAicoreAssignmentMode::kRttDieAware) {
+                sched_assignment_mode = pto::a5::kSchedAicoreAssignmentRttDieAware;
+            }
+            if (const char *assignment_override = std::getenv("SIMPLER_SCHED_AICORE_ASSIGNMENT_OVERRIDE");
+                assignment_override != nullptr && assignment_override[0] != '\0') {
+                sched_assignment_mode = std::atoi(assignment_override);
+            }
+            runtime.set_sched_aicore_assignment_mode(sched_assignment_mode);
             std::string dump;
             for (size_t i = 0; i < allowed.size(); ++i) {
                 if (i) dump += ", ";

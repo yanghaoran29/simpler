@@ -703,11 +703,25 @@ constexpr uint32_t PLATFORM_SUB_CORES_PER_AICORE = PLATFORM_CORES_PER_BLOCKDIM;
 
 /**
  * DAV 3510 chip architecture
- * - 2 dies, each with 18 AICores
+ * - 2 dies, each with 18 AICores on a full chip
  * - Each AICore has 3 sub-cores (1 AIC + 2 AIV)
+ *
+ * Driver APIs expose no per-AICore die map. Runtime policy: treat cluster ids
+ * [0, cluster_count/2) as die0 and [cluster_count/2, cluster_count) as die1.
+ * For cluster_count == 36 this matches 18 clusters per die.
  */
 constexpr uint32_t PLATFORM_NUM_DIES = 2;
 constexpr uint32_t PLATFORM_AICORE_PER_DIE = 18;
+
+inline int32_t aicore_cluster_die(int32_t cluster_id, int32_t cluster_count) {
+    if (cluster_count <= 0) return 0;
+    return cluster_id < (cluster_count / 2) ? 0 : 1;
+}
+
+inline uint32_t aicore_clusters_per_die(int32_t cluster_count) {
+    if (cluster_count <= 0) return 0;
+    return static_cast<uint32_t>(cluster_count / 2);
+}
 
 /**
  * Maximum physical AICore count for DAV 3510 chip

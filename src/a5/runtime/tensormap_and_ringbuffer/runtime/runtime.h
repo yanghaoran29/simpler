@@ -191,6 +191,10 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // popcount(OCCUPY) via the topology probe. See the matching field in
     // src/a5/runtime/host_build_graph/runtime/runtime.h for rationale.
     int32_t aicpu_launch_count;
+    // 0 = contiguous blocks + FG host order; 1 = contiguous + die-aware host order
+    //    (AICore die: first half of clusters -> die0, second half -> die1);
+    // 2 = cluster round-robin (mainline baseline).
+    int32_t sched_aicore_assignment_mode;
 
     // PTO2 integration: kernel_id -> GM function_bin_addr mapping
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
@@ -260,6 +264,8 @@ public:
     void set_aicpu_allowed_cpu_count(int32_t n) { dev.aicpu_allowed_cpu_count = n; }
     int32_t get_aicpu_launch_count() const { return dev.aicpu_launch_count; }
     void set_aicpu_launch_count(int32_t n) { dev.aicpu_launch_count = n; }
+    int32_t get_sched_aicore_assignment_mode() const { return dev.sched_aicore_assignment_mode; }
+    void set_sched_aicore_assignment_mode(int32_t mode) { dev.sched_aicore_assignment_mode = mode; }
     int32_t *get_aicpu_allowed_cpus() { return dev.aicpu_allowed_cpus; }
     size_t aicpu_allowed_cpus_capacity() const {
         return sizeof(dev.aicpu_allowed_cpus) / sizeof(dev.aicpu_allowed_cpus[0]);
