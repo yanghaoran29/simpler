@@ -890,9 +890,9 @@ void SchedulerContext::handshake_owned_clusters(Runtime *runtime, int32_t tidx, 
 }
 
 // =============================================================================
-// Per-thread self-assignment (barrier-free init). Thread tidx owns the clusters
-// ci with ci % active_sched_threads_ == tidx (same round-robin as
-// assign_cores_to_threads), and the blocked layout gives their worker ids
+// Per-thread self-assignment (barrier-free init). Thread tidx owns one
+// contiguous cluster range (same partition as assign_cores_to_threads), and
+// the blocked layout gives their worker ids
 // directly, so a thread populates its own CoreTracker + per-core sub_block_id
 // right after handshaking its own clusters, with no all-thread barrier.
 // =============================================================================
@@ -901,9 +901,9 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
     const int32_t active = active_sched_threads_;
 
     CoreTracker &tracker = core_trackers_[tidx];
-    int32_t own_n = 0;
-    for (int32_t ci = tidx; ci < aic_n; ci += active)
-        own_n++;
+    const int32_t begin = (aic_n * tidx) / active;
+    const int32_t end = (aic_n * (tidx + 1)) / active;
+    const int32_t own_n = end - begin;
     // Mirrors the check assign_cores_to_threads() makes on the serial path. A
     // thread owning more clusters than CoreTracker can hold used to write past
     // core_id_map_ into the next tracker, which is the orchestrator's on the
@@ -920,7 +920,7 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
     tracker.init(own_n);
 
     int32_t local = 0;
-    for (int32_t ci = tidx; ci < aic_n; ci += active) {
+    for (int32_t ci = begin; ci < end; ci++) {
         tracker.set_cluster(local++, ci, aic_n + 2 * ci, aic_n + 2 * ci + 1);
     }
 
@@ -985,10 +985,10 @@ void SchedulerContext::post_handshake_profiling_init() {
 }
 
 // =============================================================================
-// Assign discovered cores to scheduler threads (cluster-aligned round-robin).
+// Assign discovered cores to scheduler threads (cluster-aligned contiguous ranges).
 // =============================================================================
 bool SchedulerContext::assign_cores_to_threads() {
-    // Cluster-aligned round-robin assignment: cluster ci -> sched thread ci % active_sched_threads_.
+    // Cluster-aligned contiguous assignment.
     // Each cluster = 1 AIC + 2 adjacent AIV; the triple is always kept together.
     active_sched_threads_ = (sched_thread_num_ > 0) ? sched_thread_num_ : aicpu_thread_num_;
     int32_t cluster_count = aic_count_;
@@ -1003,17 +1003,18 @@ bool SchedulerContext::assign_cores_to_threads() {
     }
 
     LOG_INFO(
-        "Assigning cores (round-robin): %d clusters across %d sched threads (%d AIC, %d AIV)", cluster_count,
+        "Assigning cores (contiguous): %d clusters across %d sched threads (%d AIC, %d AIV)", cluster_count,
         active_sched_threads_, aic_count_, aiv_count_
     );
 
     // running_reg_task_id / pending_reg_task_id for every serviced core are reset
     // in handshake_partition's sweep.
 
-    // Count clusters per thread first (round-robin may distribute unevenly)
+    // Count clusters per thread first.
     int32_t clusters_per_thread[MAX_AICPU_THREADS] = {};
-    for (int32_t ci = 0; ci < cluster_count; ci++) {
-        clusters_per_thread[ci % active_sched_threads_]++;
+    for (int32_t t = 0; t < active_sched_threads_; t++) {
+        clusters_per_thread[t] =
+            (cluster_count * (t + 1)) / active_sched_threads_ - (cluster_count * t) / active_sched_threads_;
     }
     for (int32_t i = 0; i < active_sched_threads_; i++) {
         core_trackers_[i].init(clusters_per_thread[i]);
@@ -1022,7 +1023,7 @@ bool SchedulerContext::assign_cores_to_threads() {
     int32_t cluster_idx_per_thread[MAX_AICPU_THREADS] = {};
 
     for (int32_t ci = 0; ci < cluster_count; ci++) {
-        int32_t t = ci % active_sched_threads_;
+        int32_t t = ((ci + 1) * active_sched_threads_ - 1) / cluster_count;
 
         int32_t aic_wid = aic_worker_ids_[ci];
         int32_t aiv0_wid = aiv_worker_ids_[2 * ci];
