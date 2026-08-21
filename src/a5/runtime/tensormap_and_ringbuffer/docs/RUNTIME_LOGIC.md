@@ -545,7 +545,12 @@ slices.
 | 2 | Scheduler | 12 AIC + 24 AIV |
 | 3 | Orchestrator | none |
 
-Core assignment: AICs and AIVs are divided equally among the 3 scheduler threads.
+Core assignment uses balanced contiguous cluster ranges. For `N` detected
+clusters and `S` scheduler threads, thread `t` owns
+`[floor(N*t/S), floor(N*(t+1)/S))`; each AIC remains grouped with its two AIVs.
+See [CLUSTER_ASSIGNMENT_LOCALITY.md](CLUSTER_ASSIGNMENT_LOCALITY.md) for the A5
+communication probe and `decode_attention_csa` measurements that motivated
+this policy.
 
 ### 8.2 Scheduler Main Loop
 
