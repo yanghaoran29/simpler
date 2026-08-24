@@ -23,6 +23,7 @@ python examples/my_example/test_my_example.py -p a2a3sim   # standalone, no pyte
 | `--manual` | Manual-test handling for scene cases and standalone pytest tests: `exclude` (default), `include`, `only` |
 | `--rounds` | Run each case N times. Default `1`; use this so first-run effects do not dominate a measurement |
 | `--skip-golden` | Skip golden comparison — benchmark mode |
+| `--skip-large-arg-io [MIN_BYTES]` | Benchmark only: skip H2D and D2H for each tensor at least `MIN_BYTES` large. Bare flag = 256 MiB; default off. Device storage uses a retained packed allocation; smaller control-tensor transfers remain. Requires `--skip-golden`, because skipped payloads and outputs are not valid for correctness checks |
 | `--require-pto-isa` | Fail the session immediately if PTO-ISA cannot be resolved, instead of deferring to the per-test lazy path |
 | `--sanitizer` | Run against a sanitizer build; see [Compiler Sanitizers](../../sanitizers.md) |
 

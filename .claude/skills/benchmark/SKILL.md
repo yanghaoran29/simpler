@@ -23,10 +23,22 @@ Optional benchmark arguments forwarded to `tools/benchmark_rounds.sh`:
 /benchmark -d 4 -n 50
 /benchmark -d 4 -d 6
 /benchmark --serial-orch-sched
+/benchmark --skip-large-arg-io
+/benchmark --skip-large-arg-io 536870912
 ```
 
 Extra arguments (`-n`, `-r`, `--serial-orch-sched`, etc.) are forwarded to
 `tools/benchmark_rounds.sh`.
+
+`--skip-large-arg-io [MIN_BYTES]` excludes large argument transfers from the
+measurement. A bare flag uses 256 MiB. The runtime skips H2D staging and D2H
+copy-back for every individual tensor at or above the threshold; small control
+tensors still transfer. Device storage is packed into a retained
+per-pipeline-slot allocation so repeated rounds avoid per-tensor
+allocation/free overhead. The wrapper already supplies `--skip-golden`, which
+is mandatory because skipped payloads are uninitialized and outputs are
+timing-only. Record the TIMING log's exact skipped H2D/D2H byte totals in the
+benchmark notes.
 
 ### Device arguments (`-d`)
 

@@ -119,7 +119,7 @@ while [[ $# -gt 0 ]]; do
 benchmark_rounds.sh — run all examples and report per-round timing from [STRACE] markers
 
 Usage:
-  ./tools/benchmark_rounds.sh [-p <platform>] [-d <device>] [-n <rounds>] [-r <runtime>] [-v] [--serial-orch-sched]
+  ./tools/benchmark_rounds.sh [-p <platform>] [-d <device>] [-n <rounds>] [-r <runtime>] [-v] [--serial-orch-sched] [--skip-large-arg-io [MIN_BYTES]]
 
 Options:
   -p, --platform Platform to run on (default: a2a3)
@@ -131,6 +131,10 @@ Options:
   --serial-orch-sched
                  Run each TMR case twice: default parallel mode, then serial
                  orch->sched mode with PTO2_SERIAL_ORCH_SCHED=1.
+  --skip-large-arg-io [MIN_BYTES]
+                 Skip H2D and D2H for tensors at least MIN_BYTES large. A bare
+                 flag uses 256 MiB. Small control tensors are still copied;
+                 benchmark_rounds.sh already supplies the required --skip-golden.
   -h, --help     Show this help
 
 All other options are passed through to the underlying `python test_*.py`

@@ -798,7 +798,8 @@ int simpler_prepare_run(
             STRACE("chip.run.bind");
             rc = runner->bind_callable_to_runtime(
                 state->runtime, callable_id, &state->host_api, args, state->config.runtime_env.ring_task_window,
-                state->config.runtime_env.ring_heap, state->config.runtime_env.ring_dep_pool
+                state->config.runtime_env.ring_heap, state->config.runtime_env.ring_dep_pool,
+                state->config.benchmark_skip_large_arg_io_bytes
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);

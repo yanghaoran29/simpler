@@ -39,7 +39,7 @@
 extern "C" int bind_callable_to_runtime_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
     const ArgDirection *signature, int sig_count, const uint64_t *ring_task_window, const uint64_t *ring_heap,
-    const uint64_t *ring_dep_pool
+    const uint64_t *ring_dep_pool, uint64_t benchmark_skip_large_arg_io_bytes
 );
 extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
 extern "C" int concurrent_native_prepare_supported_impl(void);
@@ -244,13 +244,15 @@ ChipStorageTaskArgs make_args(std::vector<uint8_t> &input, std::vector<uint8_t> 
 }
 
 int bind_runtime(
-    Runtime &runtime, const HostApi &api, const ChipStorageTaskArgs &args, const ArgDirection *signature, int sig_count
+    Runtime &runtime, const HostApi &api, const ChipStorageTaskArgs &args, const ArgDirection *signature, int sig_count,
+    uint64_t benchmark_skip_large_arg_io_bytes = 0
 ) {
     uint64_t ring_task_window[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
     uint64_t ring_heap[PTO2_MAX_RING_DEPTH] = {1024, 1024, 1024, 1024};
     uint64_t ring_dep_pool[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
     return bind_callable_to_runtime_impl(
-        &runtime, &api, &args, nullptr, signature, sig_count, ring_task_window, ring_heap, ring_dep_pool
+        &runtime, &api, &args, nullptr, signature, sig_count, ring_task_window, ring_heap, ring_dep_pool,
+        benchmark_skip_large_arg_io_bytes
     );
 }
 
@@ -429,6 +431,28 @@ TEST_F(TrbRuntimeTempBufferTest, ChildMemoryIsPassThroughAndPureOutSkipsStaging)
     EXPECT_EQ(fake_.device_memset_count, 0);
     ASSERT_EQ(validate_runtime_impl(&runtime, &api_, 0), 0);
     EXPECT_EQ(fake_.device_free_count, 0);
+}
+
+TEST_F(TrbRuntimeTempBufferTest, BenchmarkThresholdSkipsLargeTensorCopiesOnly) {
+    fake_.reset();
+    Runtime runtime = make_runtime();
+    std::vector<uint8_t> small_input(32, 3);
+    std::vector<uint8_t> large_inout(64, 7);
+    ChipStorageTaskArgs args;
+    args.add_tensor(make_tensor(small_input));
+    args.add_tensor(make_tensor(large_inout));
+    ArgDirection signature[2] = {ArgDirection::IN, ArgDirection::INOUT};
+
+    ASSERT_EQ(bind_runtime(runtime, api_, args, signature, 2, 64), 0);
+    // The small input and runtime-arena image are uploaded; the large INOUT is not.
+    EXPECT_EQ(fake_.copy_to_count, 2);
+    ASSERT_EQ(runtime.tensor_leases_.size(), 2u);
+    EXPECT_FALSE(runtime.tensor_leases_[0].needs_copy_back);
+    EXPECT_FALSE(runtime.tensor_leases_[1].needs_copy_back);
+
+    ASSERT_EQ(validate_runtime_impl(&runtime, &api_, 0), 0);
+    // The fake maps the runtime status header directly; the large INOUT stays on device.
+    EXPECT_EQ(fake_.copy_from_count, 0);
 }
 
 TEST_F(TrbRuntimeTempBufferTest, GrowAllocationFailureFailsBindWithoutLeak) {

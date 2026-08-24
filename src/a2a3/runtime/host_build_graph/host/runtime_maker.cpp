@@ -877,6 +877,76 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
     return 0;
 }
 
+// Per-run bump allocator over the pipeline slot's retained temporary buffer.
+// Benchmark I/O bypass uses it to pay for one packed device allocation when a
+// slot first runs, rather than one rtMalloc/rtFree pair per tensor per round.
+class RetainedTensorBump {
+public:
+    static constexpr size_t kAlignment = 1024;
+
+    static size_t align_up(size_t value) { return (value + kAlignment - 1) & ~(kAlignment - 1); }
+
+    bool begin(const HostApi *api, const ChipStorageTaskArgs *orch_args) {
+        offset_ = 0;
+        size_t required = 0;
+        for (int i = 0; i < orch_args->tensor_count(); ++i) {
+            ChipTensor tensor = orch_args->tensor(i);
+            if (tensor.is_device_memory() || tensor.nbytes() == 0) {
+                continue;
+            }
+            const size_t bytes = static_cast<size_t>(tensor.nbytes());
+            if (bytes > std::numeric_limits<size_t>::max() - (kAlignment - 1)) {
+                LOG_ERROR("Retained tensor buffer size overflow: tensor %d has %zu bytes", i, bytes);
+                return false;
+            }
+            const size_t aligned_bytes = align_up(bytes);
+            if (required > std::numeric_limits<size_t>::max() - aligned_bytes) {
+                LOG_ERROR("Retained tensor buffer aggregate size overflow at tensor %d", i);
+                return false;
+            }
+            required += aligned_bytes;
+        }
+
+        void *addr = nullptr;
+        size_t capacity = 0;
+        api->get_retained_temp_buffer(&addr, &capacity);
+        if (required > capacity) {
+            if (addr != nullptr) {
+                api->device_free(addr);
+            }
+            addr = required == 0 ? nullptr : api->device_malloc(required);
+            if (required != 0 && addr == nullptr) {
+                api->set_retained_temp_buffer(nullptr, 0);
+                LOG_ERROR("Retained tensor buffer grow failed: required bytes %zu", required);
+                return false;
+            }
+            api->set_retained_temp_buffer(addr, required);
+            capacity = required;
+        }
+        base_ = static_cast<unsigned char *>(addr);
+        capacity_ = capacity;
+        return true;
+    }
+
+    void *acquire(size_t bytes) {
+        const size_t aligned_offset = align_up(offset_);
+        if (base_ == nullptr || aligned_offset > capacity_ || bytes > capacity_ - aligned_offset) {
+            LOG_ERROR(
+                "Retained tensor buffer slice miss: bytes=%zu offset=%zu capacity=%zu", bytes, aligned_offset, capacity_
+            );
+            return nullptr;
+        }
+        void *ptr = base_ + aligned_offset;
+        offset_ = aligned_offset + bytes;
+        return ptr;
+    }
+
+private:
+    unsigned char *base_ = nullptr;
+    size_t capacity_ = 0;
+    size_t offset_ = 0;
+};
+
 /**
  * Per-run binding: build device-side argument storage (tensor copy-out, GM
  * heap, PTO2 shared memory) and publish it to the runtime. Assumes the
@@ -895,7 +965,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 extern "C" int bind_callable_to_runtime_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
     const ArgDirection *signature, int sig_count, const uint64_t *ring_task_window, const uint64_t *ring_heap,
-    [[maybe_unused]] const uint64_t *ring_dep_pool
+    [[maybe_unused]] const uint64_t *ring_dep_pool, uint64_t benchmark_skip_large_arg_io_bytes
 ) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
@@ -942,8 +1012,16 @@ extern "C" int bind_callable_to_runtime_impl(
     HostTensorAccessor tensor_access(api);
 
     const int64_t t_args_ns = bind_now_ns();
+    const bool use_retained_tensor_buffer = benchmark_skip_large_arg_io_bytes != 0;
+    RetainedTensorBump retained_tensor_bump;
+    if (use_retained_tensor_buffer && !retained_tensor_bump.begin(api, orch_args)) {
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+
     uint64_t staged_bytes = 0;
     int staged_tensors = 0;
+    uint64_t skipped_h2d_bytes = 0;
+    uint64_t skipped_d2h_bytes = 0;
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
@@ -955,8 +1033,10 @@ extern "C" int bind_callable_to_runtime_impl(
 
         void *host_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(t.buffer.addr));
         size_t size = static_cast<size_t>(t.nbytes());
+        const bool skip_large_arg_io =
+            benchmark_skip_large_arg_io_bytes != 0 && size >= benchmark_skip_large_arg_io_bytes;
 
-        void *dev_ptr = api->device_malloc(size);
+        void *dev_ptr = use_retained_tensor_buffer ? retained_tensor_bump.acquire(size) : api->device_malloc(size);
         if (dev_ptr == nullptr) {
             LOG_ERROR("Failed to allocate device memory for tensor %d", i);
             return PTO_RUNTIME_ERR_INTERNAL;
@@ -967,15 +1047,19 @@ extern "C" int bind_callable_to_runtime_impl(
         // kernel defines what it writes and any unwritten bytes are undefined.
         // IN / INOUT (read-before-write) are staged H2D.
         bool is_pure_output = (signature != nullptr && i < sig_count && signature[i] == ArgDirection::OUT);
-        if (!is_pure_output) {
+        if (!is_pure_output && !skip_large_arg_io) {
             int rc = api->copy_to_device(dev_ptr, host_ptr, size);
             if (rc != 0) {
                 LOG_ERROR("Failed to stage tensor %d to device", i);
-                api->device_free(dev_ptr);
+                if (!use_retained_tensor_buffer) {
+                    api->device_free(dev_ptr);
+                }
                 return PTO_RUNTIME_ERR_INTERNAL;
             }
             staged_bytes += static_cast<uint64_t>(size);
             ++staged_tensors;
+        } else if (!is_pure_output) {
+            skipped_h2d_bytes += static_cast<uint64_t>(size);
         }
         // Read-only INPUT tensors are never written by the kernel, so there is
         // no point copying them back D2H at the end. Index the signature
@@ -983,8 +1067,12 @@ extern "C" int bind_callable_to_runtime_impl(
         // but do not consume a separate signature slot — scalars follow the
         // tensor entries). Anything not provably IN keeps the safe default of
         // copying back.
-        bool needs_copy_back = !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN);
-        runtime->tensor_pairs_.push_back({host_ptr, dev_ptr, size, needs_copy_back});
+        bool needs_copy_back =
+            !skip_large_arg_io && !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN);
+        if (skip_large_arg_io && !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN)) {
+            skipped_d2h_bytes += static_cast<uint64_t>(size);
+        }
+        runtime->tensor_pairs_.push_back({host_ptr, dev_ptr, size, needs_copy_back, !use_retained_tensor_buffer});
         LOG_DEBUG("  ChipTensor %d: %zu bytes at %p", i, size, dev_ptr);
 
         // host_build_graph runs the orchestrator on the host, which may read
@@ -997,7 +1085,15 @@ extern "C" int bind_callable_to_runtime_impl(
         // to the device. A tensor with neither is not host-accessible, so the
         // prepare fails here rather than the orchestrator dereferencing a
         // device address.
-        if (!tensor_access.add(reinterpret_cast<uint64_t>(dev_ptr), size, host_ptr)) {
+        // Slices of one retained allocation cannot be registered independently
+        // on every platform. The staging views already contain the inputs and
+        // push host-orchestrator writes back through HostApi, so the benchmark
+        // path avoids SVM registration for the packed buffer entirely.
+        const bool host_view_ready =
+            use_retained_tensor_buffer ?
+                tensor_access.add_staging_view(reinterpret_cast<uint64_t>(dev_ptr), size, host_ptr) :
+                tensor_access.add(reinterpret_cast<uint64_t>(dev_ptr), size, host_ptr);
+        if (!host_view_ready) {
             LOG_ERROR("host-orch: no host view for tensor %d (dev_ptr %p, %zu bytes)", i, dev_ptr, size);
             return PTO_RUNTIME_ERR_INTERNAL;
         }
@@ -1009,11 +1105,20 @@ extern "C" int bind_callable_to_runtime_impl(
         device_args.add_scalar(orch_args->scalar(i));
     }
     {
-        char attrs[128];
+        char attrs[256];
         snprintf(
-            attrs, sizeof(attrs), "ntensor=%d staged=%d bytes=%" PRIu64, tensor_count, staged_tensors, staged_bytes
+            attrs, sizeof(attrs),
+            "ntensor=%d staged=%d bytes=%" PRIu64 " benchmark_skipped_h2d_bytes=%" PRIu64
+            " benchmark_skipped_d2h_bytes=%" PRIu64,
+            tensor_count, staged_tensors, staged_bytes, skipped_h2d_bytes, skipped_d2h_bytes
         );
         record_bind_phase(HostPhaseKind::BindArgs, t_args_ns, attrs);
+    }
+    if (benchmark_skip_large_arg_io_bytes != 0) {
+        LOG_TIMING(
+            "Benchmark arg I/O bypass: threshold=%" PRIu64 " skipped_h2d_bytes=%" PRIu64 " skipped_d2h_bytes=%" PRIu64,
+            benchmark_skip_large_arg_io_bytes, skipped_h2d_bytes, skipped_d2h_bytes
+        );
     }
 
     // Lay out the per-Worker static device arena. GM heap, PTO2 shared memory,
@@ -1236,12 +1341,14 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     // Cleanup device tensors
     LOG_INFO("=== Cleaning Up ===");
+    int freed_allocations = 0;
     for (int i = 0; i < tensor_pair_count; i++) {
-        if (tensor_pairs[i].dev_ptr != nullptr) {
+        if (tensor_pairs[i].dev_ptr != nullptr && tensor_pairs[i].needs_device_free) {
             api->device_free(tensor_pairs[i].dev_ptr);
+            ++freed_allocations;
         }
     }
-    LOG_INFO("Freed %d device allocations", tensor_pair_count);
+    LOG_INFO("Freed %d device allocations", freed_allocations);
 
     // The dispatch table is owned by bind_callable_to_runtime, which clears it
     // before replaying the active callable's addresses. The chip-callable device

@@ -21,6 +21,10 @@ latency from host-emitted `[STRACE]` markers. The script supports both runtimes;
 task-submit --device auto --device-num 1 --timeout 3600 --max-time 3600 \
   --run ".claude/skills/onboard-arch-precheck/check.sh a2a3 && \
     ./tools/benchmark_rounds.sh -p a2a3 -d \$TASK_DEVICE -n 20 -r host_build_graph"
+
+# Exclude individual tensor transfers of 256 MiB or larger from benchmark setup/teardown
+./tools/benchmark_rounds.sh -p a2a3 -d 0 -n 5 -r host_build_graph \
+  --skip-large-arg-io
 ```
 
 `strace_timing --rounds-table` renders one column per captured marker. TMR
@@ -31,6 +35,16 @@ control a2a3 + TMR, a2a3 + HBG, a5 + TMR, and a5 + HBG. Every corpus includes
 the workloads shared by both runtimes plus its matching Qwen case:
 `StressBatch16Seq3500` for TMR and `GraphExecutionBatch16Seq3500` for HBG. SPMD
 paged attention is not part of the benchmark sweep.
+
+`--skip-large-arg-io [MIN_BYTES]` is a timing-only benchmark option. A bare
+flag uses 256 MiB. For each tensor whose own size meets the threshold, the
+runtime skips both H2D staging and D2H copy-back; smaller control tensors
+continue to transfer normally. Device storage is packed into a retained
+per-pipeline-slot allocation so repeated rounds also avoid per-tensor
+allocation/free overhead. The skipped payload is therefore uninitialized on
+device and the resulting outputs are not valid for correctness checks. The
+standalone CLI requires `--skip-golden`; `benchmark_rounds.sh` already supplies
+it. TIMING logs report the exact skipped H2D and D2H byte counts.
 
 ## verify_packaging.sh
 

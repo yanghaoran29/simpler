@@ -113,6 +113,9 @@ struct TensorPair {
     // so the end-of-run D2H copy-back is skipped. OUTPUT/INOUT/unknown
     // keep the safe default of copying back.
     bool needs_copy_back = true;
+    // False when dev_ptr is a slice of the runner-owned retained temporary
+    // buffer. The platform releases that buffer once per pipeline slot.
+    bool needs_device_free = true;
 };
 
 /**

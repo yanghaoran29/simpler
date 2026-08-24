@@ -95,6 +95,13 @@ public:
      *         mapping nor a fallback view is available.
      */
     bool add(uint64_t dev_base, uint64_t size, void *fallback_host_view);
+
+    /**
+     * Register a region backed directly by its staging copy without asking the
+     * platform to map the device allocation. Writes are still pushed to the
+     * device through HostApi, just like add()'s fallback path.
+     */
+    bool add_staging_view(uint64_t dev_base, uint64_t size, void *staging_host_view);
     bool read(uint64_t dev_addr, void *dst, uint64_t bytes) const;
     bool write(uint64_t dev_addr, const void *src, uint64_t bytes) const;
 

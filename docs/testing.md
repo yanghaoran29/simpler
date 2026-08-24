@@ -145,6 +145,7 @@ Scene tests support advanced CLI options for benchmarking, profiling, and runtim
 ```bash
 pytest --platform a2a3sim                                        # default: 1 round + golden
 pytest --platform a2a3 --rounds 100 --skip-golden                # benchmark mode
+pytest --platform a2a3 --rounds 5 --skip-golden --skip-large-arg-io  # omit >=256 MiB transfers
 pytest --platform a2a3 --enable-chip-swimlane                             # chip swimlane (single round)
 pytest --platform a2a3 --enable-pmu                              # PMU CSV
 pytest --platform a2a3sim --log-level debug                        # verbose C++ logging
@@ -155,6 +156,7 @@ pytest --platform a2a3sim --log-level debug                        # verbose C++
 ```bash
 python test_xxx.py -p a2a3sim                                    # default: 1 round + golden
 python test_xxx.py -p a2a3 -d 0 --rounds 100 --skip-golden       # benchmark mode
+python test_xxx.py -p a2a3 -d 0 --rounds 5 --skip-golden --skip-large-arg-io
 python test_xxx.py -p a2a3 --enable-chip-swimlane                         # chip swimlane (single round)
 python test_xxx.py -p a2a3 --dump-args                         # dump unified argument artifacts
 python test_xxx.py -p a2a3 --enable-pmu 4                        # PMU CSV (MEMORY)
@@ -174,6 +176,7 @@ python test_xxx.py -p a2a3sim --log-level debug                  # verbose C++ l
 | `--case SEL` | | (all) | Case selector, repeatable: `Foo`, `ClassA::Foo`, `ClassA::` |
 | `--manual` | | `exclude` | `exclude`/`include`/`only` for manual scene-test cases and standalone pytest tests |
 | `--skip-golden` | | false | Skip golden comparison (for benchmarking) |
+| `--skip-large-arg-io [MIN_BYTES]` | | `0` (disabled) | Benchmark only: skip H2D and D2H for each tensor at least `MIN_BYTES` large; a bare flag uses 256 MiB. Device storage is packed into a retained per-pipeline-slot allocation; smaller control tensors still transfer. Requires `--skip-golden`; skipped payloads and outputs are not valid for correctness checks. |
 | `--enable-chip-swimlane [PERF_LEVEL]` | | `0` | Enable chip swimlane collection. The flag takes an integer perf_level 0–4 (bare = 4); see [docs/dfx/chip-swimlane-profiling.md](dfx/chip-swimlane-profiling.md#31-enable-chip-swimlane) for the level table. Each test case gets its own `outputs/<case>_<ts>/` directory under which `chip_swimlane_records.json` lands; parallel runs never collide. Disabled when `--rounds > 1`. |
 | `--dump-args` | | `0` | Dump tensors plus scalar args into unified runtime artifacts (bare flag = `1`; supports `0/1/2/3`) |
 | `--enable-pmu [EVENT_TYPE]` | | `0` | Enable a2a3 PMU CSV collection. Bare flag selects `PIPE_UTILIZATION` (`2`); pass an event type such as `4` for `MEMORY`. |
@@ -181,6 +184,10 @@ python test_xxx.py -p a2a3sim --log-level debug                  # verbose C++ l
 | `--log-level LEVEL` | | `timing` | Simpler logger threshold. Accepts `debug` / `info` / `timing` / `warn` / `error` / `null` (case-insensitive). TIMING and NUL/NULL are registered with Python logging before pytest validates the option. The "simpler" Python logger is the single source of truth; `Worker.init()` snapshots it once and pushes the threshold to HostLogger, AICPU, and the onboard CANN mapping. Changing the Python logger afterwards does not affect an existing worker. See [Log levels](#log-levels). |
 
 Chip swimlane, args dump, PMU, dep-gen, scope stats, and swimlane-overhead analysis are disabled when `--rounds > 1` so benchmark rounds stay uninstrumented. Output tensors are reset to their initial values between rounds.
+
+The large-argument I/O bypass applies to both HBG and TRB. It logs the exact
+skipped H2D and D2H byte counts at TIMING level, making it explicit which
+setup/teardown work has been removed from a measurement.
 
 ## Log levels
 
@@ -268,7 +275,7 @@ Worked examples:
 | `--rounds` | both | **(none)** | pytest-xdist already uses `-n` for worker count. Standalone originally had `-n` for `--rounds`, creating a letter-level collision whenever a user switched between pytest (`-n 8` = 8 workers) and standalone (`-n 8` = 8 rounds). Removed in [#574](https://github.com/hw-native-sys/simpler/pull/574); do not reintroduce. |
 | `--max-parallel` | both | **(none)** | `-j` would be the natural make-style short, but pytest reserves all lowercase single letters (`parser.addoption` rejects lowercase shorts). Standalone mirrors this to keep both CLIs identical — no short in either, always spell out `--max-parallel`. |
 | `--runtime` / `--level` | both | **(none)** | Internal child-mode markers; users rarely type them. No short keeps them distinctive. |
-| `--skip-golden`, `--enable-chip-swimlane`, `--dump-args`, `--enable-pmu`, `--manual`, `--case`, `--log-level` | both | **(none)** | Low-frequency; long form reads better in scripts and docs. Not worth reserving letters. |
+| `--skip-golden`, `--skip-large-arg-io`, `--enable-chip-swimlane`, `--dump-args`, `--enable-pmu`, `--manual`, `--case`, `--log-level` | both | **(none)** | Low-frequency; long form reads better in scripts and docs. Not worth reserving letters. |
 
 Practical guidance when adding a new CLI option:
 

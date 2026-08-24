@@ -300,10 +300,11 @@ _OFF_CONFIG = 16
 # 6 int32 (aicpu_thread_num, enable_chip_swimlane, enable_dump_args,
 # enable_pmu, enable_dep_gen, enable_scope_stats) + uint64 ring sizing
 # overrides (3 per-ring arrays of RUNTIME_ENV_RING_COUNT: ring_task_window,
-# ring_heap, ring_dep_pool) + 1024-byte NUL-terminated output_prefix. Log config
+# ring_heap, ring_dep_pool) + uint64 benchmark_skip_large_arg_io_bytes +
+# 1024-byte NUL-terminated output_prefix. Log config
 # travels separately via ChipWorker.init(log_level) — not on per-task wire.
 _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
-_CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
+_CFG_FMT = struct.Struct("=iiiiii" + ("Q" * (_RUNTIME_ENV_UINT64_FIELD_COUNT + 1)) + "1024s")
 # The generation-safe pipeline lease follows CONFIG. Args start after the
 # lease, rounded up to 8 bytes so the first
 # Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
@@ -335,7 +336,7 @@ _OFF_FRAME_RUN_ID = _OFF_ACCEPTED - 32
 _OFF_FRAME_SLOT_ID = _OFF_ACCEPTED - 24
 _OFF_FRAME_GENERATION = _OFF_ACCEPTED - 16
 _OFF_FRAME_DISPATCH_ID = _OFF_ACCEPTED - 8
-_TASK_PROTOCOL_VERSION = 3
+_TASK_PROTOCOL_VERSION = 4
 # Mirrors MAILBOX_OFF_SHUTDOWN / MAILBOX_SHUTDOWN_REQUESTED: termination is a
 # sticky one-way word on the control frame, not a MailboxState. _OFF_STATE has
 # three writers (parent CONTROL_REQUEST, child CONTROL_DONE, C++
@@ -3317,9 +3318,11 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
         pmu,
         dep_gen,
         scope_stats,
-        *ring_values,
+        *ring_and_threshold,
         prefix_bytes,
     ) = _CFG_FMT.unpack_from(buf, _OFF_CONFIG)
+    ring_values = ring_and_threshold[:_RUNTIME_ENV_UINT64_FIELD_COUNT]
+    benchmark_skip_large_arg_io_bytes = ring_and_threshold[-1]
     ring_task_window = list(ring_values[:RUNTIME_ENV_RING_COUNT])
     ring_heap = list(ring_values[RUNTIME_ENV_RING_COUNT : 2 * RUNTIME_ENV_RING_COUNT])
     ring_dep_pool = list(ring_values[2 * RUNTIME_ENV_RING_COUNT : 3 * RUNTIME_ENV_RING_COUNT])
@@ -3330,6 +3333,7 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     cfg.enable_pmu = pmu
     cfg.enable_dep_gen = bool(dep_gen)
     cfg.enable_scope_stats = bool(scope_stats)
+    cfg.benchmark_skip_large_arg_io_bytes = benchmark_skip_large_arg_io_bytes
     cfg.runtime_env.ring_task_window = ring_task_window
     cfg.runtime_env.ring_heap = ring_heap
     cfg.runtime_env.ring_dep_pool = ring_dep_pool

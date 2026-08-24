@@ -60,6 +60,14 @@ from simpler_setup.scene_test import SceneTestLevel, clear_compile_cache, is_man
 # failures.
 TIMEOUT_EXIT_CODE = 124
 _SCENE_LEVEL_CHOICES = [int(level) for level in SceneTestLevel]
+_MAX_UINT64 = (1 << 64) - 1
+
+
+def _positive_byte_count(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0 or parsed > _MAX_UINT64:
+        raise ValueError("must be a positive byte count no greater than 2^64-1")
+    return parsed
 
 
 def _parse_device_range(s: str) -> list[int]:
@@ -172,6 +180,18 @@ def pytest_addoption(parser):
     parser.addoption("--rounds", type=int, default=1, help="Run each case N times (default: 1)")
     parser.addoption(
         "--skip-golden", action="store_true", default=False, help="Skip golden comparison (benchmark mode)"
+    )
+    parser.addoption(
+        "--skip-large-arg-io",
+        nargs="?",
+        const=256 * 1024 * 1024,
+        default=0,
+        type=_positive_byte_count,
+        metavar="MIN_BYTES",
+        help=(
+            "Benchmark only: skip H2D and D2H for tensors at least MIN_BYTES large. "
+            "A bare flag uses 256 MiB. Requires --skip-golden."
+        ),
     )
     parser.addoption(
         "--enable-chip-swimlane",
@@ -482,6 +502,16 @@ def _validate_level_filters(config) -> None:
         raise pytest.UsageError("--level and --exclude-level cannot be used together")
 
 
+def _validate_benchmark_flags(config) -> None:
+    threshold = config.getoption("--skip-large-arg-io", default=0)
+    if threshold < 0 or threshold > _MAX_UINT64:
+        raise pytest.UsageError("--skip-large-arg-io must be a positive byte count no greater than 2^64-1")
+    if threshold and not config.getoption("--skip-golden", default=False):
+        raise pytest.UsageError(
+            "--skip-large-arg-io requires --skip-golden because skipped tensors are not valid outputs"
+        )
+
+
 def pytest_configure(config):
     """Register custom markers and apply global config."""
     config.addinivalue_line("markers", "platforms(list): supported platforms for standalone ST functions")
@@ -521,6 +551,7 @@ def pytest_configure(config):
 
     _validate_level_filters(config)
     _validate_diagnostic_flags(config)
+    _validate_benchmark_flags(config)
     _configure_sanitizer(config)
 
     # Configure logging unconditionally (not only when --log-level is passed) so

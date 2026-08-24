@@ -1017,7 +1017,7 @@ class _TwoFrameLoopHarness:
         try:
             frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = self.digest
             struct.pack_into("=ii", frame, worker_mod._OFF_TASK_ARGS_BLOB, 0, 0)
-            cfg_values = [0] * (6 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
+            cfg_values = [0] * (7 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
             cfg_values[3] = int(diagnostics)
             output_prefix = b"/tmp/simpler-test" if diagnostics else b""
             worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, output_prefix)

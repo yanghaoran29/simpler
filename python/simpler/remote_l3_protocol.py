@@ -29,7 +29,7 @@ from .task_interface import MAX_TENSOR_DIMS, CallConfig, DataType
 # 3: a TASK's per-argument record is the self-describing wire ``Tensor`` — the embedded
 # BufferDescriptor plus the strided view. Both ends of a run come from one ``pip install``,
 # so this constant is a mismatch alarm at the frame header, not a dual-decode selector.
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 MAX_FRAME_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_STRING_BYTES = 1024
 MAX_ERROR_BYTES = 4096
@@ -446,6 +446,7 @@ def decode_call_config(reader: _Reader) -> CallConfig:
     cfg.enable_pmu = reader.i32()
     cfg.enable_dep_gen = bool(reader.i32())
     cfg.enable_scope_stats = bool(reader.i32())
+    cfg.benchmark_skip_large_arg_io_bytes = reader.u64()
     prefix = reader.string(MAX_STRING_BYTES, "CallConfig.output_prefix")
     cfg.output_prefix = prefix
     return cfg

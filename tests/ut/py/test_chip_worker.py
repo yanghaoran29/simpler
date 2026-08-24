@@ -27,6 +27,7 @@ class TestCallConfig:
         assert config.enable_dump_args == 0
         assert config.enable_pmu == 0
         assert config.enable_dep_gen is False
+        assert config.benchmark_skip_large_arg_io_bytes == 0
 
     def test_setters(self):
         # enable_chip_swimlane accepts both an int perf_level (0-4) and a Python
@@ -52,6 +53,8 @@ class TestCallConfig:
         assert config.enable_dump_args == 3
         config.enable_dump_args = False
         assert config.enable_dump_args == 0
+        config.benchmark_skip_large_arg_io_bytes = 256 * 1024 * 1024
+        assert config.benchmark_skip_large_arg_io_bytes == 256 * 1024 * 1024
 
     def test_diagnostics_subfeatures_are_parallel(self):
         # Guard against drift: the four diagnostics sub-features under the
@@ -368,6 +371,7 @@ class TestMailboxConfigRoundtrip:
         cfg.enable_pmu = 5
         cfg.enable_dep_gen = True
         cfg.enable_scope_stats = True
+        cfg.benchmark_skip_large_arg_io_bytes = 256 * 1024 * 1024
         cfg.runtime_env.ring_task_window = [16, 32, 128, 256]
         cfg.runtime_env.ring_heap = [1024, 2048, 4096, 8192]
         cfg.runtime_env.ring_dep_pool = [64, 128, 256, 512]
@@ -386,6 +390,7 @@ class TestMailboxConfigRoundtrip:
             *cfg.runtime_env.ring_task_window,
             *cfg.runtime_env.ring_heap,
             *cfg.runtime_env.ring_dep_pool,
+            cfg.benchmark_skip_large_arg_io_bytes,
             cfg.output_prefix.encode(),
         )
 
@@ -396,6 +401,7 @@ class TestMailboxConfigRoundtrip:
         assert decoded.enable_pmu == 5
         assert decoded.enable_dep_gen is True
         assert decoded.enable_scope_stats is True
+        assert decoded.benchmark_skip_large_arg_io_bytes == 256 * 1024 * 1024
         assert decoded.runtime_env.ring_task_window == [16, 32, 128, 256]
         assert decoded.runtime_env.ring_heap == [1024, 2048, 4096, 8192]
         assert decoded.runtime_env.ring_dep_pool == [64, 128, 256, 512]

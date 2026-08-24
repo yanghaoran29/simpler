@@ -248,6 +248,24 @@ def test_extra_arguments_are_forwarded_to_every_benchmark(tmp_path: Path) -> Non
         assert shlex.split(line)[-2:] == ["--custom-flag", "custom-value"]
 
 
+def test_large_arg_io_bypass_is_forwarded_to_every_benchmark(tmp_path: Path) -> None:
+    result, invocations = _run_harness(
+        tmp_path,
+        "--runtime",
+        "host_build_graph",
+        "--rounds",
+        "1",
+        "--skip-large-arg-io",
+        "536870912",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for line in invocations.read_text().splitlines():
+        args = shlex.split(line)
+        option = args.index("--skip-large-arg-io")
+        assert args[option + 1] == "536870912"
+
+
 def test_host_build_graph_rejects_serial_orch_sched_before_running(tmp_path: Path) -> None:
     result, invocations = _run_harness(
         tmp_path,

@@ -2683,6 +2683,7 @@ NB_MODULE(_task_interface, m) {
             }
         )
         .def_rw("enable_pmu", &CallConfig::enable_pmu)
+        .def_rw("benchmark_skip_large_arg_io_bytes", &CallConfig::benchmark_skip_large_arg_io_bytes)
         .def("validate", &CallConfig::validate)
         .def_prop_rw(
             "enable_dep_gen",
@@ -2724,7 +2725,8 @@ NB_MODULE(_task_interface, m) {
                << ", enable_chip_swimlane=" << self.enable_chip_swimlane
                << ", enable_dump_args=" << self.enable_dump_args << ", enable_pmu=" << self.enable_pmu
                << ", enable_dep_gen=" << (self.enable_dep_gen ? "True" : "False")
-               << ", enable_scope_stats=" << (self.enable_scope_stats ? "True" : "False");
+               << ", enable_scope_stats=" << (self.enable_scope_stats ? "True" : "False")
+               << ", benchmark_skip_large_arg_io_bytes=" << self.benchmark_skip_large_arg_io_bytes;
             if (self.runtime_env.any()) {
                 append_ring_values(os, "runtime_env.ring_task_window", true, self.runtime_env.ring_task_window);
                 append_ring_values(os, "runtime_env.ring_heap", true, self.runtime_env.ring_heap);

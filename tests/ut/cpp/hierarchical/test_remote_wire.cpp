@@ -165,6 +165,7 @@ TEST(RemoteWire, TaskPayloadPreservesScopeStatsCallConfig) {
     payload.callable_digest.fill(0xAB);
     payload.config.aicpu_thread_num = 5;
     payload.config.enable_scope_stats = 1;
+    payload.config.benchmark_skip_large_arg_io_bytes = 256 * 1024 * 1024;
     const char *prefix = "/tmp/remote-scope";
     std::memcpy(payload.config.output_prefix, prefix, std::strlen(prefix));
     payload.args.tensors.push_back(remote_arg_tensor());
@@ -174,6 +175,7 @@ TEST(RemoteWire, TaskPayloadPreservesScopeStatsCallConfig) {
 
     EXPECT_EQ(decoded.config.aicpu_thread_num, 5);
     EXPECT_EQ(decoded.config.enable_scope_stats, 1);
+    EXPECT_EQ(decoded.config.benchmark_skip_large_arg_io_bytes, 256u * 1024 * 1024);
     EXPECT_STREQ(decoded.config.output_prefix, prefix);
 }
 

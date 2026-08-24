@@ -1154,6 +1154,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     enable_pmu,
     enable_dep_gen,
     enable_scope_stats,
+    skip_large_arg_io_bytes=0,
     enable_swimlane_overhead=False,
 ):
     """Execute a pre-filtered list of cases for one class (layers 5-6).
@@ -1193,6 +1194,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
                 enable_scope_stats=enable_scope_stats,
+                skip_large_arg_io_bytes=skip_large_arg_io_bytes,
                 output_prefix=str(prefix) if diagnostics_on else "",
             )
         except Exception as exc:
@@ -1541,6 +1543,7 @@ class SceneTestCase:
         enable_pmu=0,
         enable_dep_gen=False,
         enable_scope_stats=False,
+        skip_large_arg_io_bytes=0,
         *,
         output_prefix="",
     ):
@@ -1563,6 +1566,7 @@ class SceneTestCase:
         config.enable_pmu = enable_pmu  # 0=disabled, >0=enabled with event type
         config.enable_dep_gen = enable_dep_gen
         config.enable_scope_stats = enable_scope_stats
+        config.benchmark_skip_large_arg_io_bytes = skip_large_arg_io_bytes
         # `output_prefix` is required by CallConfig::validate() whenever any
         # diagnostic flag is enabled. Caller threads it down from the per-case
         # directory built by _build_output_prefix().
@@ -1600,6 +1604,7 @@ class SceneTestCase:
         enable_pmu=0,
         enable_dep_gen=False,
         enable_scope_stats=False,
+        skip_large_arg_io_bytes=0,
         output_prefix="",
     ):
         if self._st_level == 2:
@@ -1614,6 +1619,7 @@ class SceneTestCase:
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
                 enable_scope_stats=enable_scope_stats,
+                skip_large_arg_io_bytes=skip_large_arg_io_bytes,
                 output_prefix=output_prefix,
             )
         elif self._st_level == 3:
@@ -1629,6 +1635,7 @@ class SceneTestCase:
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
                 enable_scope_stats=enable_scope_stats,
+                skip_large_arg_io_bytes=skip_large_arg_io_bytes,
                 output_prefix=output_prefix,
             )
 
@@ -1644,6 +1651,7 @@ class SceneTestCase:
         enable_pmu=0,
         enable_dep_gen=False,
         enable_scope_stats=False,
+        skip_large_arg_io_bytes=0,
         output_prefix="",
     ):
         params = case.get("params", {})
@@ -1696,6 +1704,7 @@ class SceneTestCase:
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
                 enable_scope_stats=enable_scope_stats,
+                skip_large_arg_io_bytes=skip_large_arg_io_bytes,
                 output_prefix=output_prefix,
             )
 
@@ -1718,6 +1727,7 @@ class SceneTestCase:
         enable_pmu=0,
         enable_dep_gen=False,
         enable_scope_stats=False,
+        skip_large_arg_io_bytes=0,
         output_prefix="",
     ):
         # Defensive belt-and-braces: the pytest dispatcher and run_module both
@@ -1784,6 +1794,7 @@ class SceneTestCase:
                     enable_pmu=enable_pmu,
                     enable_dep_gen=enable_dep_gen,
                     enable_scope_stats=enable_scope_stats,
+                    skip_large_arg_io_bytes=skip_large_arg_io_bytes,
                     output_prefix=output_prefix,
                 )
 
@@ -1835,6 +1846,7 @@ class SceneTestCase:
 
         rounds = request.config.getoption("--rounds", default=1)
         skip_golden = request.config.getoption("--skip-golden", default=False)
+        skip_large_arg_io_bytes = request.config.getoption("--skip-large-arg-io", default=0)
         enable_chip_swimlane = request.config.getoption("--enable-chip-swimlane", default=0)
         enable_dump_args = request.config.getoption("--dump-args", default=0)
         enable_pmu = request.config.getoption("--enable-pmu", default=0)
@@ -1878,6 +1890,7 @@ class SceneTestCase:
             enable_pmu=enable_pmu,
             enable_dep_gen=enable_dep_gen,
             enable_scope_stats=enable_scope_stats,
+            skip_large_arg_io_bytes=skip_large_arg_io_bytes,
             enable_swimlane_overhead=enable_swimlane_overhead,
         )
 
@@ -1917,6 +1930,12 @@ class SceneTestCase:
         """
         import argparse  # noqa: PLC0415
 
+        def positive_bytes(value):
+            parsed = int(value)
+            if parsed <= 0 or parsed > (1 << 64) - 1:
+                raise argparse.ArgumentTypeError("must be a positive byte count no greater than 2^64-1")
+            return parsed
+
         parser = argparse.ArgumentParser()
         parser.add_argument("-p", "--platform", required=True)
         parser.add_argument(
@@ -1949,6 +1968,18 @@ class SceneTestCase:
         )
         parser.add_argument("--rounds", type=int, default=1, help="Run each case N times (default: 1)")
         parser.add_argument("--skip-golden", action="store_true", help="Skip golden comparison (benchmark mode)")
+        parser.add_argument(
+            "--skip-large-arg-io",
+            nargs="?",
+            const=256 * 1024 * 1024,
+            default=0,
+            type=positive_bytes,
+            metavar="MIN_BYTES",
+            help=(
+                "Benchmark only: skip H2D and D2H for tensors at least MIN_BYTES large. "
+                "A bare flag uses 256 MiB. Requires --skip-golden."
+            ),
+        )
         parser.add_argument(
             "--enable-chip-swimlane",
             nargs="?",
@@ -2035,6 +2066,9 @@ class SceneTestCase:
             help=f"Simpler logger level (debug/info/timing/warn/error/null; default {DEFAULT_LOG_LEVEL})",
         )
         args = parser.parse_args()
+        if args.skip_large_arg_io and not args.skip_golden:
+            parser.error("--skip-large-arg-io requires --skip-golden because skipped tensors are not valid outputs")
+        args.skip_large_arg_io_bytes = args.skip_large_arg_io
         configure_logging(args.log_level)
 
         # Match the per-test kernel/orchestration compile to the runtime's
@@ -2207,6 +2241,7 @@ class SceneTestCase:
                                 sub_handles=sub_handles,
                                 rounds=args.rounds,
                                 skip_golden=args.skip_golden,
+                                skip_large_arg_io_bytes=args.skip_large_arg_io_bytes,
                                 enable_chip_swimlane=args.enable_chip_swimlane,
                                 enable_dump_args=args.dump_args,
                                 enable_pmu=args.enable_pmu,
@@ -2248,6 +2283,8 @@ def _dispatch_test_phases_standalone(module_name, selected_by_cls, args):  # noq
         common += ["--rounds", str(args.rounds)]
     if args.skip_golden:
         common.append("--skip-golden")
+    if args.skip_large_arg_io_bytes:
+        common += ["--skip-large-arg-io", str(args.skip_large_arg_io_bytes)]
     if args.enable_chip_swimlane:
         common += ["--enable-chip-swimlane", str(args.enable_chip_swimlane)]
     if args.dump_args:

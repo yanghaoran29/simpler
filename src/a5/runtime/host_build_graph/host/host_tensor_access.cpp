@@ -92,6 +92,14 @@ bool HostTensorAccessor::add(uint64_t dev_base, uint64_t size, void *fallback_ho
     return true;
 }
 
+bool HostTensorAccessor::add_staging_view(uint64_t dev_base, uint64_t size, void *staging_host_view) {
+    if (impl_->api == nullptr || dev_base == 0 || size == 0 || staging_host_view == nullptr) {
+        return false;
+    }
+    impl_->regions.push_back({dev_base, size, static_cast<unsigned char *>(staging_host_view), true});
+    return true;
+}
+
 bool HostTensorAccessor::read(uint64_t dev_addr, void *dst, uint64_t bytes) const {
     uint64_t offset = 0;
     const HostTensorRegion *region = find_region(impl_->regions, dev_addr, bytes, &offset);

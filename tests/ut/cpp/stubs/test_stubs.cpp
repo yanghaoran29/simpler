@@ -146,7 +146,8 @@ uint64_t get_test_reg_stub_base_addr() { return g_test_reg_base_addr; }
 extern "C" __attribute__((weak)) int bind_callable_to_runtime_impl(
     void * /* runtime */, const void * /* api */, const void * /* orch_args */, void * /* host_orch_func_ptr */,
     const void * /* signature */, int /* sig_count */, const uint64_t * /* ring_task_window */,
-    const uint64_t * /* ring_heap */, const uint64_t * /* ring_dep_pool */
+    const uint64_t * /* ring_heap */, const uint64_t * /* ring_dep_pool */,
+    uint64_t /* benchmark_skip_large_arg_io_bytes */
 ) {
     return -1;
 }

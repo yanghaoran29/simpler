@@ -586,12 +586,14 @@ static bool derive_arena_static_sizes(const ArenaSizingConfig &sizing, ArenaStat
 // staged device_args / tensor_leases_ stay owned by the caller's Runtime.
 static bool stage_device_args(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, const ArgDirection *signature,
-    int sig_count, RetainedTempBump *bump, ChipStorageTaskArgs *out
+    int sig_count, RetainedTempBump *bump, ChipStorageTaskArgs *out, uint64_t benchmark_skip_large_arg_io_bytes
 ) {
     int tensor_count = orch_args->tensor_count();
     int scalar_count = orch_args->scalar_count();
 
     int64_t t_args_start = _now_ms();
+    uint64_t skipped_h2d_bytes = 0;
+    uint64_t skipped_d2h_bytes = 0;
     STRACE_A("chip.run.bind.args", "");
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
@@ -604,6 +606,8 @@ static bool stage_device_args(
 
         void *host_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(t.buffer.addr));
         size_t size = static_cast<size_t>(t.nbytes());
+        const bool skip_large_arg_io =
+            benchmark_skip_large_arg_io_bytes != 0 && size >= benchmark_skip_large_arg_io_bytes;
         if (size == 0) {
             t.buffer.addr = 0;
             out->add_tensor(t);
@@ -632,7 +636,7 @@ static bool stage_device_args(
         // kernel defines what it writes and any unwritten bytes are undefined.
         // IN / INOUT (read-before-write) are staged H2D.
         bool is_pure_output = (signature != nullptr && i < sig_count && signature[i] == ArgDirection::OUT);
-        if (!is_pure_output) {
+        if (!is_pure_output && !skip_large_arg_io) {
             int rc = api->copy_to_device(dev_ptr, host_ptr, size);
             if (rc != 0) {
                 LOG_ERROR("Failed to stage tensor %d to device", i);
@@ -641,6 +645,8 @@ static bool stage_device_args(
                 }
                 return false;
             }
+        } else if (!is_pure_output) {
+            skipped_h2d_bytes += static_cast<uint64_t>(size);
         }
         // Read-only INPUT tensors are never written by the kernel, so there is
         // no point copying them back D2H at the end. Index the signature
@@ -648,7 +654,11 @@ static bool stage_device_args(
         // but do not consume a separate signature slot — scalars follow the
         // tensor entries). Anything not provably IN keeps the safe default of
         // copying back.
-        bool needs_copy_back = !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN);
+        bool needs_copy_back =
+            !skip_large_arg_io && !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN);
+        if (skip_large_arg_io && !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN)) {
+            skipped_d2h_bytes += static_cast<uint64_t>(size);
+        }
         runtime->tensor_leases_.push_back({host_ptr, dev_ptr, size, needs_copy_back, release_kind});
         LOG_DEBUG("  ChipTensor %d: %zu bytes at %p", i, size, dev_ptr);
 
@@ -660,6 +670,12 @@ static bool stage_device_args(
     }
     int64_t t_args_end = _now_ms();
     LOG_INFO("TIMING: args_malloc_copy = %" PRId64 "ms", t_args_end - t_args_start);
+    if (benchmark_skip_large_arg_io_bytes != 0) {
+        LOG_TIMING(
+            "Benchmark arg I/O bypass: threshold=%" PRIu64 " skipped_h2d_bytes=%" PRIu64 " skipped_d2h_bytes=%" PRIu64,
+            benchmark_skip_large_arg_io_bytes, skipped_h2d_bytes, skipped_d2h_bytes
+        );
+    }
     return true;
 }
 
@@ -866,7 +882,7 @@ static bool build_and_cache_prebuilt_arena(
 extern "C" int bind_callable_to_runtime_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
     const ArgDirection *signature, int sig_count, const uint64_t *ring_task_window, const uint64_t *ring_heap,
-    const uint64_t *ring_dep_pool
+    const uint64_t *ring_dep_pool, uint64_t benchmark_skip_large_arg_io_bytes
 ) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
@@ -915,7 +931,9 @@ extern "C" int bind_callable_to_runtime_impl(
     });
 
     ChipStorageTaskArgs device_args;
-    if (!stage_device_args(runtime, api, orch_args, signature, sig_count, &bump, &device_args)) {
+    if (!stage_device_args(
+            runtime, api, orch_args, signature, sig_count, &bump, &device_args, benchmark_skip_large_arg_io_bytes
+        )) {
         return PTO_RUNTIME_ERR_INTERNAL;
     }
 

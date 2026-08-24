@@ -461,7 +461,8 @@ public:
      */
     int bind_callable_to_runtime(
         Runtime &runtime, int32_t callable_id, const HostApi *api, const void *orch_args,
-        const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
+        const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool,
+        uint64_t benchmark_skip_large_arg_io_bytes
     );
 
     /**

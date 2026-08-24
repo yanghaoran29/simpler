@@ -62,6 +62,24 @@ def test_pytest_front_end_reports_a_usage_error_not_a_test_failure() -> None:
         conftest._validate_diagnostic_flags(config)
 
 
+def test_pytest_large_arg_io_bypass_requires_skip_golden() -> None:
+    conftest = importlib.import_module("conftest")
+    options = {"--skip-large-arg-io": 256 * 1024 * 1024, "--skip-golden": False}
+    config = SimpleNamespace(getoption=lambda name, default=None: options.get(name, default))
+
+    with pytest.raises(pytest.UsageError, match="requires --skip-golden"):
+        conftest._validate_benchmark_flags(config)
+
+
+def test_pytest_large_arg_io_bypass_rejects_negative_threshold() -> None:
+    conftest = importlib.import_module("conftest")
+    options = {"--skip-large-arg-io": -1, "--skip-golden": True}
+    config = SimpleNamespace(getoption=lambda name, default=None: options.get(name, default))
+
+    with pytest.raises(pytest.UsageError, match="positive byte count"):
+        conftest._validate_benchmark_flags(config)
+
+
 def test_dep_gen_extension_hook_uses_the_shared_multi_round_gate() -> None:
     options = {"--rounds": 2, "--enable-dep-gen": True}
     request = SimpleNamespace(config=SimpleNamespace(getoption=lambda name, default=None: options.get(name, default)))
@@ -97,6 +115,32 @@ def test_swimlane_overhead_allocates_a_diagnostic_output_prefix(monkeypatch) -> 
     )
 
     assert captured["output_prefix"] == str(output_prefix)
+
+
+def test_run_class_cases_forwards_large_arg_io_threshold() -> None:
+    captured = {}
+
+    class FakeScene:
+        def _run_and_validate(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+    run_class_cases(
+        object(),
+        FakeScene(),
+        [{"name": "large_args"}],
+        callable_obj=object(),
+        sub_handles={},
+        rounds=5,
+        skip_golden=True,
+        enable_chip_swimlane=0,
+        enable_dump_args=0,
+        enable_pmu=0,
+        enable_dep_gen=False,
+        enable_scope_stats=False,
+        skip_large_arg_io_bytes=256 * 1024 * 1024,
+    )
+
+    assert captured["skip_large_arg_io_bytes"] == 256 * 1024 * 1024
 
 
 def test_run_class_cases_reports_the_failing_case_name() -> None:
@@ -165,6 +209,7 @@ def test_standalone_dispatch_forwards_every_diagnostic_flag(monkeypatch) -> None
         sanitizer="none",
         rounds=1,
         skip_golden=False,
+        skip_large_arg_io_bytes=256 * 1024 * 1024,
         enable_chip_swimlane=4,
         dump_args=3,
         enable_pmu=5,
@@ -193,4 +238,5 @@ def test_standalone_dispatch_forwards_every_diagnostic_flag(monkeypatch) -> None
     assert "--enable-dep-gen" in command
     assert "--enable-scope-stats" in command
     assert "--enable-swimlane-overhead" in command
+    assert command[command.index("--skip-large-arg-io") + 1] == str(256 * 1024 * 1024)
     assert command[0] == sys.executable

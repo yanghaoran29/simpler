@@ -110,6 +110,29 @@ TEST_F(HostTensorAccessTest, MirroredRegionReadsAndPushesWrites) {
     EXPECT_EQ(g_copies[0].size, sizeof(int32_t));
 }
 
+TEST_F(HostTensorAccessTest, ExplicitStagingViewSkipsDeviceMapping) {
+    int32_t mirror[4] = {1, 2, 3, 4};
+    int32_t mapped[4] = {10, 20, 30, 40};
+    g_registered_view = mapped;
+    HostTensorAccessor accessor(&kHostApi);
+    ASSERT_TRUE(accessor.add_staging_view(kFakeDeviceBase, sizeof(mirror), mirror));
+
+    EXPECT_EQ(accessor.mapping_count(), 0u);
+    EXPECT_EQ(accessor.mapped_bytes(), 0u);
+    int32_t value = 0;
+    ASSERT_TRUE(host_tensor_read(&accessor, kFakeDeviceBase + sizeof(int32_t), &value, sizeof(value)));
+    EXPECT_EQ(value, 2);
+
+    const int32_t written = 77;
+    ASSERT_TRUE(host_tensor_write(&accessor, kFakeDeviceBase, &written, sizeof(written)));
+    EXPECT_EQ(mirror[0], 77);
+    EXPECT_EQ(mapped[0], 10);
+    ASSERT_EQ(g_copies.size(), 1u);
+
+    accessor.close();
+    EXPECT_TRUE(g_unregistered.empty());
+}
+
 TEST_F(HostTensorAccessTest, MirroredWriteReportsCopyFailure) {
     int32_t mirror[2] = {1, 2};
     HostTensorAccessor accessor(&kHostApi);
