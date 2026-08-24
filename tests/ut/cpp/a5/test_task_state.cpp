@@ -136,6 +136,29 @@ TEST_F(TaskStateTest, MultiFaninPartialNotReady) {
     EXPECT_TRUE(sched.release_fanin_and_check_ready(slot));
 }
 
+TEST_F(TaskStateTest, FinalFaninReleaseClaimsReadyDieOnce) {
+    alignas(64) PTO2TaskSlotState slot;
+    init_slot(slot, PTO2_TASK_PENDING, 2, 1);
+
+    EXPECT_FALSE(sched.release_fanin_and_check_ready(slot, TaskReadyDomain::DIE0));
+    EXPECT_EQ(slot.ready_domain(), TaskReadyDomain::UNASSIGNED);
+    EXPECT_TRUE(sched.release_fanin_and_check_ready(slot, TaskReadyDomain::DIE1));
+    EXPECT_EQ(slot.ready_domain(), TaskReadyDomain::DIE1);
+
+    EXPECT_EQ(sched.die_ready_queues[0][static_cast<int32_t>(PTO2ResourceShape::AIC)].pop(), nullptr);
+    EXPECT_EQ(sched.die_ready_queues[1][static_cast<int32_t>(PTO2ResourceShape::AIC)].pop(), &slot);
+}
+
+TEST_F(TaskStateTest, ReadyDomainIsClearedForSlotReuse) {
+    alignas(64) PTO2TaskSlotState slot;
+    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    ASSERT_TRUE(slot.assign_ready_domain_once(TaskReadyDomain::DIE0));
+
+    slot.reset_for_reuse();
+
+    EXPECT_EQ(slot.ready_domain(), TaskReadyDomain::UNASSIGNED);
+}
+
 // =============================================================================
 // Concurrent fanin: exactly one thread detects ready (via src API)
 // =============================================================================

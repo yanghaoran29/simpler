@@ -94,6 +94,7 @@ struct PTO2OrchestratorState {
     // Total core counts set once at executor init; used for submit-time deadlock detection.
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
     int32_t total_aiv_count{0};      // AIV cores (= 2 × clusters on standard hardware)
+    uint8_t root_ready_domain_turn[PTO2_NUM_RESOURCE_SHAPES]{};
 #if SIMPLER_DFX
     // chip swimlane_level copied from get_chip_swimlane_level().
     ChipSwimlaneLevel chip_swimlane_level{ChipSwimlaneLevel::DISABLED};

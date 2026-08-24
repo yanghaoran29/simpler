@@ -970,6 +970,38 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
             }
         }
     }
+
+    if (!assign_thread_ready_domain(tidx)) {
+        handshake_failed_.store(true, std::memory_order_release);
+    }
+}
+
+bool SchedulerContext::assign_thread_ready_domain(int32_t thread_idx) {
+    CoreTracker &tracker = core_trackers_[thread_idx];
+    if (aic_count_ <= 0 || (aic_count_ % static_cast<int32_t>(PLATFORM_NUM_DIES)) != 0) {
+        LOG_ERROR("Cannot split %d active clusters evenly across %u Dies", aic_count_, PLATFORM_NUM_DIES);
+        return false;
+    }
+    int32_t assigned_die = -1;
+    for (int32_t cluster = 0; cluster < tracker.get_cluster_count(); cluster++) {
+        // Mode7 assigns clusters by their normalized physical-cluster ordinal.
+        // The first half belongs to Die0 and the second half belongs to Die1.
+        // Do not derive the Die from physical_core_id: on A5 that value is a
+        // sub-core addressing ID and is not a dense physical-cluster ordinal.
+        int32_t worker_id = tracker.get_core_id_by_offset(cluster * PLATFORM_CORES_PER_BLOCKDIM);
+        int32_t die = worker_id < aic_count_ / static_cast<int32_t>(PLATFORM_NUM_DIES) ? 0 : 1;
+        if (assigned_die >= 0 && assigned_die != die) {
+            LOG_ERROR("Thread %d owns clusters on both Die %d and Die %d", thread_idx, assigned_die, die);
+            return false;
+        }
+        assigned_die = die;
+    }
+    if (assigned_die < 0) {
+        thread_ready_domains_[thread_idx] = TaskReadyDomain::GLOBAL;
+        return true;
+    }
+    thread_ready_domains_[thread_idx] = assigned_die == 0 ? TaskReadyDomain::DIE0 : TaskReadyDomain::DIE1;
+    return true;
 }
 
 // Abort the run on a handshake failure discovered without the all-thread barrier
@@ -1051,6 +1083,10 @@ bool SchedulerContext::assign_cores_to_threads() {
         );
     }
 
+    for (int32_t t = 0; t < active_sched_threads_; t++) {
+        if (!assign_thread_ready_domain(t)) return false;
+    }
+
     LOG_INFO(
         "Config: threads=%d, cores=%d, cores_per_thread=%d", aicpu_thread_num_, cores_total_num_, thread_cores_num
     );
@@ -1096,6 +1132,10 @@ int32_t SchedulerContext::pre_handshake_init(
     aicpu_thread_num_ = aicpu_thread_num;
     sched_thread_num_ = sched_thread_num;
     regs_ = regs_base;
+    for (int32_t t = 0; t < MAX_AICPU_THREADS; t++) {
+        thread_ready_domains_[t] = TaskReadyDomain::UNASSIGNED;
+        regular_queue_global_first_[t] = false;
+    }
 
 #if SIMPLER_DFX
     // chip_swimlane_aicpu_init promotes g_chip_swimlane_level from the shared-memory
@@ -1338,6 +1378,8 @@ void SchedulerContext::deinit() {
     active_sched_threads_ = 0;
     for (int32_t t = 0; t < MAX_AICPU_THREADS; t++) {
         core_trackers_[t] = CoreTracker{};
+        thread_ready_domains_[t] = TaskReadyDomain::UNASSIGNED;
+        regular_queue_global_first_[t] = false;
     }
 
     regs_ = 0;

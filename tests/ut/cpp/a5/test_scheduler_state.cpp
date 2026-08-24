@@ -438,6 +438,40 @@ TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
     EXPECT_EQ(out[0], &slot);
 }
 
+TEST_F(SchedulerStateTest, RegularReadyTaskRoutesToAssignedDieQueue) {
+    alignas(64) PTO2TaskSlotState die0_slot, die1_slot;
+    init_slot(die0_slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(die1_slot, PTO2_TASK_PENDING, 1, 1);
+    ASSERT_TRUE(die0_slot.assign_ready_domain_once(TaskReadyDomain::DIE0));
+    ASSERT_TRUE(die1_slot.assign_ready_domain_once(TaskReadyDomain::DIE1));
+
+    sched.push_ready_routed(&die0_slot);
+    sched.push_ready_routed(&die1_slot);
+
+    auto shape = static_cast<int32_t>(PTO2ResourceShape::AIC);
+    EXPECT_EQ(sched.ready_queues[shape].pop(), nullptr);
+    EXPECT_EQ(sched.die_ready_queues[0][shape].pop(), &die0_slot);
+    EXPECT_EQ(sched.die_ready_queues[1][shape].pop(), &die1_slot);
+}
+
+TEST_F(SchedulerStateTest, GlobalAndSyncReadyTasksBypassDieQueues) {
+    alignas(64) PTO2TaskSlotState global_slot, sync_slot;
+    init_slot(global_slot, PTO2_TASK_PENDING, 1, 1);
+    init_slot(sync_slot, PTO2_TASK_PENDING, 1, 1);
+    ASSERT_TRUE(global_slot.assign_ready_domain_once(TaskReadyDomain::GLOBAL));
+    ASSERT_TRUE(sync_slot.assign_ready_domain_once(TaskReadyDomain::DIE0));
+    sync_slot.task_attrs.set_sync_start();
+
+    sched.push_ready_routed(&global_slot);
+    sched.push_ready_routed(&sync_slot);
+
+    auto shape = static_cast<int32_t>(PTO2ResourceShape::AIC);
+    EXPECT_EQ(sched.ready_queues[shape].pop(), &global_slot);
+    EXPECT_EQ(sched.ready_sync_queues[shape].pop(), &sync_slot);
+    EXPECT_EQ(sched.die_ready_queues[0][shape].pop(), nullptr);
+    EXPECT_EQ(sched.die_ready_queues[1][shape].pop(), nullptr);
+}
+
 TEST(CoreTrackerTest, MixPartiallyRunningClusterAdmittedAsPerCorePlacement) {
     CoreTracker tracker;
     tracker.init(1);

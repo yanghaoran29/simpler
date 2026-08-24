@@ -465,6 +465,20 @@ enum PTO2TaskLifecycleFlag : uint8_t {
 
 static_assert((PTO2_DISPATCH_PROPAGATED & (PTO2_READY_CLAIMED | PTO2_COMPLETION_DONE | PTO2_SUBTASK_DEFERRED)) == 0);
 
+enum class TaskReadyDomain : uint8_t {
+    UNASSIGNED = 0,
+    DIE0 = 1,
+    DIE1 = 2,
+    GLOBAL = 3,
+};
+
+static constexpr uint8_t TASK_READY_DOMAIN_SHIFT = 4;
+static constexpr uint8_t TASK_READY_DOMAIN_MASK = 3U << TASK_READY_DOMAIN_SHIFT;
+static_assert(
+    (TASK_READY_DOMAIN_MASK &
+     (PTO2_READY_CLAIMED | PTO2_COMPLETION_DONE | PTO2_SUBTASK_DEFERRED | PTO2_DISPATCH_PROPAGATED)) == 0
+);
+
 struct alignas(64) PTO2TaskSlotState {
     // Fanout lock + list (accessed together under lock in on_task_complete)
     std::atomic<int32_t> fanout_lock;  // Per-task spinlock (0=unlocked, 1=locked)
@@ -553,6 +567,29 @@ struct alignas(64) PTO2TaskSlotState {
     // rechecked by try_mark_dispatch_propagated() while holding fanout_lock.
     bool has_dispatch_propagated() const {
         return (lifecycle_flags.load(std::memory_order_acquire) & PTO2_DISPATCH_PROPAGATED) != 0;
+    }
+
+    TaskReadyDomain ready_domain() const {
+        uint8_t flags = lifecycle_flags.load(std::memory_order_acquire);
+        return static_cast<TaskReadyDomain>((flags & TASK_READY_DOMAIN_MASK) >> TASK_READY_DOMAIN_SHIFT);
+    }
+
+    bool assign_ready_domain_once(TaskReadyDomain domain) {
+        if (domain == TaskReadyDomain::UNASSIGNED) return false;
+        uint8_t flags = lifecycle_flags.load(std::memory_order_acquire);
+        for (;;) {
+            TaskReadyDomain current =
+                static_cast<TaskReadyDomain>((flags & TASK_READY_DOMAIN_MASK) >> TASK_READY_DOMAIN_SHIFT);
+            if (current != TaskReadyDomain::UNASSIGNED) return current == domain;
+            uint8_t desired = static_cast<uint8_t>(
+                (flags & ~TASK_READY_DOMAIN_MASK) | (static_cast<uint8_t>(domain) << TASK_READY_DOMAIN_SHIFT)
+            );
+            if (lifecycle_flags.compare_exchange_weak(
+                    flags, desired, std::memory_order_acq_rel, std::memory_order_acquire
+                )) {
+                return true;
+            }
+        }
     }
 
     // The propagation owner holds fanout_lock through its fanout snapshot, so

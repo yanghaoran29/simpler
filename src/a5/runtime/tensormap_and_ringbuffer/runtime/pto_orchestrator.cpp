@@ -424,6 +424,47 @@ static bool all_claimed_fanin_allow_early_resolve(const PTO2FaninBuilder &fanin_
     });
 }
 
+static bool can_run_within_one_die(const PTO2OrchestratorState *orch, const PTO2TaskSlotState &slot_state) {
+    PTO2ResourceShape shape = slot_state.active_mask.to_shape();
+    if (shape == PTO2ResourceShape::DUMMY || slot_state.task_attrs.requires_sync_start() ||
+        slot_state.task_attrs.allow_early_resolve()) {
+        return false;
+    }
+    int32_t total = shape == PTO2ResourceShape::AIV ? orch->total_aiv_count : orch->total_cluster_count;
+    if (total <= 0 || (total % static_cast<int32_t>(PLATFORM_NUM_DIES)) != 0) return false;
+    return slot_state.logical_block_num <= total / static_cast<int32_t>(PLATFORM_NUM_DIES);
+}
+
+static TaskReadyDomain next_root_ready_domain(PTO2OrchestratorState *orch, PTO2ResourceShape shape) {
+    uint8_t &turn = orch->root_ready_domain_turn[static_cast<int32_t>(shape)];
+    return (turn++ & 1U) == 0 ? TaskReadyDomain::DIE0 : TaskReadyDomain::DIE1;
+}
+
+static TaskReadyDomain choose_direct_ready_domain(
+    PTO2OrchestratorState *orch, PTO2TaskSlotState &slot_state, const PTO2FaninBuilder *fanin_builder
+) {
+    if (!can_run_within_one_die(orch, slot_state)) return TaskReadyDomain::GLOBAL;
+
+    TaskReadyDomain inherited = TaskReadyDomain::UNASSIGNED;
+    uint64_t highest_task_id = 0;
+    bool found = false;
+    if (fanin_builder != nullptr) {
+        fanin_builder->for_each([&](PTO2TaskSlotState *producer, DepFlags flags) -> bool {
+            if (!dep_has_wait(flags) || producer == nullptr || producer->task == nullptr) return true;
+            TaskReadyDomain domain = producer->ready_domain();
+            if (domain != TaskReadyDomain::DIE0 && domain != TaskReadyDomain::DIE1) return true;
+            uint64_t task_id = producer->task->task_id.raw;
+            if (!found || task_id > highest_task_id) {
+                inherited = domain;
+                highest_task_id = task_id;
+                found = true;
+            }
+            return true;
+        });
+    }
+    return found ? inherited : next_root_ready_domain(orch, slot_state.active_mask.to_shape());
+}
+
 void PTO2OrchestratorState::mark_dep_pool_position(PTO2TaskSlotState &slot_state) {
     PTO2SchedulerState *sched = scheduler;
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
@@ -1106,6 +1147,7 @@ static TaskOutputTensors submit_task_common(
         cur_slot_state.fanin_count = 1;
         cur_slot_state.fanin_refcount.store(1, std::memory_order_release);
         orch->mark_dep_pool_position(cur_slot_state);
+        cur_slot_state.assign_ready_domain_once(choose_direct_ready_domain(orch, cur_slot_state, nullptr));
         sched->push_ready_routed(&cur_slot_state);
     } else if (all_claimed_fanin_completed(fanin_builder)) {
         int32_t ready_seed = fanin_builder.wait_count + 1;
@@ -1123,8 +1165,12 @@ static TaskOutputTensors submit_task_common(
             }
         });
         orch->mark_dep_pool_position(cur_slot_state);
+        cur_slot_state.assign_ready_domain_once(choose_direct_ready_domain(orch, cur_slot_state, &fanin_builder));
         sched->push_ready_routed(&cur_slot_state);
     } else {
+        if (!can_run_within_one_die(orch, cur_slot_state)) {
+            cur_slot_state.assign_ready_domain_once(TaskReadyDomain::GLOBAL);
+        }
         if (!orch_wire_live_fanin_task(orch, cur_slot_state, fanin_builder.wait_count)) {
             return result;
         }

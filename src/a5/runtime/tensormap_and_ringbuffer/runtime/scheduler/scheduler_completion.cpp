@@ -179,9 +179,11 @@ void SchedulerContext::complete_slot_task(
         // SCHED_PROFILING variant takes thread_idx for its per-thread atomic
         // counter side-effects (g_sched_*_atomic_count[thread_idx], consumed
         // by the otc_* log lines). The returned fanout_edges feeds Resolve.
-        [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(slot_state, thread_idx).fanout_edges;
+        [[maybe_unused]] uint32_t consumers_resolved =
+            sched_->on_task_complete(slot_state, thread_idx, thread_ready_domain(thread_idx)).fanout_edges;
 #else
-        [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(slot_state);
+        [[maybe_unused]] uint32_t consumers_resolved =
+            sched_->on_task_complete(slot_state, thread_idx, thread_ready_domain(thread_idx));
 #endif
 #if SIMPLER_DFX
         if (resolve_t0 != 0) {

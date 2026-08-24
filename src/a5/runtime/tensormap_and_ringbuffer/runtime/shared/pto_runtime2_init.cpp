@@ -145,6 +145,11 @@ PTO2SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_ca
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
+    for (uint32_t die = 0; die < PLATFORM_NUM_DIES; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            layout.off_die_ready_queue_slots[die][i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        }
+    }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
@@ -186,6 +191,16 @@ bool PTO2SchedulerState::init_data_from_layout(
                 &sched->ready_queues[i], arena, layout.off_ready_queue_slots[i], layout.ready_queue_capacity
             )) {
             return false;
+        }
+    }
+    for (uint32_t die = 0; die < PLATFORM_NUM_DIES; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            if (!ready_queue_init_data_from_layout(
+                    &sched->die_ready_queues[die][i], arena, layout.off_die_ready_queue_slots[die][i],
+                    layout.ready_queue_capacity
+                )) {
+                return false;
+            }
         }
     }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
@@ -247,6 +262,11 @@ void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         sched->ready_queues[i].reset_for_reuse();
     }
+    for (uint32_t die = 0; die < PLATFORM_NUM_DIES; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            sched->die_ready_queues[die][i].reset_for_reuse();
+        }
+    }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         sched->ready_sync_queues[i].reset_for_reuse();
     }
@@ -264,6 +284,13 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
     PTO2SchedulerState *sched = this;
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
+    }
+    for (uint32_t die = 0; die < PLATFORM_NUM_DIES; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_wire_arena_pointers(
+                &sched->die_ready_queues[die][i], arena, layout.off_die_ready_queue_slots[die][i]
+            );
+        }
     }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_sync_queues[i], arena, layout.off_ready_sync_queue_slots[i]);
@@ -292,6 +319,11 @@ void PTO2SchedulerState::destroy() {
     }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_queues[i]);
+    }
+    for (uint32_t die = 0; die < PLATFORM_NUM_DIES; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_destroy(&sched->die_ready_queues[die][i]);
+        }
     }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_sync_queues[i]);
@@ -429,6 +461,7 @@ bool PTO2OrchestratorState::init_data_from_layout(
     orch->scope_stack_top = -1;
     orch->scope_stack_capacity = layout.scope_stack_capacity;
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    memset(orch->root_ready_domain_turn, 0, sizeof(orch->root_ready_domain_turn));
 
     return true;
 }
@@ -490,6 +523,7 @@ bool PTO2OrchestratorState::reset_for_reuse(
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
     orch->total_cluster_count = 0;
     orch->total_aiv_count = 0;
+    memset(orch->root_ready_domain_turn, 0, sizeof(orch->root_ready_domain_turn));
 #if SIMPLER_DFX
     orch->tasks_submitted = 0;
     orch->buffers_allocated = 0;

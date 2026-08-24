@@ -426,6 +426,7 @@ struct CompletionStats {
  */
 struct PTO2SchedulerLayout {
     size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_die_ready_queue_slots[PLATFORM_NUM_DIES][PTO2_NUM_RESOURCE_SHAPES];
     size_t off_ready_sync_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
     size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
@@ -530,6 +531,11 @@ struct PTO2SchedulerState {
     // Ready queues remain global (scheduling is ring-agnostic)
     PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
 
+    // Ordinary ready tasks with a Die assignment are published only to the
+    // matching queue. The global queues above remain the fallback for tasks
+    // that cannot be constrained to one Die.
+    PTO2ReadyQueue die_ready_queues[PLATFORM_NUM_DIES][PTO2_NUM_RESOURCE_SHAPES];
+
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
     // instead of ready_queues[] so the dispatch loop can drain it as a strict Tier-0
     // (sync_start > MIX > C/V) before any regular ready task takes a core, while
@@ -565,7 +571,14 @@ struct PTO2SchedulerState {
         } else if (slot_state->task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
         } else {
-            ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+            TaskReadyDomain domain = slot_state->ready_domain();
+            if (domain == TaskReadyDomain::DIE0 || domain == TaskReadyDomain::DIE1) {
+                int32_t die = static_cast<int32_t>(domain) - static_cast<int32_t>(TaskReadyDomain::DIE0);
+                die_ready_queues[die][static_cast<int32_t>(shape)].push(slot_state);
+            } else {
+                slot_state->assign_ready_domain_once(TaskReadyDomain::GLOBAL);
+                ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+            }
         }
     }
 
@@ -1037,7 +1050,14 @@ struct PTO2SchedulerState {
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state);
         } else {
-            ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
+            TaskReadyDomain domain = slot_state.ready_domain();
+            if (domain == TaskReadyDomain::DIE0 || domain == TaskReadyDomain::DIE1) {
+                int32_t die = static_cast<int32_t>(domain) - static_cast<int32_t>(TaskReadyDomain::DIE0);
+                die_ready_queues[die][static_cast<int32_t>(shape)].push(&slot_state);
+            } else {
+                slot_state.assign_ready_domain_once(TaskReadyDomain::GLOBAL);
+                ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
+            }
         }
         return true;
     }
@@ -1074,19 +1094,33 @@ struct PTO2SchedulerState {
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
         } else {
-            ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+            TaskReadyDomain domain = slot_state.ready_domain();
+            if (domain == TaskReadyDomain::DIE0 || domain == TaskReadyDomain::DIE1) {
+                int32_t die = static_cast<int32_t>(domain) - static_cast<int32_t>(TaskReadyDomain::DIE0);
+                die_ready_queues[die][static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+            } else {
+                slot_state.assign_ready_domain_once(TaskReadyDomain::GLOBAL);
+                ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+            }
         }
         return true;
     }
 #endif
 
     bool release_fanin_and_check_ready(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+        return release_fanin_and_check_ready(slot_state, TaskReadyDomain::GLOBAL, sink);
+    }
+
+    bool release_fanin_and_check_ready(
+        PTO2TaskSlotState &slot_state, TaskReadyDomain releasing_domain, EarlyDispatchReleaseSink *sink = nullptr
+    ) {
         // Atomically increment fanin_refcount and check if all producers are done
         // ACQ_REL on fanin_refcount already synchronizes with the orchestrator's
         // init release, making fanin_count visible — plain load suffices.
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
 
         if (new_refcount == slot_state.fanin_count) {
+            slot_state.assign_ready_domain_once(releasing_domain);
             return route_ready_once(slot_state, sink);
         }
         return false;
@@ -1097,10 +1131,18 @@ struct PTO2SchedulerState {
         PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
         EarlyDispatchReleaseSink *sink = nullptr
     ) {
+        return release_fanin_and_check_ready(slot_state, atomic_count, push_wait, TaskReadyDomain::GLOBAL, sink);
+    }
+
+    bool release_fanin_and_check_ready(
+        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait, TaskReadyDomain releasing_domain,
+        EarlyDispatchReleaseSink *sink = nullptr
+    ) {
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
 
         if (new_refcount == slot_state.fanin_count) {
+            slot_state.assign_ready_domain_once(releasing_domain);
             return route_ready_once(slot_state, atomic_count, push_wait, sink);
         }
         return false;
@@ -1162,15 +1204,12 @@ struct PTO2SchedulerState {
     uint32_t
 #endif
     on_task_complete(
-        PTO2TaskSlotState &slot_state
-#if SIMPLER_SCHED_PROFILING
-        ,
-        int thread_idx
-#endif
+        PTO2TaskSlotState &slot_state, int thread_idx = -1, TaskReadyDomain releasing_domain = TaskReadyDomain::GLOBAL
     ) {
 #if SIMPLER_SCHED_PROFILING
         CompletionStats stats = {0, 0, 0, true};
 #else
+        (void)thread_idx;
         uint32_t consumer_walk_count = 0;
 #endif
 #if SIMPLER_SCHED_PROFILING
@@ -1206,12 +1245,12 @@ struct PTO2SchedulerState {
             PTO2TaskSlotState &consumer_slot = *current->slot_state;
 #if SIMPLER_SCHED_PROFILING
             stats.fanout_edges++;
-            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, &rel_sink)) {
+            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, releasing_domain, &rel_sink)) {
                 stats.tasks_enqueued++;
             }
 #else
             consumer_walk_count++;
-            release_fanin_and_check_ready(consumer_slot, &rel_sink);
+            release_fanin_and_check_ready(consumer_slot, releasing_domain, &rel_sink);
 #endif
             current = current->next;
         }
@@ -1320,11 +1359,7 @@ struct PTO2SchedulerState {
 // entries[]. Mirrors the a2a3 impl; see that mirror for the rationale.
 inline bool
 AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &sink, PTO2TaskSlotState &slot_state) {
-#if SIMPLER_SCHED_PROFILING
-    sink.sched->on_task_complete(slot_state, sink.thread_idx);
-#else
-    sink.sched->on_task_complete(slot_state);
-#endif
+    sink.sched->on_task_complete(slot_state, sink.thread_idx, sink.ready_domain);
     if (*sink.deferred_release_count >= sink.deferred_release_capacity) {
         while (*sink.deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
@@ -1344,11 +1379,8 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
     AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-    PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count, int32_t deferred_release_capacity
-#if SIMPLER_SCHED_PROFILING
-    ,
-    int thread_idx
-#endif
+    PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
+    int32_t deferred_release_capacity, int32_t thread_idx, TaskReadyDomain ready_domain
 ) {
     AsyncPollResult result;
     if (!try_lock()) return result;
@@ -1358,9 +1390,8 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
     sink.deferred_release_slot_states = deferred_release_slot_states;
     sink.deferred_release_count = &deferred_release_count;
     sink.deferred_release_capacity = deferred_release_capacity;
-#if SIMPLER_SCHED_PROFILING
     sink.thread_idx = thread_idx;
-#endif
+    sink.ready_domain = ready_domain;
 
     int32_t drain_err = PTO2_ERROR_NONE;
     drain_aicore_completion_mailbox_locked(aicore_mailbox, sink, drain_err);
@@ -1391,11 +1422,7 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
         }
 
         if (entry.normal_done && entry.waiting_completion_count <= 0) {
-#if SIMPLER_SCHED_PROFILING
-            sched->on_task_complete(*entry.slot_state, thread_idx);
-#else
-            sched->on_task_complete(*entry.slot_state);
-#endif
+            sched->on_task_complete(*entry.slot_state, thread_idx, ready_domain);
             if (deferred_release_count >= deferred_release_capacity) {
                 while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
