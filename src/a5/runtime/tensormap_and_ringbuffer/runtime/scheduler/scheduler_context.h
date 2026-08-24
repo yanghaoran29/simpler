@@ -86,14 +86,6 @@ public:
     // Leader-only profiling-subsystem init (DFX builds); called behind a barrier
     // in the barrier-free path since pmu_aicpu_init needs all physical_core_ids_.
     void post_handshake_profiling_init();
-    // RTT die preflight (mode 3): each scheduler pthread probes die0/die1 AICore
-    // COND latency via physical-core-indexed MMIO, then the leader ranks pthreads.
-    void run_die_rtt_preflight(int32_t tidx);
-    void finalize_rtt_die_assignment(int32_t active_threads);
-    void reset_rtt_die_assignment_state();
-    bool rtt_probe_done() const { return rtt_probe_done_.load(std::memory_order_acquire); }
-    void set_rtt_probe_done(bool done) { rtt_probe_done_.store(done, std::memory_order_release); }
-    std::atomic<int32_t> &rtt_probe_arrived() { return rtt_probe_arrived_; }
     bool handshake_failed() const { return handshake_failed_.load(std::memory_order_acquire); }
     // Leader-only, after the handshake barrier: build worker-id lists, assign
     // cores, init profiling subsystems, read task counts, init payloads.
@@ -200,14 +192,8 @@ private:
     int32_t aic_count_{0};
     int32_t aiv_count_{0};
     int32_t sched_aicore_assignment_mode_{0};
-
-    // RTT die preflight remaps pthread tidx -> logical exec (0..3). Identity by
-    // default; mode 3 reorders so logical 0-1 manage die0 clusters and 2-3 die1.
-    int32_t sched_pthread_to_logical_[MAX_AICPU_THREADS]{};
-    int32_t sched_logical_to_pthread_[MAX_AICPU_THREADS]{};
-    int64_t sched_rtt_die_delta_[MAX_AICPU_THREADS]{};
-    std::atomic<int32_t> rtt_probe_arrived_{0};
-    std::atomic<bool> rtt_probe_done_{false};
+    bool dependency_die_affinity_enabled_{false};
+    bool explicit_data_affinity_enabled_{false};
 
     // Compact per-core CoreType, packed contiguously (~2 cache lines total) so
     // post_handshake_init's ordered discovery scan reads it instead of taking a
@@ -318,7 +304,7 @@ private:
 
     void dispatch_shape(
         int32_t thread_idx, PTO2ReadyQueue *disp_queues, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
-        CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
+        CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed, int32_t target_die = -1
     );
 
     // One pass of "Phase 4" in the resolve_and_dispatch loop: IDLE-stage dispatch
@@ -355,7 +341,10 @@ private:
         int32_t thread_idx, PTO2TaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
         CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
     );
-    int32_t early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase);
+    int32_t early_dispatch_shape(
+        int32_t thread_idx, PTO2ReadyQueue *queues, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
+        int32_t target_die = -1
+    );
 
     // Returns true if any *other* scheduler thread currently has an idle core
     // matching `shape`. Used as a scheduling hint on the PENDING dispatch path
@@ -393,8 +382,7 @@ private:
 
     void complete_slot_task(
         PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, PTO2SubtaskSlot subslot, int32_t thread_idx,
-        int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
-        PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+        int32_t core_id, Handshake *hank, int32_t &completed_this_turn, DeferredReleaseQueue &deferred_releases
 #if SIMPLER_DFX
         ,
         uint64_t dispatch_ts, uint64_t finish_ts
@@ -406,7 +394,7 @@ private:
 
     void check_running_cores_for_completion(
         int32_t thread_idx, Handshake *hank, int32_t &completed_this_turn, int32_t &cur_thread_completed,
-        bool &made_progress, PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+        bool &made_progress, DeferredReleaseQueue &deferred_releases
     );
 
     bool enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num);

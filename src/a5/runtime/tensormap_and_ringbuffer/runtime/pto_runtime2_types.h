@@ -461,9 +461,24 @@ enum PTO2TaskLifecycleFlag : uint8_t {
     // has_any_subtask_deferred().
     PTO2_SUBTASK_DEFERRED = 1U << 2,
     PTO2_DISPATCH_PROPAGATED = 1U << 3,
+    // Bits 4-5 carry a soft dispatch-locality hint without growing the 64B
+    // task slot. Before dispatch this is the preferred die inherited from the
+    // producer that made the task ready; at final FIN it is overwritten with
+    // the die where the task actually completed.
+    PTO2_LOCALITY_DIE_VALID = 1U << 4,
+    PTO2_LOCALITY_DIE1 = 1U << 5,
+    EXPLICIT_DIE_AFFINITY = 1U << 6,
+    BLOCK_ALTERNATING_DIE_AFFINITY = 1U << 7,
 };
 
-static_assert((PTO2_DISPATCH_PROPAGATED & (PTO2_READY_CLAIMED | PTO2_COMPLETION_DONE | PTO2_SUBTASK_DEFERRED)) == 0);
+static constexpr uint8_t PTO2_LOCALITY_DIE_MASK = PTO2_LOCALITY_DIE_VALID | PTO2_LOCALITY_DIE1;
+static constexpr uint8_t EXPLICIT_DIE_AFFINITY_MASK =
+    PTO2_LOCALITY_DIE_MASK | EXPLICIT_DIE_AFFINITY | BLOCK_ALTERNATING_DIE_AFFINITY;
+
+static_assert(
+    (PTO2_LOCALITY_DIE_MASK &
+     (PTO2_READY_CLAIMED | PTO2_COMPLETION_DONE | PTO2_SUBTASK_DEFERRED | PTO2_DISPATCH_PROPAGATED)) == 0
+);
 
 struct alignas(64) PTO2TaskSlotState {
     // Fanout lock + list (accessed together under lock in on_task_complete)
@@ -580,6 +595,94 @@ struct alignas(64) PTO2TaskSlotState {
 
     bool has_any_subtask_deferred() const {
         return (lifecycle_flags.load(std::memory_order_acquire) & PTO2_SUBTASK_DEFERRED) != 0;
+    }
+
+    // Atomically replace only the locality bits because completion, dispatch,
+    // and deferred-condition paths update other lifecycle bits concurrently.
+    void set_locality_die(int32_t die) {
+        if (die != 0 && die != 1) return;
+        uint8_t flags = lifecycle_flags.load(std::memory_order_relaxed);
+        for (;;) {
+            const uint8_t die_bits = PTO2_LOCALITY_DIE_VALID | (die == 1 ? PTO2_LOCALITY_DIE1 : 0);
+            const uint8_t desired = (flags & ~PTO2_LOCALITY_DIE_MASK) | die_bits;
+            if (lifecycle_flags.compare_exchange_weak(
+                    flags, desired, std::memory_order_release, std::memory_order_relaxed
+                )) {
+                return;
+            }
+        }
+    }
+
+    // Returns -1 when no producer locality is available (for example a graph
+    // root), otherwise the preferred/actual die encoded in lifecycle_flags.
+    int32_t locality_die() const {
+        const uint8_t flags = lifecycle_flags.load(std::memory_order_acquire);
+        if ((flags & PTO2_LOCALITY_DIE_VALID) == 0) return -1;
+        return (flags & PTO2_LOCALITY_DIE1) != 0 ? 1 : 0;
+    }
+
+    void set_explicit_die_affinity(int32_t base_die, bool block_alternating) {
+        if (base_die != 0 && base_die != 1) return;
+        uint8_t flags = lifecycle_flags.load(std::memory_order_relaxed);
+        for (;;) {
+            uint8_t policy = PTO2_LOCALITY_DIE_VALID | EXPLICIT_DIE_AFFINITY;
+            if (base_die == 1) policy |= PTO2_LOCALITY_DIE1;
+            if (block_alternating) policy |= BLOCK_ALTERNATING_DIE_AFFINITY;
+            const uint8_t desired = (flags & ~EXPLICIT_DIE_AFFINITY_MASK) | policy;
+            if (lifecycle_flags.compare_exchange_weak(
+                    flags, desired, std::memory_order_release, std::memory_order_relaxed
+                )) {
+                break;
+            }
+        }
+    }
+
+    bool has_explicit_die_affinity() const {
+        return (lifecycle_flags.load(std::memory_order_acquire) & EXPLICIT_DIE_AFFINITY) != 0;
+    }
+
+    bool has_block_alternating_die_affinity() const {
+        return (lifecycle_flags.load(std::memory_order_acquire) & BLOCK_ALTERNATING_DIE_AFFINITY) != 0;
+    }
+
+    int32_t explicit_preferred_die(int32_t block_idx) const {
+        const uint8_t flags = lifecycle_flags.load(std::memory_order_acquire);
+        if ((flags & (PTO2_LOCALITY_DIE_VALID | EXPLICIT_DIE_AFFINITY)) !=
+            (PTO2_LOCALITY_DIE_VALID | EXPLICIT_DIE_AFFINITY)) {
+            return -1;
+        }
+        int32_t die = (flags & PTO2_LOCALITY_DIE1) != 0 ? 1 : 0;
+        if ((flags & BLOCK_ALTERNATING_DIE_AFFINITY) != 0) die ^= (block_idx & 1);
+        return die;
+    }
+
+    int32_t claim_next_block_for_die(int32_t die, int32_t &block) {
+        if (die != 0 && die != 1) return 0;
+        int16_t current = next_block_idx.load(std::memory_order_relaxed);
+        while (current < logical_block_num) {
+            // Keep the original global block claim order. A scheduler for the
+            // other Die leaves this entry queued until the preceding block has
+            // been claimed, avoiding two independent cursors changing launch
+            // order for atomic-accumulation kernels.
+            if (explicit_preferred_die(current) != die) return 0;
+            const int16_t desired = static_cast<int16_t>(current + 1);
+            if (next_block_idx.compare_exchange_weak(
+                    current, desired, std::memory_order_seq_cst, std::memory_order_relaxed
+                )) {
+                block = current;
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    bool has_unclaimed_blocks_for_die(int32_t die) const {
+        if (die != 0 && die != 1) return false;
+        int32_t current = next_block_idx.load(std::memory_order_acquire);
+        for (; current < logical_block_num; ++current) {
+            if (explicit_preferred_die(current) == die) return true;
+        }
+        return false;
     }
 
     /**

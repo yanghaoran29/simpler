@@ -426,9 +426,11 @@ struct CompletionStats {
  */
 struct PTO2SchedulerLayout {
     size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_die_ready_queue_slots[2][PTO2_NUM_RESOURCE_SHAPES];
     size_t off_ready_sync_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
     size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_die_early_dispatch_queue_slots[2][PTO2_NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
     size_t off_dep_pool_entries[PTO2_MAX_RING_DEPTH];
     uint64_t ready_queue_capacity;
@@ -530,6 +532,11 @@ struct PTO2SchedulerState {
     // Ready queues remain global (scheduling is ring-agnostic)
     PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
 
+    // Explicit data-affinity work is published to its target Die before any
+    // scheduler competes for it. Unannotated work remains in ready_queues.
+    PTO2ReadyQueue die_ready_queues[2][PTO2_NUM_RESOURCE_SHAPES];
+    bool explicit_data_affinity_enabled{false};
+
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
     // instead of ready_queues[] so the dispatch loop can drain it as a strict Tier-0
     // (sync_start > MIX > C/V) before any regular ready task takes a core, while
@@ -564,9 +571,24 @@ struct PTO2SchedulerState {
             dummy_ready_queue.push(slot_state);
         } else if (slot_state->task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
+        } else if (route_explicit_data_affinity(*slot_state, shape)) {
+            return;
         } else {
             ready_queues[static_cast<int32_t>(shape)].push(slot_state);
         }
+    }
+
+    bool route_explicit_data_affinity(PTO2TaskSlotState &slot_state, PTO2ResourceShape shape) {
+        if (!explicit_data_affinity_enabled || !slot_state.has_explicit_die_affinity() ||
+            slot_state.task_attrs.requires_sync_start() || shape == PTO2ResourceShape::MIX ||
+            shape == PTO2ResourceShape::DUMMY || slot_state.has_block_alternating_die_affinity()) {
+            return false;
+        }
+        const int32_t shape_idx = static_cast<int32_t>(shape);
+        const int32_t die = slot_state.explicit_preferred_die(0);
+        if (die < 0) return false;
+        die_ready_queues[die][shape_idx].push(&slot_state);
+        return true;
     }
 
     static uint32_t ring_advance_pending_bit(int32_t ring_id) { return ring_mask_bit(ring_id); }
@@ -767,6 +789,7 @@ struct PTO2SchedulerState {
     };
     EarlyDispatchDoorbell early_dispatch_doorbell_table[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
     PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
+    PTO2ReadyQueue die_early_dispatch_queues[2][PTO2_NUM_RESOURCE_SHAPES];
     // Shape-agnostic sync_start candidates require an all-or-nothing owner
     // decision. The owner stages locally when one tracker can hold the complete
     // cohort and falls back to the generation-tagged global drain otherwise.
@@ -922,9 +945,16 @@ struct PTO2SchedulerState {
         }
 
         uint64_t task_id = static_cast<uint64_t>(consumer.task->task_id.raw);
-        bool queued = consumer.task_attrs.requires_sync_start() ?
-                          early_sync_start_queue.push_tagged(&consumer, task_id) :
-                          early_dispatch_queues[static_cast<int32_t>(shape)].push_tagged(&consumer, task_id);
+        bool queued = false;
+        if (consumer.task_attrs.requires_sync_start()) {
+            queued = early_sync_start_queue.push_tagged(&consumer, task_id);
+        } else if (explicit_data_affinity_enabled && consumer.has_explicit_die_affinity() &&
+                   !consumer.has_block_alternating_die_affinity() && shape != PTO2ResourceShape::MIX) {
+            const int32_t die = consumer.explicit_preferred_die(0);
+            queued = die_early_dispatch_queues[die][static_cast<int32_t>(shape)].push_tagged(&consumer, task_id);
+        } else {
+            queued = early_dispatch_queues[static_cast<int32_t>(shape)].push_tagged(&consumer, task_id);
+        }
         if (!queued) {
             // The candidate was never published to an early-dispatch drain, so
             // drop the speculative claim and let readiness take the ordinary
@@ -1036,6 +1066,8 @@ struct PTO2SchedulerState {
             dummy_ready_queue.push(&slot_state);
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state);
+        } else if (route_explicit_data_affinity(slot_state, shape)) {
+            return true;
         } else {
             ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
         }
@@ -1073,6 +1105,8 @@ struct PTO2SchedulerState {
             dummy_ready_queue.push(&slot_state, atomic_count, push_wait);
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+        } else if (route_explicit_data_affinity(slot_state, shape)) {
+            return true;
         } else {
             ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
         }
@@ -1080,13 +1114,19 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    bool release_fanin_and_check_ready(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+    bool release_fanin_and_check_ready(
+        PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr, int32_t producer_die = -1
+    ) {
         // Atomically increment fanin_refcount and check if all producers are done
         // ACQ_REL on fanin_refcount already synchronizes with the orchestrator's
         // init release, making fanin_count visible — plain load suffices.
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
 
         if (new_refcount == slot_state.fanin_count) {
+            // The producer that closes the fanin is the dependency whose
+            // completion made this consumer runnable. Preserve its actual die
+            // as a soft placement preference before publishing the ready task.
+            slot_state.set_locality_die(producer_die);
             return route_ready_once(slot_state, sink);
         }
         return false;
@@ -1095,12 +1135,13 @@ struct PTO2SchedulerState {
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool release_fanin_and_check_ready(
         PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
-        EarlyDispatchReleaseSink *sink = nullptr
+        EarlyDispatchReleaseSink *sink = nullptr, int32_t producer_die = -1
     ) {
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
 
         if (new_refcount == slot_state.fanin_count) {
+            slot_state.set_locality_die(producer_die);
             return route_ready_once(slot_state, atomic_count, push_wait, sink);
         }
         return false;
@@ -1202,16 +1243,17 @@ struct PTO2SchedulerState {
         uint64_t fanout_atomics = 0, push_wait = 0;
 #endif
         EarlyDispatchReleaseSink rel_sink;
+        const int32_t producer_die = slot_state.locality_die();
         while (current != nullptr) {
             PTO2TaskSlotState &consumer_slot = *current->slot_state;
 #if SIMPLER_SCHED_PROFILING
             stats.fanout_edges++;
-            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, &rel_sink)) {
+            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, &rel_sink, producer_die)) {
                 stats.tasks_enqueued++;
             }
 #else
             consumer_walk_count++;
-            release_fanin_and_check_ready(consumer_slot, &rel_sink);
+            release_fanin_and_check_ready(consumer_slot, &rel_sink, producer_die);
 #endif
             current = current->next;
         }
@@ -1320,31 +1362,22 @@ struct PTO2SchedulerState {
 // entries[]. Mirrors the a2a3 impl; see that mirror for the rationale.
 inline bool
 AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &sink, PTO2TaskSlotState &slot_state) {
+    if (!sink.can_inline_complete()) return false;
 #if SIMPLER_SCHED_PROFILING
     sink.sched->on_task_complete(slot_state, sink.thread_idx);
 #else
     sink.sched->on_task_complete(slot_state);
 #endif
-    if (*sink.deferred_release_count >= sink.deferred_release_capacity) {
-        while (*sink.deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-            (void)sink.sched->on_task_release(
-                *sink.deferred_release_slot_states[--(*sink.deferred_release_count)], sink.thread_idx
-            );
-#else
-            sink.sched->on_task_release(*sink.deferred_release_slot_states[--(*sink.deferred_release_count)]);
-#endif
-        }
-    }
-    sink.deferred_release_slot_states[(*sink.deferred_release_count)++] = &slot_state;
+    bool release_queued = sink.deferred_releases->push(&slot_state);
+    debug_assert(release_queued);
+    (void)release_queued;
     sink.inline_completed++;
     return true;
 }
 
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
-    AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-    PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count, int32_t deferred_release_capacity
+    AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched, DeferredReleaseQueue &deferred_releases
 #if SIMPLER_SCHED_PROFILING
     ,
     int thread_idx
@@ -1355,9 +1388,7 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
 
     AsyncWaitList::DrainCompletionSink sink{};
     sink.sched = sched;
-    sink.deferred_release_slot_states = deferred_release_slot_states;
-    sink.deferred_release_count = &deferred_release_count;
-    sink.deferred_release_capacity = deferred_release_capacity;
+    sink.deferred_releases = &deferred_releases;
 #if SIMPLER_SCHED_PROFILING
     sink.thread_idx = thread_idx;
 #endif
@@ -1391,21 +1422,17 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
         }
 
         if (entry.normal_done && entry.waiting_completion_count <= 0) {
+            // Retain the ready entry until a later scheduler iteration instead
+            // of draining the whole release queue to make space.
+            if (deferred_releases.full()) continue;
 #if SIMPLER_SCHED_PROFILING
             sched->on_task_complete(*entry.slot_state, thread_idx);
 #else
             sched->on_task_complete(*entry.slot_state);
 #endif
-            if (deferred_release_count >= deferred_release_capacity) {
-                while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                    (void)sched->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                    sched->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-                }
-            }
-            deferred_release_slot_states[deferred_release_count++] = entry.slot_state;
+            bool release_queued = deferred_releases.push(entry.slot_state);
+            debug_assert(release_queued);
+            (void)release_queued;
             result.completed++;
 
             int32_t last = count - 1;

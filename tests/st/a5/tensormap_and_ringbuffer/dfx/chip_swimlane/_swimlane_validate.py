@@ -45,6 +45,8 @@ _REQUIRED_TASK_FIELDS = (
     "local_setup_us",
 )
 
+_MAX_RELEASE_TASKS_PER_SLICE = 8
+
 
 def validate_perf_artifact(
     case_label: str,
@@ -107,6 +109,15 @@ def validate_perf_artifact(
             f"got {complete_finishes} Complete FINs, expected {expected_complete_finishes} under {perf}"
         )
     phase_records = [record for thread_records in data.get("aicpu_scheduler_phases", []) for record in thread_records]
+    release_records = [record for record in phase_records if record.get("phase") == "release"]
+    oversized_releases = [
+        int(record.get("tasks_processed", 0))
+        for record in release_records
+        if int(record.get("tasks_processed", 0)) > _MAX_RELEASE_TASKS_PER_SLICE
+    ]
+    assert not oversized_releases, (
+        f"release slices exceeded {_MAX_RELEASE_TASKS_PER_SLICE} tasks: {oversized_releases} under {perf}"
+    )
     for phase in required_sched_phases:
         phase_work = sum(
             int(record.get("tasks_processed", 0)) for record in phase_records if record.get("phase") == phase

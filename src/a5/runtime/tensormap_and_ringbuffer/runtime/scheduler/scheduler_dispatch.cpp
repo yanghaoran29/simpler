@@ -38,7 +38,7 @@
 // =============================================================================
 
 namespace {
-inline constexpr int32_t PTO2_DEFERRED_RELEASE_CAP = 256;
+inline constexpr int32_t DEFERRED_RELEASE_BUDGET = 8;
 }
 
 // AICore materializes args[] from src_payload on the gated path using these
@@ -276,7 +276,7 @@ int SchedulerContext::prepare_block_for_dispatch(
 
 void SchedulerContext::dispatch_shape(
     int32_t thread_idx, PTO2ReadyQueue *disp_queues, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
-    CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
+    CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed, int32_t target_die
 ) {
 #if SIMPLER_SCHED_PROFILING
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -286,6 +286,7 @@ void SchedulerContext::dispatch_shape(
     bool is_pending = (phase == CoreTracker::DispatchPhase::PENDING);
     bool is_mix = (shape == PTO2ResourceShape::MIX);
     auto cores = is_mix ? tracker.get_cluster_offset_states() : tracker.get_dispatchable_cores(shape, phase);
+    if (target_die >= 0) cores = tracker.restrict_to_die(cores, target_die);
     if (!cores.has_value()) return;
 
     while (cores.has_value() && !entered_drain) {
@@ -406,9 +407,23 @@ void SchedulerContext::dispatch_shape(
             // Claim a contiguous range of blocks, hand the slot back to the
             // ready queue immediately, then perform the expensive dispatches.
             int32_t available = is_mix ? selected_mix_clusters.count() : cores.count();
-            int32_t start = 0;
-            int32_t claim = slot_state->claim_block_range(slot_state->logical_block_num, available, start);
-            if (claim == 0) continue;
+            int32_t claimed_blocks[CoreTracker::MAX_CLUSTERS];
+            int32_t claim = 0;
+            if (target_die >= 0 && slot_state->has_block_alternating_die_affinity()) {
+                claim = slot_state->claim_next_block_for_die(target_die, claimed_blocks[0]);
+            } else {
+                int32_t start = 0;
+                claim = slot_state->claim_block_range(slot_state->logical_block_num, available, start);
+                for (int32_t b = 0; b < claim; ++b)
+                    claimed_blocks[b] = start + b;
+            }
+            if (claim == 0) {
+                if (target_die >= 0 && slot_state->has_block_alternating_die_affinity() &&
+                    slot_state->has_unclaimed_blocks_for_die(target_die)) {
+                    disp_queues[static_cast<int32_t>(shape)].push(slot_state);
+                }
+                continue;
+            }
             dispatched_any = true;
             try_pushed = true;
 
@@ -416,17 +431,24 @@ void SchedulerContext::dispatch_shape(
             published_counts[published_n] = static_cast<int16_t>(claim);
             published_n++;
 
-            if (start + claim < slot_state->logical_block_num) {
+            const bool has_remaining =
+                target_die >= 0 && slot_state->has_block_alternating_die_affinity() ?
+                    slot_state->has_unclaimed_blocks_for_die(target_die) :
+                    slot_state->next_block_idx.load(std::memory_order_acquire) < slot_state->logical_block_num;
+            if (has_remaining) {
                 disp_queues[static_cast<int32_t>(shape)].push(slot_state);
             }
 
+            const int32_t preferred_die =
+                target_die >= 0 ? target_die : (dependency_die_affinity_enabled_ ? slot_state->locality_die() : -1);
             for (int32_t b = 0; b < claim; b++) {
-                auto core_offset = is_mix ? selected_mix_clusters.pop_first() : cores.pop_first();
+                auto &available_cores = is_mix ? selected_mix_clusters : cores;
+                auto core_offset = tracker.pop_first_preferred_die(available_cores, preferred_die);
                 if (is_mix) {
                     cores.clear_bit(core_offset);
                 }
                 handle_count += prepare_block_for_dispatch(
-                    thread_idx, core_offset, *slot_state, shape, is_pending, start + b, &handles[handle_count]
+                    thread_idx, core_offset, *slot_state, shape, is_pending, claimed_blocks[b], &handles[handle_count]
                 );
             }
 
@@ -452,6 +474,7 @@ void SchedulerContext::dispatch_shape(
 
         if (!cores.has_value()) {
             cores = is_mix ? tracker.get_cluster_offset_states() : tracker.get_dispatchable_cores(shape, phase);
+            if (target_die >= 0) cores = tracker.restrict_to_die(cores, target_die);
         }
     }
 }
@@ -542,7 +565,8 @@ void SchedulerContext::dispatch_ready_tasks(
     );
     if (entered_drain) return;
 
-    // Tier 1: regular ready work.
+    // Preserve the mainline source priority for unhinted graph roots and MIX
+    // work. Directed consumers use capacity left after this pass.
     run_staging_order(
         thread_idx, pmu_active,
         [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
@@ -555,6 +579,49 @@ void SchedulerContext::dispatch_ready_tasks(
             return has_residual_mix();
         }
     );
+    if (entered_drain) return;
+
+    if (explicit_data_affinity_enabled_) {
+        int32_t local_die = -1;
+        for (int32_t die = 0; die < 2 && !entered_drain; ++die) {
+            if (!tracker.owns_die(die)) continue;
+            local_die = local_die == -1 ? die : -2;
+            run_staging_order(
+                thread_idx, pmu_active,
+                [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+                    dispatch_shape(
+                        thread_idx, sched_->die_ready_queues[die], shape, phase, tracker, entered_drain, made_progress,
+                        try_pushed, die
+                    );
+                    return entered_drain;
+                },
+                [] {
+                    return false;
+                }
+            );
+        }
+        if (local_die >= 0 && !entered_drain) {
+            constexpr size_t kRemoteStealBacklog = 4;
+            const int32_t remote_die = local_die ^ 1;
+            run_staging_order(
+                thread_idx, pmu_active,
+                [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+                    if (sched_->die_ready_queues[remote_die][static_cast<int32_t>(shape)].size() <=
+                        kRemoteStealBacklog) {
+                        return false;
+                    }
+                    dispatch_shape(
+                        thread_idx, sched_->die_ready_queues[remote_die], shape, phase, tracker, entered_drain,
+                        made_progress, try_pushed, local_die
+                    );
+                    return entered_drain;
+                },
+                [] {
+                    return false;
+                }
+            );
+        }
+    }
 }
 
 // Stage the ALREADY-CLAIMED range [start, start+count) of consumer `c` onto
@@ -596,9 +663,12 @@ int32_t SchedulerContext::stage_consumer_blocks(
     // buckets fit one handles[] buffer.
     PublishHandle handles[CoreTracker::MAX_CLUSTERS * 3];
     int n = 0;
+    const int32_t preferred_die = explicit_data_affinity_enabled_ && c->has_explicit_die_affinity() ?
+                                      c->explicit_preferred_die(start) :
+                                      (dependency_die_affinity_enabled_ ? c->locality_die() : -1);
     auto prepare_from = [&](CoreTracker::BitStates &avail, bool to_pending) {
         while (count > 0 && avail.has_value()) {
-            int32_t core_offset = avail.pop_first();
+            int32_t core_offset = tracker.pop_first_preferred_die(avail, preferred_die);
             n += prepare_block_for_dispatch(
                 thread_idx, core_offset, *c, shape, to_pending, block, &handles[n], /*force_gate=*/true
             );
@@ -662,8 +732,10 @@ int32_t SchedulerContext::stage_consumer_blocks(
 // gated pending slot. Producer propagation and late wiring push candidates to the
 // shape's queue when dispatch_fanin becomes complete, so the shape is the queue
 // index (no per-consumer to_shape()). Returns the number of blocks staged.
-int32_t
-SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+int32_t SchedulerContext::early_dispatch_shape(
+    int32_t thread_idx, PTO2ReadyQueue *queues, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase,
+    int32_t target_die
+) {
     CoreTracker &tracker = core_trackers_[thread_idx];
     int32_t s = static_cast<int32_t>(shape);
     bool is_mix = (shape == PTO2ResourceShape::MIX);
@@ -674,6 +746,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
     // for this shape+phase (avoids a pointless pop + immediate push-back).
     CoreTracker::BitStates cores =
         is_mix ? tracker.get_cluster_offset_states() : tracker.get_dispatchable_cores(shape, phase);
+    if (target_die >= 0) cores = tracker.restrict_to_die(cores, target_die);
     if (!cores.has_value()) return 0;
 
     int32_t total_staged = 0;
@@ -689,7 +762,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
     // next range and stage CONCURRENTLY — a wide consumer is filled by all idle
     // threads in parallel. When cores run out mid-batch the unprocessed remainder
     // is pushed back for peers (mirrors normal's push_batch of the unconsumed tail).
-    int got = sched_->early_dispatch_queues[s].pop_batch_tagged(batch, task_id_snapshots, cores.count());
+    int got = queues[s].pop_batch_tagged(batch, task_id_snapshots, cores.count());
     for (int bi = 0; bi < got; bi++) {
         PTO2TaskSlotState *c = batch[bi];
         if (static_cast<uint64_t>(c->task->task_id.raw) != task_id_snapshots[bi]) continue;
@@ -715,6 +788,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
             }
         } else {
             bucket = tracker.get_dispatchable_cores(shape, phase);
+            if (target_die >= 0) bucket = tracker.restrict_to_die(bucket, target_die);
         }
         int32_t freecores = bucket.has_value() ? bucket.count() : 0;
         if (freecores == 0) {  // no cores for this shape+phase — give this + the unprocessed rest back
@@ -722,7 +796,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
             // producer release: try_early_dispatch_release rings whatever is staged
             // and routes the unstaged remainder to the ready queue, because it
             // returns on next_block_idx rather than on the claim state.
-            if (!sched_->early_dispatch_queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi))
+            if (!queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi))
                 LOG_DEBUG(
                     "[EARLY_DISPATCH] queue full on batch re-push, dropping %d candidate(s) to normal dispatch",
                     got - bi
@@ -734,7 +808,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
         if (claim == 0) continue;  // nothing left to claim -> drop (no re-push)
         // Re-push for concurrent peers BEFORE the expensive staging.
         if (start + claim < c->logical_block_num) {
-            if (!sched_->early_dispatch_queues[s].push_tagged(c, task_id_snapshots[bi]))
+            if (!queues[s].push_tagged(c, task_id_snapshots[bi]))
                 LOG_DEBUG(
                     "[EARLY_DISPATCH] queue full on re-push, consumer=%" PRId64,
                     static_cast<int64_t>(c->task->task_id.raw)
@@ -771,7 +845,10 @@ int32_t SchedulerContext::try_early_dispatch(
     //     to delay only when every normal queue is drained.
     if (pmu_active || !tracker.has_any_free_slot()) return 0;
     for (int s = 0; s < PTO2_NUM_RESOURCE_SHAPES; s++) {
-        if (sched_->ready_sync_queues[s].size() > 0 || sched_->ready_queues[s].size() > 0) return 0;
+        if (sched_->ready_sync_queues[s].size() > 0 || sched_->ready_queues[s].size() > 0 ||
+            sched_->die_ready_queues[0][s].size() > 0 || sched_->die_ready_queues[1][s].size() > 0) {
+            return 0;
+        }
     }
 
     int32_t total_staged = 0;
@@ -817,16 +894,58 @@ int32_t SchedulerContext::try_early_dispatch(
         }
     }
 
+    // Keep ordinary early work ahead of directed consumers for the same reason
+    // as normal dispatch: roots and unhinted producer work must not be starved
+    // by a wave of already-ready downstream tasks.
     run_staging_order(
         thread_idx, pmu_active,
         [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
-            total_staged += early_dispatch_shape(thread_idx, shape, phase);
+            total_staged += early_dispatch_shape(thread_idx, sched_->early_dispatch_queues, shape, phase);
             return false;
         },
         [&] {
             return has_residual_early_mix();
         }
     );
+
+    if (explicit_data_affinity_enabled_) {
+        int32_t local_die = -1;
+        for (int32_t die = 0; die < 2; ++die) {
+            if (!tracker.owns_die(die)) continue;
+            local_die = local_die == -1 ? die : -2;
+            run_staging_order(
+                thread_idx, pmu_active,
+                [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+                    total_staged +=
+                        early_dispatch_shape(thread_idx, sched_->die_early_dispatch_queues[die], shape, phase, die);
+                    return false;
+                },
+                [] {
+                    return false;
+                }
+            );
+        }
+        if (local_die >= 0) {
+            constexpr size_t kRemoteStealBacklog = 4;
+            const int32_t remote_die = local_die ^ 1;
+            run_staging_order(
+                thread_idx, pmu_active,
+                [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+                    if (sched_->die_early_dispatch_queues[remote_die][static_cast<int32_t>(shape)].size() <=
+                        kRemoteStealBacklog) {
+                        return false;
+                    }
+                    total_staged += early_dispatch_shape(
+                        thread_idx, sched_->die_early_dispatch_queues[remote_die], shape, phase, local_die
+                    );
+                    return false;
+                },
+                [] {
+                    return false;
+                }
+            );
+        }
+    }
 
     if (total_staged > 0) {
         made_progress = true;
@@ -865,8 +984,21 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     chip_swimlane.chip_swimlane_enabled = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
 #endif
 
-    PTO2TaskSlotState *deferred_release_slot_states[PTO2_DEFERRED_RELEASE_CAP];
-    int32_t deferred_release_count = 0;
+    DeferredReleaseQueue deferred_releases;
+    auto release_deferred = [&](int32_t budget) -> uint32_t {
+        uint32_t released = 0;
+        while (released < static_cast<uint32_t>(budget)) {
+            PTO2TaskSlotState *slot_state = deferred_releases.pop();
+            if (slot_state == nullptr) break;
+#if SIMPLER_SCHED_PROFILING
+            (void)sched_->on_task_release(*slot_state, thread_idx);
+#else
+            sched_->on_task_release(*slot_state);
+#endif
+            released++;
+        }
+        return released;
+    };
 
     // PMU runs require single-issue dispatch — overlapping in-flight tasks
     // pollute per-task PMU counters. Cached at function scope (parity with
@@ -989,8 +1121,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         bool try_completed = tracker.has_any_running_cores();
         if (try_completed) {
             check_running_cores_for_completion(
-                thread_idx, hank, completed_this_turn, cur_thread_completed, made_progress,
-                deferred_release_slot_states, deferred_release_count
+                thread_idx, hank, completed_this_turn, cur_thread_completed, made_progress, deferred_releases
             );
         }
         if (completed_this_turn > 0) {
@@ -1045,8 +1176,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
-                rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count,
-                PTO2_DEFERRED_RELEASE_CAP
+                rt_->aicore_mailbox, sched_, deferred_releases
 #if SIMPLER_SCHED_PROFILING
                 ,
                 thread_idx
@@ -1132,7 +1262,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         if (thread_idx < PLATFORM_MAX_AICPU_THREADS - 1) {
             constexpr int DUMMY_DRAIN_BATCH = 8;
             PTO2TaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
-            int dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH);
+            int dummy_limit = std::min(DUMMY_DRAIN_BATCH, deferred_releases.free_slots());
+            int dummy_got = dummy_limit > 0 ? sched_->dummy_ready_queue.pop_batch(dummy_batch, dummy_limit) : 0;
 #if SIMPLER_DFX
             // Dummy outer phase: covers handling of all dummies popped this
             // iter. tasks_processed = dummy_got.
@@ -1177,18 +1308,9 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 // Dummy tasks have no subtasks to retire and no fanout pre-conditions
                 // beyond their own producers; release self-reference so the slot can
                 // reach CONSUMED once all consumers drain.
-                deferred_release_slot_states[deferred_release_count++] = &dummy_slot;
-                if (deferred_release_count >= PTO2_DEFERRED_RELEASE_CAP) {
-                    while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                        (void)sched_->on_task_release(
-                            *deferred_release_slot_states[--deferred_release_count], thread_idx
-                        );
-#else
-                        sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-                    }
-                }
+                bool release_queued = deferred_releases.push(&dummy_slot);
+                debug_assert(release_queued);
+                (void)release_queued;
                 int32_t prev = completed_tasks_.fetch_add(1, std::memory_order_relaxed);
                 last_progress_count = prev + 1;
                 cur_thread_completed++;
@@ -1212,6 +1334,28 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             }
 #endif
         }
+
+        // Phase 3b: release a bounded number of completed slots, then always
+        // proceed directly to dispatch. Any backlog remains queued for the next
+        // scheduler iteration, preventing a large release burst from delaying
+        // ready work for hundreds of microseconds.
+#if SIMPLER_DFX
+        uint64_t release_t0 = (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES && !deferred_releases.empty()) ?
+                                  get_sys_cnt_aicpu() :
+                                  0;
+#endif
+        uint32_t released_count = release_deferred(DEFERRED_RELEASE_BUDGET);
+        if (released_count > 0) made_progress = true;
+#if SIMPLER_DFX
+        if (release_t0 != 0) {
+            uint64_t release_t1 = get_sys_cnt_aicpu();
+            chip_swimlane_aicpu_record_sched_phase(
+                thread_idx, ChipSwimlaneSchedPhaseKind::Release, release_t0, release_t1, chip_swimlane.sched_loop_count,
+                released_count
+            );
+            _t0_phase = release_t1;
+        }
+#endif
 
         // Phase 4: MIX-strict-priority dispatch with phase-split and
         // cross-thread idle gating. See dispatch_ready_tasks for the policy.
@@ -1292,28 +1436,6 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             idle_iterations = 0;
             last_progress_ts = get_sys_cnt_aicpu();
         } else {
-#if SIMPLER_DFX
-            uint64_t release_t0 =
-                (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES && deferred_release_count > 0) ?
-                    get_sys_cnt_aicpu() :
-                    0;
-            uint32_t released_count = static_cast<uint32_t>(deferred_release_count);
-#endif
-            while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-            }
-#if SIMPLER_DFX
-            if (release_t0 != 0) {
-                chip_swimlane_aicpu_record_sched_phase(
-                    thread_idx, ChipSwimlaneSchedPhaseKind::Release, release_t0, get_sys_cnt_aicpu(),
-                    chip_swimlane.sched_loop_count, released_count
-                );
-            }
-#endif
             // Deferred consumed-head advances retry from the no-progress path.
             // During a ring-heap stall, a CONSUMED head with its pending bit
             // still set means no retry has acquired advance_lock and cleared
@@ -1385,16 +1507,21 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         }
     }
 
-    // Drain any entries left in the deferred-release batch. The in-loop flush
-    // only fires on idle iterations and on buffer-full; a loop exit while the
-    // last iteration made progress can leave entries un-released. Drop them
-    // here so every consumed producer slot completes its on_task_release
-    // regardless of which loop-exit path fired.
-    while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-        (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-        sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+    // A loop exit can leave completed slots queued. Finish reclamation in the
+    // same bounded chunks used by the hot loop so profiling never hides a
+    // special oversized final release.
+    while (!deferred_releases.empty()) {
+#if SIMPLER_DFX
+        uint64_t release_t0 = (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
+#endif
+        uint32_t released_count = release_deferred(DEFERRED_RELEASE_BUDGET);
+#if SIMPLER_DFX
+        if (release_t0 != 0) {
+            chip_swimlane_aicpu_record_sched_phase(
+                thread_idx, ChipSwimlaneSchedPhaseKind::Release, release_t0, get_sys_cnt_aicpu(),
+                chip_swimlane.sched_loop_count, released_count
+            );
+        }
 #endif
     }
 

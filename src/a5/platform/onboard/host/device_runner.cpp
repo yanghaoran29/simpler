@@ -335,12 +335,23 @@ int DeviceRunner::prepare_execution(
             int32_t sched_assignment_mode = pto::a5::kSchedAicoreAssignmentSequential;
             if (launch_plan.sched_aicore_assignment_mode == pto::a5::SchedAicoreAssignmentMode::kDieAware) {
                 sched_assignment_mode = pto::a5::kSchedAicoreAssignmentDieAware;
-            } else if (launch_plan.sched_aicore_assignment_mode == pto::a5::SchedAicoreAssignmentMode::kRttDieAware) {
-                sched_assignment_mode = pto::a5::kSchedAicoreAssignmentRttDieAware;
             }
             if (const char *assignment_override = std::getenv("SIMPLER_SCHED_AICORE_ASSIGNMENT_OVERRIDE");
                 assignment_override != nullptr && assignment_override[0] != '\0') {
-                sched_assignment_mode = std::atoi(assignment_override);
+                char *end = nullptr;
+                const long mode = std::strtol(assignment_override, &end, 10);
+                if (end != assignment_override && *end == '\0' &&
+                    (mode == pto::a5::kSchedAicoreAssignmentSequential ||
+                     mode == pto::a5::kSchedAicoreAssignmentDieAware ||
+                     mode == pto::a5::kSchedAicoreAssignmentRoundRobin ||
+                     mode == pto::a5::kSchedAicoreAssignmentHybridDieAware ||
+                     mode == pto::a5::kSchedAicoreAssignmentRoundRobinDependencyDieAware ||
+                     mode == pto::a5::kSchedAicoreAssignmentHybridDependencyDieAware ||
+                     mode == pto::a5::kSchedAicoreAssignmentContiguousDataAware)) {
+                    sched_assignment_mode = static_cast<int32_t>(mode);
+                } else {
+                    LOG_WARN("Ignoring unsupported scheduler AICore assignment override: %s", assignment_override);
+                }
             }
             runtime.set_sched_aicore_assignment_mode(sched_assignment_mode);
             std::string dump;
@@ -352,11 +363,12 @@ int DeviceRunner::prepare_execution(
             if (launch_plan.warn_cpu_topology_unavailable) {
                 LOG_WARN(
                     "AICPU CPU_TOPO unavailable; using %s: soc=%s occupy=0x%llx "
-                    "stable_reachable=%d requested=%d effective=%d affinity=[%s]%s",
+                    "stable_reachable=%d requested=%d effective=%d assignment_mode=%d affinity=[%s]%s",
                     pto::a5::aicpu_topology_source_name(topology.source),
                     topology.soc_name.empty() ? "(unknown)" : topology.soc_name.c_str(),
                     static_cast<unsigned long long>(topology.device_occupancy.occupy),
-                    launch_plan.stable_reachable_count, requested_aicpu_num, active_aicpu_num, dump.c_str(),
+                    launch_plan.stable_reachable_count, requested_aicpu_num, active_aicpu_num, sched_assignment_mode,
+                    dump.c_str(),
                     topology.source == pto::a5::AicpuTopologySource::kOccupyFallback ?
                         "; physical/SMT/cluster/die placement is unknown" :
                         ""
@@ -374,9 +386,9 @@ int DeviceRunner::prepare_execution(
                 );
             }
             LOG_INFO(
-                "AICPU ALLOWED_CPUS = [%s] (scenario=%s active=%d launch=%d user_cpus=%zu)", dump.c_str(),
-                pto::a5::aicpu_scenario_name(topology.scenario_type), active_aicpu_num, launch_plan.launch_count,
-                topology.os_schedulable_cpus.size()
+                "AICPU ALLOWED_CPUS = [%s] (scenario=%s active=%d launch=%d user_cpus=%zu assignment_mode=%d)",
+                dump.c_str(), pto::a5::aicpu_scenario_name(topology.scenario_type), active_aicpu_num,
+                launch_plan.launch_count, topology.os_schedulable_cpus.size(), sched_assignment_mode
             );
         }
     }

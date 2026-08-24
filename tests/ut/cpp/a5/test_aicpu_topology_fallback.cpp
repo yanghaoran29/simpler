@@ -35,19 +35,20 @@ using pto::a5::AicpuScenarioType;
 using pto::a5::AicpuSelectionPolicy;
 using pto::a5::AicpuTopology;
 using pto::a5::AicpuTopologySource;
-using pto::a5::SchedAicoreAssignmentMode;
-using pto::a5::SchedulerAicpuDieLayout;
+using pto::a5::assign_scheduler_exec_order_by_die;
 using pto::a5::build_aicpu_launch_plan;
 using pto::a5::classify_aicpu_scenario;
 using pto::a5::compute_allowed_cpus;
-using pto::a5::compute_scheduler_aicore_die_map;
 using pto::a5::compute_scenario_allowed_cpus;
+using pto::a5::compute_scheduler_aicore_die_map;
 using pto::a5::compute_unknown_allowed_cpus;
 using pto::a5::derive_topology_from_occupy;
 using pto::a5::enumerate_cpus_from_occupy;
 using pto::a5::format_aicpu_topology_json;
 using pto::a5::load_cpu_topo_from_json;
-using pto::a5::assign_scheduler_exec_order_by_die;
+using pto::a5::load_static_rtt_scheduler_cpu_order;
+using pto::a5::SchedAicoreAssignmentMode;
+using pto::a5::SchedulerAicpuDieLayout;
 
 std::vector<AicpuLogicalCpu> make_physical_range(int32_t first_phy, int32_t last_phy) {
     std::vector<AicpuLogicalCpu> cpus;
@@ -169,6 +170,17 @@ TEST(A5AicpuTopologyJsonFallback, PreservesVerifiedFallbackSignatureAndSelection
     std::vector<int32_t> allowed;
     ASSERT_TRUE(compute_allowed_cpus(cpus, 2, 1, allowed));
     EXPECT_EQ(allowed, (std::vector<int32_t>{4, 5, 1}));
+}
+
+TEST(A5AicpuTopologyJsonFallback, LoadsCalibrated9579SchedulerOrder) {
+    std::vector<int32_t> calibrated;
+    ASSERT_TRUE(load_static_rtt_scheduler_cpu_order("Ascend950PR_9579", 0x3e, {4, 2, 1, 3}, calibrated));
+    EXPECT_EQ(calibrated, (std::vector<int32_t>{1, 2, 3, 4}));
+
+    EXPECT_FALSE(load_static_rtt_scheduler_cpu_order("Ascend950PR_9579", 0x1f8, {1, 2, 3, 4}, calibrated));
+    EXPECT_TRUE(calibrated.empty());
+    EXPECT_FALSE(load_static_rtt_scheduler_cpu_order("Ascend950PR_9579", 0x3e, {1, 2, 3, 5}, calibrated));
+    EXPECT_TRUE(calibrated.empty());
 }
 #else
 TEST(A5AicpuTopologyJsonFallback, RejectsVerifiedFallbackOnNonX86Host) {
@@ -407,6 +419,25 @@ TEST(A5AicpuLaunchPlan, AssignsRolesFromFiveCpuOccupyMask) {
     EXPECT_FALSE(plan.warn_stable_reachable_below_default);
 }
 
+#if defined(__x86_64__)
+TEST(A5AicpuLaunchPlan, AppliesPackaged9579SchedulerCalibration) {
+    AicpuTopology topology;
+    topology.soc_name = "Ascend950PR_9579";
+    topology.source = AicpuTopologySource::kJsonFallback;
+    topology.generic_selection_only = true;
+    ASSERT_TRUE(load_cpu_topo_from_json(
+        topology.soc_name.c_str(), 0x3e, topology.os_schedulable_cpus, &topology.generic_selection_only
+    ));
+    set_device_occupy(topology, 0x3e);
+
+    AicpuLaunchPlan plan;
+    std::string error;
+    ASSERT_TRUE(build_aicpu_launch_plan(topology, 0, plan, error)) << error;
+    EXPECT_EQ(plan.allowed_cpus, (std::vector<int32_t>{1, 2, 3, 4, 5}));
+    EXPECT_EQ(plan.sched_aicore_assignment_mode, SchedAicoreAssignmentMode::kDieAware);
+}
+#endif
+
 TEST(A5AicpuLaunchPlan, WarnsWhenCpuTopologyFallsBackToPackagedJson) {
     std::vector<AicpuLogicalCpu> all_cpus;
     ASSERT_TRUE(load_cpu_topo_from_json("Ascend950PR_9599", 0x1f8, all_cpus));
@@ -598,7 +629,7 @@ TEST(A5SchedAicoreDieMap, AllOnOneDiePreservesSelectionOrderForExecIdx) {
     EXPECT_EQ(allowed, (std::vector<int32_t>{8, 10, 12, 14, 6}));
 }
 
-TEST(A5AicpuLaunchPlan, EnablesDieAwareRenumberingForFiveThreadFg) {
+TEST(A5AicpuLaunchPlan, KeepsSelectionOrderWithoutStaticCalibration) {
     const auto all = make_physical_range(0, 7);
     AicpuTopology topology;
     topology.source = AicpuTopologySource::kDriver;
@@ -613,8 +644,8 @@ TEST(A5AicpuLaunchPlan, EnablesDieAwareRenumberingForFiveThreadFg) {
     AicpuLaunchPlan plan;
     std::string error;
     ASSERT_TRUE(build_aicpu_launch_plan(topology, 0, plan, error)) << error;
-    EXPECT_EQ(plan.sched_aicore_assignment_mode, SchedAicoreAssignmentMode::kDieAware);
-    EXPECT_EQ(plan.allowed_cpus, (std::vector<int32_t>{0, 12, 8, 10, 14}));
+    EXPECT_EQ(plan.sched_aicore_assignment_mode, SchedAicoreAssignmentMode::kSequential);
+    EXPECT_EQ(plan.allowed_cpus, (std::vector<int32_t>{12, 8, 10, 0, 14}));
 }
 
 TEST(A5AicpuLaunchPlan, OccupyOnlyStaysSequentialWithoutRenumbering) {

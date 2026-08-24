@@ -438,6 +438,48 @@ TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
     EXPECT_EQ(out[0], &slot);
 }
 
+TEST_F(SchedulerStateTest, ExplicitFixedAffinityRoutesBeforeSchedulerPop) {
+    PTO2TaskSlotState slot{};
+    init_slot(slot, PTO2_TASK_PENDING, 0, 1);
+    slot.set_explicit_die_affinity(/*base_die=*/1, /*block_alternating=*/false);
+    sched.explicit_data_affinity_enabled = true;
+
+    EXPECT_TRUE(sched.route_ready_once(slot));
+    PTO2TaskSlotState *out[2]{};
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 2), 0);
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.die_ready_queues[0], PTO2ResourceShape::AIC, out, 2), 0);
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.die_ready_queues[1], PTO2ResourceShape::AIC, out, 2), 1);
+    EXPECT_EQ(out[0], &slot);
+}
+
+TEST_F(SchedulerStateTest, ExplicitAlternatingAffinityUsesSharedQueue) {
+    PTO2TaskSlotState slot{};
+    init_slot(slot, PTO2_TASK_PENDING, 0, 1);
+    slot.logical_block_num = 6;
+    slot.set_explicit_die_affinity(/*base_die=*/0, /*block_alternating=*/true);
+    sched.explicit_data_affinity_enabled = true;
+
+    EXPECT_TRUE(sched.route_ready_once(slot));
+    PTO2TaskSlotState *out[2]{};
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.die_ready_queues[0], PTO2ResourceShape::AIC, out, 2), 0);
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.die_ready_queues[1], PTO2ResourceShape::AIC, out, 2), 0);
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 2), 1);
+    EXPECT_EQ(out[0], &slot);
+}
+
+TEST(CoreTrackerTest, PreferredDiePopFallsBackWithoutBlocking) {
+    CoreTracker tracker;
+    tracker.init(2);
+    tracker.set_cluster(0, 0, 1, 2, /*die=*/0);
+    tracker.set_cluster(1, 3, 4, 5, /*die=*/1);
+
+    CoreTracker::BitStates aiv_candidates = CoreTracker::BitStates::bit(1) | CoreTracker::BitStates::bit(4);
+    EXPECT_EQ(tracker.pop_first_preferred_die(aiv_candidates, /*preferred_die=*/1), 4);
+    // Die1 is exhausted, so the soft preference falls back to die0.
+    EXPECT_EQ(tracker.pop_first_preferred_die(aiv_candidates, /*preferred_die=*/1), 1);
+    EXPECT_FALSE(aiv_candidates.has_value());
+}
+
 TEST(CoreTrackerTest, MixPartiallyRunningClusterAdmittedAsPerCorePlacement) {
     CoreTracker tracker;
     tracker.init(1);

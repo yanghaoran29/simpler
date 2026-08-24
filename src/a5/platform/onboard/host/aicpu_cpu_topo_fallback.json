@@ -20,6 +20,20 @@
       "host_arch": "x86_64",
       "occupy_mask": 62,
       "selection_policy": "generic",
+      "rtt_scheduler_assignment": {
+        "scheduler_count": 4,
+        "scheduler_cpu_order": [1, 2, 3, 4],
+        "aicore_die_order": [0, 0, 1, 1],
+        "calibration": {
+          "method": "a5-aicore-rtt-v2",
+          "date": "2026-08-21",
+          "cards": [1, 2, 3],
+          "rounds_per_card": 5,
+          "samples_per_core": 50,
+          "warmup_per_core": 10,
+          "note": "CPU1 and CPU4 are stable die anchors. CPU2 and CPU3 differ by less than 1 ns in cross-card median RTT, so the lower CPU ID deterministically maps to die0."
+        }
+      },
       "cpus": [
         {"cpu_id": 1, "phy_cpu_id": 1, "hyperthread_id": 0, "role": "compute", "available": true},
         {"cpu_id": 2, "phy_cpu_id": 2, "hyperthread_id": 0, "role": "compute", "available": true},

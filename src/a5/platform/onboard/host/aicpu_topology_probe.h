@@ -50,14 +50,20 @@ enum class AicpuSelectionPolicy {
 
 enum class SchedulerAicpuDieLayout { kAllOnOneDie, kSplit1_3, kSplit2_2, kUnsupported };
 
-enum class SchedAicoreAssignmentMode { kSequential, kDieAware, kRttDieAware };
+enum class SchedAicoreAssignmentMode { kSequential, kDieAware };
 
 constexpr int32_t kSchedAicoreAssignmentSequential = 0;
 constexpr int32_t kSchedAicoreAssignmentDieAware = 1;
 // Mainline baseline: cluster ci -> sched (ci % 4), no die-aware host renumbering.
 constexpr int32_t kSchedAicoreAssignmentRoundRobin = 2;
-// Device-side MMIO RTT preflight ranks scheduler pthreads by die affinity.
-constexpr int32_t kSchedAicoreAssignmentRttDieAware = 3;
+// Hybrid override: schedulers 0/3 are single-die, while 1/2 split both dies.
+constexpr int32_t kSchedAicoreAssignmentHybridDieAware = 3;
+// Experimental dependency-local variants of the round-robin and hybrid
+// layouts. The device scheduler interprets these as soft preferred-die modes.
+constexpr int32_t kSchedAicoreAssignmentRoundRobinDependencyDieAware = 4;
+constexpr int32_t kSchedAicoreAssignmentHybridDependencyDieAware = 5;
+// Contiguous scheduler ownership with task-declared data affinity.
+constexpr int32_t kSchedAicoreAssignmentContiguousDataAware = 6;
 
 struct AicpuDeviceOccupancy {
     uint64_t occupy{0};
@@ -118,6 +124,14 @@ bool load_cpu_topo_from_json(
     bool *out_generic_selection_only = nullptr
 );
 
+// Load an offline RTT-calibrated scheduler CPU order for an exact SoC,
+// host-architecture, OCCUPY, and selected scheduler CPU set. Output order is
+// [die0 scheduler 0, die0 scheduler 1, die1 scheduler 0, die1 scheduler 1].
+bool load_static_rtt_scheduler_cpu_order(
+    const char *soc_name, uint64_t occupy, const std::vector<int32_t> &selected_scheduler_cpus,
+    std::vector<int32_t> &out_scheduler_cpu_order
+);
+
 // Compute the `ALLOWED_CPUS` selection for the surviving threads.
 //
 // Inputs:
@@ -127,9 +141,8 @@ bool load_cpu_topo_from_json(
 //
 // Output:
 //   * `out_allowed_cpus` — n_sched + n_orch cpu_ids as [selected sched..., orch].
-//     Indices are placement-only until assign_scheduler_exec_order_by_die()
-//     runs for 1O+4S die-aware launches; until then they must not be treated
-//     as final exec_idx / contiguous AICore block ownership.
+//     For a matching packaged calibration, build_aicpu_launch_plan() reorders
+//     the scheduler prefix before these indices become final exec_idx values.
 //
 // Placement policy:
 //   Step 1 (sched): smallest containing unit wins —

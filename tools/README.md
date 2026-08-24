@@ -93,6 +93,16 @@ repo. See the tool's own
 [README](./cann-examples/aicpu-kernel-launch/README.md) for the
 pipeline diagram, I/O contract, and Path A vs Path B (#822) notes.
 
+### cann-examples/a5-aicore-rtt
+
+Offline A5 calibration for scheduler-to-AICore register RTT. Four scheduler
+threads take turns measuring every runtime-discovered AIC/AIV core for five
+rounds, write all samples to JSON, and can generate a validated scheduler/die
+assignment fragment for the packaged topology file. Production runs only read
+that packaged configuration and never execute the calibration. See the tool's
+[README](./cann-examples/a5-aicore-rtt/README.md) for build, plotting, and
+single-card `task-submit` instructions.
+
 ### cann-examples/aicpu-mmio-probes
 
 AICPU-side MMIO microbenchmarks. No AICore involvement. Measures STR

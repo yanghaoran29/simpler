@@ -268,18 +268,15 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     // run(). The remaining (nthreads-1) threads re-partition ALL cores among
     // themselves, so every core still gets its register window opened.
     const bool decouple_orch = (nthreads > 1) && !serial_orch_sched_;
-    const bool rtt_die_preflight =
-        runtime->get_sched_aicore_assignment_mode() == kSchedAicoreAssignmentRttDieAware &&
-        (decouple_orch ? (nthreads - 1) : nthreads) == 4;
     const bool is_orchestrator = (tidx == nthreads - 1);
     if (decouple_orch && is_orchestrator) {
         return 0;  // do NOT touch the handshake or hs_arrived_ barrier
     }
     const int32_t hs_nthreads = decouple_orch ? (nthreads - 1) : nthreads;
 
-    // Barrier-free scheduler init (the decoupled default). RTT die preflight needs
-    // all cores handshaked and a global ranking barrier, so mode 3 falls through.
-    if (decouple_orch && !rtt_die_preflight) {
+    // The decoupled default lets every scheduler initialize only its statically
+    // assigned contiguous cluster range without a global handshake barrier.
+    if (decouple_orch) {
         sched_ctx_.handshake_owned_clusters(runtime, tidx, hs_nthreads);
         sched_ctx_.assign_own_clusters(tidx);
 #if SIMPLER_DFX
@@ -338,20 +335,6 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
         if (sched_ctx_.handshake_failed()) {
             init_failed_.store(true, std::memory_order_release);
             return -1;
-        }
-    }
-
-    if (rtt_die_preflight) {
-        sched_ctx_.run_die_rtt_preflight(tidx);
-        sched_ctx_.rtt_probe_arrived().fetch_add(1, std::memory_order_acq_rel);
-        if (is_leader) {
-            while (sched_ctx_.rtt_probe_arrived().load(std::memory_order_acquire) < hs_nthreads) {}
-            sched_ctx_.finalize_rtt_die_assignment(hs_nthreads);
-            sched_ctx_.set_rtt_probe_done(true);
-        } else {
-            while (!sched_ctx_.rtt_probe_done()) {
-                if (init_failed_.load(std::memory_order_acquire)) return -1;
-            }
         }
     }
 

@@ -23,6 +23,7 @@
 #include "aicore_completion_mailbox.h"
 #include "pto_completion_token.h"
 #include "pto_runtime2_types.h"
+#include "scheduler/deferred_release_queue.h"
 
 struct PTO2SchedulerState;
 struct CompletionStats;
@@ -185,19 +186,19 @@ struct AsyncWaitList {
     // entries[]).
     struct DrainCompletionSink {
         PTO2SchedulerState *sched{nullptr};
-        PTO2TaskSlotState **deferred_release_slot_states{nullptr};
-        int32_t *deferred_release_count{nullptr};
-        int32_t deferred_release_capacity{0};
+        DeferredReleaseQueue *deferred_releases{nullptr};
         int32_t inline_completed{0};
 #if SIMPLER_SCHED_PROFILING
         int32_t thread_idx{0};
 #endif
 
-        bool can_inline_complete() const { return sched != nullptr; }
+        bool can_inline_complete() const {
+            return sched != nullptr && deferred_releases != nullptr && !deferred_releases->full();
+        }
     };
 
-    // Inline-complete a NotDeferred task during drain. Returns false on
-    // deferred_release_slot_states overflow.
+    // Inline-complete a NotDeferred task during drain. Returns false when the
+    // release queue is full so the caller can retain the message as an entry.
     bool try_inline_complete_locked(DrainCompletionSink &sink, PTO2TaskSlotState &slot_state);
 
     // Single-consumer drain: pop each published message in tail order and
@@ -215,7 +216,11 @@ struct AsyncWaitList {
         // try_pop is the transport layer (seq-gated, in-order dequeue); this
         // loop is the application layer (translate each message into wait-list
         // state). try_pop returns false at the first gap or when empty.
-        while (aicore_mailbox->try_pop(msg)) {
+        // When a scheduler-aware consumer fills its release queue, leave the
+        // remaining messages in the mailbox. The next loop first releases one
+        // bounded slice and can then resume draining without growing an
+        // unbounded side backlog.
+        while ((sink.sched == nullptr || !sink.deferred_releases->full()) && aicore_mailbox->try_pop(msg)) {
             drained++;
             if (msg.kind == MSG_KIND_CONDITION) {
                 AsyncWaitEntry *entry = find_entry_by_token(msg.task_token);
@@ -251,8 +256,7 @@ struct AsyncWaitList {
                     // observing NORMAL_DONE first => the task registered no
                     // conditions => NotDeferred. Complete it inline when the
                     // sink allows; otherwise fall back to the entry-store path.
-                    if (sink.can_inline_complete()) {
-                        (void)try_inline_complete_locked(sink, *slot_state_ptr);
+                    if (sink.can_inline_complete() && try_inline_complete_locked(sink, *slot_state_ptr)) {
                         continue;
                     }
                     if (count >= MAX_ASYNC_WAITS) {
@@ -304,9 +308,7 @@ struct AsyncWaitList {
 
     template <bool Profiling>
     AsyncPollResult poll_and_complete(
-        AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-        PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
-        int32_t deferred_release_capacity
+        AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched, DeferredReleaseQueue &deferred_releases
 #if SIMPLER_SCHED_PROFILING
         ,
         int thread_idx

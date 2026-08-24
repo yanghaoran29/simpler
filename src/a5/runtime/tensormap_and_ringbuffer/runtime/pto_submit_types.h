@@ -264,7 +264,21 @@ public:
     bool require_sync_start() const { return require_sync_start_; }
     void set_require_sync_start(bool v) { require_sync_start_ = v; }
 
+    void set_fixed_die_affinity(int8_t die) {
+        die_affinity_base_ = (die == 0 || die == 1) ? die : -1;
+        die_affinity_block_alternating_ = false;
+    }
+    void set_block_alternating_die_affinity(int8_t base_die) {
+        die_affinity_base_ = (base_die == 0 || base_die == 1) ? base_die : -1;
+        die_affinity_block_alternating_ = die_affinity_base_ >= 0;
+    }
+    bool has_explicit_die_affinity() const { return die_affinity_base_ >= 0; }
+    int8_t die_affinity_base() const { return die_affinity_base_; }
+    bool die_affinity_block_alternating() const { return die_affinity_block_alternating_; }
+
 private:
     int16_t core_num_{1};
     bool require_sync_start_{false};
+    int8_t die_affinity_base_{-1};
+    bool die_affinity_block_alternating_{false};
 };

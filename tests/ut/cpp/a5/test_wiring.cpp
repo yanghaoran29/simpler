@@ -412,6 +412,7 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
     init_slot(producer, PTO2_TASK_PENDING, 1, 1);
     producer.payload = &prod_payload;
     producer.task = &desc;
+    producer.set_locality_die(1);
 
     // Consumer1: needs 1 more fanin to become ready
     init_slot(consumer1, PTO2_TASK_PENDING, 2, 1);
@@ -444,6 +445,8 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
     // Both consumers should have fanin_refcount incremented
     EXPECT_EQ(consumer1.fanin_refcount.load(), 2);
     EXPECT_EQ(consumer2.fanin_refcount.load(), 2);
+    EXPECT_EQ(consumer1.locality_die(), 1);
+    EXPECT_EQ(consumer2.locality_die(), 1);
 
     // Both consumers should be ready (fanin_refcount == fanin_count)
     PTO2ResourceShape shape = consumer1.active_mask.to_shape();

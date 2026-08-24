@@ -145,12 +145,23 @@ PTO2SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_ca
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            layout.off_die_ready_queue_slots[die][i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        }
+    }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
     layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            layout.off_die_early_dispatch_queue_slots[die][i] =
+                ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+        }
     }
     layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -170,6 +181,7 @@ bool PTO2SchedulerState::init_data_from_layout(
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
     sched->publication_request_mask.store(0, std::memory_order_relaxed);
     sched->publication_ack_mask.store(0, std::memory_order_relaxed);
+    sched->explicit_data_affinity_enabled = false;
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -186,6 +198,16 @@ bool PTO2SchedulerState::init_data_from_layout(
                 &sched->ready_queues[i], arena, layout.off_ready_queue_slots[i], layout.ready_queue_capacity
             )) {
             return false;
+        }
+    }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            if (!ready_queue_init_data_from_layout(
+                    &sched->die_ready_queues[die][i], arena, layout.off_die_ready_queue_slots[die][i],
+                    layout.ready_queue_capacity
+                )) {
+                return false;
+            }
         }
     }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
@@ -206,6 +228,16 @@ bool PTO2SchedulerState::init_data_from_layout(
                 PTO2_EARLY_DISPATCH_QUEUE_SIZE
             )) {
             return false;
+        }
+    }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            if (!ready_queue_init_data_from_layout(
+                    &sched->die_early_dispatch_queues[die][i], arena, layout.off_die_early_dispatch_queue_slots[die][i],
+                    PTO2_EARLY_DISPATCH_QUEUE_SIZE
+                )) {
+                return false;
+            }
         }
     }
     if (!ready_queue_init_data_from_layout(
@@ -234,6 +266,7 @@ void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
     sched->publication_request_mask.store(0, std::memory_order_relaxed);
     sched->publication_ack_mask.store(0, std::memory_order_relaxed);
+    sched->explicit_data_affinity_enabled = false;
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -247,12 +280,22 @@ void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         sched->ready_queues[i].reset_for_reuse();
     }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            sched->die_ready_queues[die][i].reset_for_reuse();
+        }
+    }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         sched->ready_sync_queues[i].reset_for_reuse();
     }
     sched->dummy_ready_queue.reset_for_reuse();
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         sched->early_dispatch_queues[i].reset_for_reuse();
+    }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            sched->die_early_dispatch_queues[die][i].reset_for_reuse();
+        }
     }
     sched->early_sync_start_queue.reset_for_reuse();
 
@@ -265,6 +308,13 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
     }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_wire_arena_pointers(
+                &sched->die_ready_queues[die][i], arena, layout.off_die_ready_queue_slots[die][i]
+            );
+        }
+    }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_sync_queues[i], arena, layout.off_ready_sync_queue_slots[i]);
     }
@@ -273,6 +323,13 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
         ready_queue_wire_arena_pointers(
             &sched->early_dispatch_queues[i], arena, layout.off_early_dispatch_queue_slots[i]
         );
+    }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_wire_arena_pointers(
+                &sched->die_early_dispatch_queues[die][i], arena, layout.off_die_early_dispatch_queue_slots[die][i]
+            );
+        }
     }
     ready_queue_wire_arena_pointers(&sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots);
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -293,12 +350,22 @@ void PTO2SchedulerState::destroy() {
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_queues[i]);
     }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_destroy(&sched->die_ready_queues[die][i]);
+        }
+    }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_sync_queues[i]);
     }
     ready_queue_destroy(&sched->dummy_ready_queue);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->early_dispatch_queues[i]);
+    }
+    for (int die = 0; die < 2; die++) {
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_destroy(&sched->die_early_dispatch_queues[die][i]);
+        }
     }
     ready_queue_destroy(&sched->early_sync_start_queue);
 }

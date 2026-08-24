@@ -646,6 +646,11 @@ static bool prepare_task(
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
     out->slot_state->task_attrs = task_attrs;
+    if (args.launch_spec.has_explicit_die_affinity()) {
+        out->slot_state->set_explicit_die_affinity(
+            args.launch_spec.die_affinity_base(), args.launch_spec.die_affinity_block_alternating()
+        );
+    }
     // fanin_count is set during Orch-side wiring
     scope_tasks_push(orch, out->slot_state);
 

@@ -800,7 +800,8 @@ bool compute_scheduler_aicore_die_map(
         out_aicore_die_per_sched = {0, 0, 1, 1};
         return true;
     case SchedulerAicpuDieLayout::kSplit2_2:
-        for (int32_t i = 0; i < 4; ++i) out_aicore_die_per_sched[i] = sched_cpus[i].die_id;
+        for (int32_t i = 0; i < 4; ++i)
+            out_aicore_die_per_sched[i] = sched_cpus[i].die_id;
         return true;
     case SchedulerAicpuDieLayout::kSplit1_3:
         assign_split13_aicore_dies(sched_cpus, out_aicore_die_per_sched);
@@ -827,7 +828,8 @@ bool assign_scheduler_exec_order_by_die(
     // All schedulers on one AICPU die: selection order already maps
     // sched[i] → exec i → contiguous block i (first two blocks die0, last two die1).
     if (layout == SchedulerAicpuDieLayout::kAllOnOneDie) {
-        for (int32_t i = 0; i < 4; ++i) allowed_cpus[i] = selected_sched_cpu_ids[i];
+        for (int32_t i = 0; i < 4; ++i)
+            allowed_cpus[i] = selected_sched_cpu_ids[i];
         allowed_cpus[4] = orch_cpu;
         return true;
     }
@@ -845,10 +847,8 @@ bool assign_scheduler_exec_order_by_die(
         const AicpuLogicalCpu *cpu = lookup_schedulable_cpu(topology, selected_sched_cpu_ids[i]);
         if (cpu == nullptr) return false;
         SchedSlot slot{selected_sched_cpu_ids[i], aicore_die_map[i], *cpu};
-        if (slot.aicore_die == 0)
-            die0_slots.push_back(slot);
-        else
-            die1_slots.push_back(slot);
+        if (slot.aicore_die == 0) die0_slots.push_back(slot);
+        else die1_slots.push_back(slot);
     }
     if (die0_slots.size() != 2 || die1_slots.size() != 2) return false;
 
@@ -933,22 +933,17 @@ bool build_aicpu_launch_plan(
     }
 
     out_plan.sched_aicore_assignment_mode = SchedAicoreAssignmentMode::kSequential;
-    const char *assignment_override = std::getenv("SIMPLER_SCHED_AICORE_ASSIGNMENT_OVERRIDE");
-    const bool force_round_robin =
-        assignment_override != nullptr &&
-        std::atoi(assignment_override) == kSchedAicoreAssignmentRoundRobin;
-    const bool force_rtt_die_aware =
-        assignment_override != nullptr &&
-        std::atoi(assignment_override) == kSchedAicoreAssignmentRttDieAware;
-    if (force_rtt_die_aware) {
-        out_plan.sched_aicore_assignment_mode = SchedAicoreAssignmentMode::kRttDieAware;
-    } else if (!force_round_robin && effective == PLATFORM_DEFAULT_AICPU_THREAD_NUM && topology_has_die_metadata(topology)) {
+    if (effective == PLATFORM_DEFAULT_AICPU_THREAD_NUM) {
         const size_t sched_count = out_plan.allowed_cpus.size() - 1;
         if (sched_count == 4) {
             const std::vector<int32_t> selected_sched(
                 out_plan.allowed_cpus.begin(), out_plan.allowed_cpus.begin() + static_cast<std::ptrdiff_t>(sched_count)
             );
-            if (assign_scheduler_exec_order_by_die(topology, selected_sched, out_plan.allowed_cpus, nullptr)) {
+            std::vector<int32_t> calibrated_order;
+            if (load_static_rtt_scheduler_cpu_order(
+                    topology.soc_name.c_str(), topology.device_occupancy.occupy, selected_sched, calibrated_order
+                )) {
+                std::copy(calibrated_order.begin(), calibrated_order.end(), out_plan.allowed_cpus.begin());
                 out_plan.sched_aicore_assignment_mode = SchedAicoreAssignmentMode::kDieAware;
             }
         }
@@ -990,8 +985,6 @@ const char *sched_aicore_assignment_mode_name(SchedAicoreAssignmentMode mode) {
         return "sequential";
     case SchedAicoreAssignmentMode::kDieAware:
         return "die_aware";
-    case SchedAicoreAssignmentMode::kRttDieAware:
-        return "rtt_die_aware";
     }
     return "sequential";
 }
@@ -1077,6 +1070,33 @@ bool parse_json_uint(const char *&p, unsigned int &out) {
     }
     out = static_cast<unsigned int>(v);
     return true;
+}
+
+bool parse_json_int_array(const char *&p, std::vector<int32_t> &out) {
+    skip_json_ws(p);
+    if (*p != '[') return false;
+    ++p;
+    out.clear();
+    while (true) {
+        skip_json_ws(p);
+        if (*p == ']') {
+            ++p;
+            return true;
+        }
+        unsigned int value = 0;
+        if (!parse_json_uint(p, value) || value > static_cast<unsigned int>(INT32_MAX)) return false;
+        out.push_back(static_cast<int32_t>(value));
+        skip_json_ws(p);
+        if (*p == ',') {
+            ++p;
+            continue;
+        }
+        if (*p == ']') {
+            ++p;
+            return true;
+        }
+        return false;
+    }
 }
 
 bool parse_json_string(const char *&p, std::string &out) {
@@ -1339,6 +1359,87 @@ bool read_cpu_topo_json_text(std::string &out_text) {
     return false;
 }
 
+bool parse_static_rtt_scheduler_cpu_order(
+    const char *text, const char *soc_name, uint64_t occupy, const std::vector<int32_t> &selected_scheduler_cpus,
+    std::vector<int32_t> &out_scheduler_cpu_order
+) {
+    out_scheduler_cpu_order.clear();
+    if (text == nullptr || soc_name == nullptr || soc_name[0] == '\0' || selected_scheduler_cpus.size() != 4) {
+        return false;
+    }
+
+    const char *p = text;
+    if (!find_json_key(p, "socs") || *p != '{') return false;
+    ++p;
+    while (true) {
+        skip_json_ws(p);
+        if (*p == '}') return false;
+        std::string key;
+        if (!parse_json_string(p, key)) return false;
+        skip_json_ws(p);
+        if (*p != ':') return false;
+        ++p;
+        skip_json_ws(p);
+        if (*p != '{') return false;
+
+        const char *soc_end = nullptr;
+        if (!find_json_object_end(p, soc_end)) return false;
+        if (key != soc_name) {
+            p = soc_end;
+            skip_json_ws(p);
+            if (*p == ',') {
+                ++p;
+                continue;
+            }
+            return false;
+        }
+
+        const char *value = nullptr;
+        if (find_json_key_before(p, soc_end, "host_arch", value)) {
+            std::string required_arch;
+            if (!parse_json_string(value, required_arch) || required_arch != host_arch_name()) return false;
+        }
+        if (find_json_key_before(p, soc_end, "occupy_mask", value)) {
+            unsigned int required_occupy = 0;
+            if (!parse_json_uint(value, required_occupy) || occupy != required_occupy) return false;
+        }
+
+        const char *assignment = nullptr;
+        if (!find_json_key_before(p, soc_end, "rtt_scheduler_assignment", assignment) || *assignment != '{') {
+            return false;
+        }
+        const char *assignment_end = nullptr;
+        if (!find_json_object_end(assignment, assignment_end) || assignment_end > soc_end) return false;
+
+        const char *field = nullptr;
+        unsigned int scheduler_count = 0;
+        if (!find_json_key_before(assignment, assignment_end, "scheduler_count", field) ||
+            !parse_json_uint(field, scheduler_count) || scheduler_count != 4) {
+            return false;
+        }
+        std::vector<int32_t> configured_order;
+        if (!find_json_key_before(assignment, assignment_end, "scheduler_cpu_order", field) ||
+            !parse_json_int_array(field, configured_order) || configured_order.size() != 4) {
+            return false;
+        }
+        std::vector<int32_t> die_order;
+        if (!find_json_key_before(assignment, assignment_end, "aicore_die_order", field) ||
+            !parse_json_int_array(field, die_order) || die_order != std::vector<int32_t>({0, 0, 1, 1})) {
+            return false;
+        }
+
+        std::vector<int32_t> selected = selected_scheduler_cpus;
+        std::vector<int32_t> configured = configured_order;
+        std::sort(selected.begin(), selected.end());
+        std::sort(configured.begin(), configured.end());
+        if (std::adjacent_find(configured.begin(), configured.end()) != configured.end() || configured != selected) {
+            return false;
+        }
+        out_scheduler_cpu_order = std::move(configured_order);
+        return true;
+    }
+}
+
 bool fill_dsmi_topo_from_json(
     const char *soc_name, uint64_t occupy, DsmiCpuTopo &out, bool &out_generic_selection_only
 ) {
@@ -1383,6 +1484,20 @@ bool load_cpu_topo_from_json(
         return a.cpu_id < b.cpu_id;
     });
     return !out_all_cpus.empty();
+}
+
+bool load_static_rtt_scheduler_cpu_order(
+    const char *soc_name, uint64_t occupy, const std::vector<int32_t> &selected_scheduler_cpus,
+    std::vector<int32_t> &out_scheduler_cpu_order
+) {
+    std::string text;
+    if (!read_cpu_topo_json_text(text)) {
+        out_scheduler_cpu_order.clear();
+        return false;
+    }
+    return parse_static_rtt_scheduler_cpu_order(
+        text.c_str(), soc_name, occupy, selected_scheduler_cpus, out_scheduler_cpu_order
+    );
 }
 
 std::string format_aicpu_topology_json(

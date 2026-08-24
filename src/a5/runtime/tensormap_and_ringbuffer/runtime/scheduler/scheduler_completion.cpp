@@ -32,10 +32,6 @@
 // Dual-slot state machine helpers
 // =============================================================================
 
-namespace {
-inline constexpr int32_t PTO2_DEFERRED_RELEASE_CAP = 256;
-}
-
 // Pure function: read register result -> SlotTransition (no side effects).
 SlotTransition SchedulerContext::decide_slot_transition(
     int32_t reg_task_id, int32_t reg_state, int32_t running_id, int32_t pending_id, bool pending_gated
@@ -78,7 +74,7 @@ SlotTransition SchedulerContext::decide_slot_transition(
 void SchedulerContext::complete_slot_task(
     PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
     [[maybe_unused]] int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
-    PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+    DeferredReleaseQueue &deferred_releases
 #if SIMPLER_DFX
     ,
     uint64_t dispatch_ts, uint64_t finish_ts
@@ -141,6 +137,16 @@ void SchedulerContext::complete_slot_task(
 
     bool task_complete = sched_->on_subtask_complete(slot_state);
 
+    if (task_complete && dependency_die_affinity_enabled_) {
+        // A5 worker ids use the blocked layout [AIC][AIV]: an AIC worker id
+        // is its cluster id, while two adjacent AIV worker ids map to one
+        // cluster. Record the actual die of the final subtask before either
+        // inline or mailbox-deferred fanout processing propagates the hint.
+        const int32_t cluster_id =
+            core_id < aic_count_ ? core_id : (core_id - aic_count_) / PLATFORM_AIV_CORES_PER_BLOCKDIM;
+        slot_state.set_locality_die(aicore_cluster_die(cluster_id, aic_count_));
+    }
+
 #if SIMPLER_DFX
     // A multi-block task can retire several subtasks before its final block
     // arrives. Count those non-final FINs so the scheduler lane does not hide
@@ -198,18 +204,11 @@ void SchedulerContext::complete_slot_task(
         }
         chip_swimlane.phase_complete_count++;
 #endif
-        if (deferred_release_count < PTO2_DEFERRED_RELEASE_CAP) {
-            deferred_release_slot_states[deferred_release_count++] = &slot_state;
-        } else {
-            while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-            }
-            deferred_release_slot_states[deferred_release_count++] = &slot_state;
-        }
+        // The completion scan reserves queue space before reading a core, so a
+        // completed running/pending pair can always enqueue both slots here.
+        bool release_queued = deferred_releases.push(&slot_state);
+        debug_assert(release_queued);
+        (void)release_queued;
         completed_this_turn++;
     }
 
@@ -273,7 +272,7 @@ void SchedulerContext::clear_running_slot(CoreExecState &core) {
 
 void SchedulerContext::check_running_cores_for_completion(
     int32_t thread_idx, Handshake *hank, int32_t &completed_this_turn, int32_t &cur_thread_completed,
-    bool &made_progress, PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+    bool &made_progress, DeferredReleaseQueue &deferred_releases
 ) {
 #if SIMPLER_SCHED_PROFILING
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -281,6 +280,10 @@ void SchedulerContext::check_running_cores_for_completion(
     CoreTracker &tracker = core_trackers_[thread_idx];
     auto running_core_states = tracker.get_all_running_cores();
     while (running_core_states.has_value()) {
+        // A single register observation may retire both running and pending.
+        // Leave those completions visible in hardware until the next scheduler
+        // iteration when there is room to defer both releases safely.
+        if (deferred_releases.free_slots() < 2) break;
         int32_t bit_pos = running_core_states.pop_first();
         int32_t core_id = tracker.get_core_id_by_offset(bit_pos);
         CoreExecState &core = core_exec_states_[core_id];
@@ -371,7 +374,7 @@ void SchedulerContext::check_running_cores_for_completion(
             }
             complete_slot_task(
                 *core.pending_slot_state, core.pending_reg_task_id, core.pending_subslot, thread_idx, core_id, hank,
-                completed_this_turn, deferred_release_slot_states, deferred_release_count
+                completed_this_turn, deferred_releases
 #if SIMPLER_DFX
                 ,
                 core.pending_dispatch_timestamp, finish_ts
@@ -385,7 +388,7 @@ void SchedulerContext::check_running_cores_for_completion(
             }
             complete_slot_task(
                 *core.running_slot_state, core.running_reg_task_id, core.running_subslot, thread_idx, core_id, hank,
-                completed_this_turn, deferred_release_slot_states, deferred_release_count
+                completed_this_turn, deferred_releases
 #if SIMPLER_DFX
                 ,
                 core.running_dispatch_timestamp, finish_ts

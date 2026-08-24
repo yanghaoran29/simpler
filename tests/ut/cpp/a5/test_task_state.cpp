@@ -136,6 +136,45 @@ TEST_F(TaskStateTest, MultiFaninPartialNotReady) {
     EXPECT_TRUE(sched.release_fanin_and_check_ready(slot));
 }
 
+TEST_F(TaskStateTest, ReadyConsumerInheritsLastProducerDie) {
+    alignas(64) PTO2TaskSlotState slot;
+    init_slot(slot, PTO2_TASK_PENDING, 2, 1);
+
+    EXPECT_FALSE(sched.release_fanin_and_check_ready(slot, nullptr, /*producer_die=*/0));
+    EXPECT_EQ(slot.locality_die(), -1);
+
+    EXPECT_TRUE(sched.release_fanin_and_check_ready(slot, nullptr, /*producer_die=*/1));
+    EXPECT_EQ(slot.locality_die(), 1);
+
+    slot.reset_for_reuse();
+    EXPECT_EQ(slot.locality_die(), -1);
+}
+
+TEST_F(TaskStateTest, ExplicitAlternatingAffinityPreservesGlobalBlockClaimOrder) {
+    alignas(64) PTO2TaskSlotState slot;
+    init_slot(slot, PTO2_TASK_PENDING, 0, 1);
+    slot.logical_block_num = 7;
+
+    slot.set_explicit_die_affinity(/*base_die=*/1, /*block_alternating=*/true);
+    EXPECT_TRUE(slot.has_explicit_die_affinity());
+    EXPECT_TRUE(slot.has_block_alternating_die_affinity());
+    EXPECT_EQ(slot.explicit_preferred_die(0), 1);
+    EXPECT_EQ(slot.explicit_preferred_die(1), 0);
+
+    int32_t block = -1;
+    EXPECT_EQ(slot.claim_next_block_for_die(/*die=*/0, block), 0);
+    EXPECT_EQ(slot.claim_next_block_for_die(/*die=*/1, block), 1);
+    EXPECT_EQ(block, 0);
+    for (int32_t expected = 1; expected < 7; ++expected) {
+        const int32_t die = slot.explicit_preferred_die(expected);
+        EXPECT_EQ(slot.claim_next_block_for_die(die ^ 1, block), 0);
+        EXPECT_EQ(slot.claim_next_block_for_die(die, block), 1);
+        EXPECT_EQ(block, expected);
+    }
+    EXPECT_FALSE(slot.has_unclaimed_blocks_for_die(0));
+    EXPECT_FALSE(slot.has_unclaimed_blocks_for_die(1));
+}
+
 // =============================================================================
 // Concurrent fanin: exactly one thread detects ready (via src API)
 // =============================================================================

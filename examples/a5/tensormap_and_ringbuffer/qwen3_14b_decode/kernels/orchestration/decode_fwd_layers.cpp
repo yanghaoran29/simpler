@@ -1473,6 +1473,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t30.add_scalar(k0_inline113);
                             params_t30.add_scalar(layer_hidden_base_inline151);
                             params_t30.add_scalar(n0_inline122);
+                            params_t30.launch_spec.set_fixed_die_affinity(
+                                static_cast<int8_t>((i + n_out_inline275) & 1)
+                            );
                             PTO2TaskId params_t30_deps[1];
                             uint32_t params_t30_deps_count = 0;
                             if (_submit_deps_buf_inline102[0].is_valid())
@@ -1495,6 +1498,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t31.add_scalar(k0_inline113);
                             params_t31.add_scalar(layer_hidden_base_inline151);
                             params_t31.add_scalar(n0_inline122);
+                            params_t31.launch_spec.set_fixed_die_affinity(
+                                static_cast<int8_t>((i + n_out_inline275) & 1)
+                            );
                             PTO2TaskId params_t31_deps[1];
                             uint32_t params_t31_deps_count = 0;
                             if (_submit_deps_buf_inline246[0].is_valid())
@@ -1539,6 +1545,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         params_t32.add_input(gate_acc_all_inline203);
                         params_t32.add_input(up_acc_all_inline303);
                         params_t32.add_scalar(n0_inline122__ssa_v7);
+                        params_t32.launch_spec.set_fixed_die_affinity(static_cast<int8_t>((i + n_out_inline292) & 1));
                         PTO2TaskId params_t32_deps[11];
                         uint32_t params_t32_deps_count = 0;
                         if (_submit_deps_buf_inline167[0].is_valid())
@@ -1586,6 +1593,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             params_t33.add_scalar(k0_inline113__ssa_v8);
                             params_t33.add_scalar(layer_inter_base_inline107);
                             params_t33.add_scalar(n0_inline122__ssa_v8);
+                            params_t33.launch_spec.set_fixed_die_affinity(
+                                static_cast<int8_t>((i + n_out_inline195 + 1) & 1)
+                            );
                             PTO2TaskId params_t33_deps[1];
                             uint32_t params_t33_deps_count = 0;
                             if (_submit_deps_buf_inline229[0].is_valid())

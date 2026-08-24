@@ -1,0 +1,100 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include "../shared/rtt_types.h"
+#include "simt_anchor.h"
+
+#ifdef __DAV_VEC__
+#define RTT_KERNEL_ENTRY(x) x##_0_mix_aiv
+#else
+#define RTT_KERNEL_ENTRY(x) x##_0_mix_aic
+#endif
+
+namespace {
+
+// Read the scheduler-owned dispatch register without adding memory traffic.
+__aicore__ __attribute__((always_inline)) inline uint32_t ReadDataMainBase() {
+    uint32_t value;
+    __asm__ volatile("MOV %0, DATA_MAIN_BASE\n" : "=l"(value));
+    return value;
+}
+
+// Report the physical register-slot ID used by the AICPU MMIO mapping.
+__aicore__ __attribute__((always_inline)) inline uint32_t PhysicalCoreId() {
+    return static_cast<uint32_t>(get_coreid()) & 0x0FFFu;
+}
+
+}  // namespace
+
+// Publish core identity, acknowledge every unique token, and persist until exit.
+extern "C" __global__ __aicore__ void RTT_KERNEL_ENTRY(a5_rtt_producer)(__gm__ a5_rtt::SharedState *state) {
+    if (state == nullptr) {
+        return;
+    }
+
+#ifdef __DAV_VEC__
+    const uint32_t cluster_count = get_block_num();
+    const uint32_t logical_core_id = cluster_count + get_block_idx() * get_subblockdim() + get_subblockid();
+    const uint32_t core_kind = static_cast<uint32_t>(a5_rtt::CoreKind::kAiv);
+#else
+    const uint32_t cluster_count = get_block_num();
+    const uint32_t logical_core_id = get_block_idx();
+    const uint32_t core_kind = static_cast<uint32_t>(a5_rtt::CoreKind::kAic);
+#endif
+
+    if (cluster_count == 0 || cluster_count > a5_rtt::kMaxClusterCount ||
+        logical_core_id >= cluster_count * a5_rtt::kSubcoresPerPhysicalCluster) {
+        return;
+    }
+
+#ifdef __DAV_VEC__
+    if (state->ready[0].reserved[0] != 0) {
+        simt_meta_anchor(reinterpret_cast<__gm__ uint32_t *>(state));
+    }
+#endif
+
+    __gm__ a5_rtt::CoreReadyRecord *ready = &state->ready[logical_core_id];
+    // Keep the first cache-line writeback separate from the core-id-dependent payload. On A5 the scheduler opens
+    // DATA_MAIN_BASE before the producer starts; publishing this bootstrap marker first makes that transition safe
+    // for both cube and vector subcores. This handshake is completed before any RTT is timed.
+    ready->ready_magic = a5_rtt::kReadyBootstrapMagic;
+    dcci(reinterpret_cast<__gm__ uint64_t *>(ready), SINGLE_CACHE_LINE, CACHELINE_OUT);
+    ready->logical_core_id = logical_core_id;
+    ready->physical_core_id = PhysicalCoreId();
+    ready->core_kind = core_kind;
+#ifdef __DAV_VEC__
+    ready->cluster_id = (logical_core_id - cluster_count) / 2;
+    ready->lane = 1 + ((logical_core_id - cluster_count) & 1u);
+#else
+    ready->cluster_id = logical_core_id;
+    ready->lane = 0;
+#endif
+    ready->ready_magic = a5_rtt::kReadyMagic;
+    dcci(reinterpret_cast<__gm__ uint64_t *>(ready), SINGLE_CACHE_LINE, CACHELINE_OUT);
+
+    // Do not consume measurement tokens until the scheduler opens this register.
+    while (ReadDataMainBase() != a5_rtt::kAicpuIdleTaskId) {}
+
+    // Acknowledge each scheduler/round token exactly once on the COND channel.
+    uint32_t last_token = a5_rtt::kAicpuIdleTaskId;
+    while (true) {
+        const uint32_t token = ReadDataMainBase();
+        if (token == a5_rtt::kAicoreExitSignal) {
+            set_cond(a5_rtt::kAicoreExitedValue);
+            return;
+        }
+        if (token == a5_rtt::kAicpuIdleTaskId || token == last_token) {
+            continue;
+        }
+        last_token = token;
+        set_cond(token & a5_rtt::kTaskIdMask);
+    }
+}

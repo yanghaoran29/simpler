@@ -191,8 +191,8 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // popcount(OCCUPY) via the topology probe. See the matching field in
     // src/a5/runtime/host_build_graph/runtime/runtime.h for rationale.
     int32_t aicpu_launch_count;
-    // 0 = contiguous blocks + FG host order; 1 = contiguous + die-aware host order
-    //    (AICore die: first half of clusters -> die0, second half -> die1);
+    // 0 = balanced contiguous blocks using the selected scheduler order;
+    // 1 = contiguous blocks + offline-calibrated die-aware scheduler order;
     // 2 = cluster round-robin (mainline baseline).
     int32_t sched_aicore_assignment_mode;
 

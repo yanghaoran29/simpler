@@ -393,6 +393,15 @@ device-side `OCCUPY=0x1f8`; the 9579 entry also constrains host architecture.
 Entries marked `generic` use `compute_allowed_cpus()` and honor an explicit
 active count.
 
+An entry may additionally contain an offline-calibrated
+`rtt_scheduler_assignment`. For the default `1O+4S` shape, the host accepts it
+only when the SoC, host architecture, OCCUPY mask, scheduler count, and exact
+selected scheduler CPU set all match. The scheduler prefix is then reordered
+as `[die0, die0, die1, die1]`; cluster ownership remains dynamically computed
+from the runtime-discovered AIC/AIV count. A missing or mismatched calibration
+uses balanced contiguous ranges in the original scheduler order. No launch
+runs an RTT preflight or exposes a preflight mode.
+
 The fallback's active count is the number selected, while the AICPU launch
 count remains the full device-side `OCCUPY` population so the filter gate sees
 one representative on every schedulable CPU. This launch count may exceed the

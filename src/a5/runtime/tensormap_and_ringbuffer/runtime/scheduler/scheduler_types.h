@@ -203,6 +203,8 @@ public:
         cluster_count_ = cluster_count;
         aic_mask_.init();
         aiv_mask_.init();
+        die_masks_[0].init();
+        die_masks_[1].init();
         pending_occupied_.init();
         for (int32_t i = 0; i < cluster_count; i++) {
             aic_mask_ |= BitStates::bit(i * 3);
@@ -211,11 +213,16 @@ public:
         core_states_ = aic_mask_ | aiv_mask_;
     }
 
-    void set_cluster(int32_t cluster_idx, int32_t aic_wid, int32_t aiv0_wid, int32_t aiv1_wid) {
+    void set_cluster(int32_t cluster_idx, int32_t aic_wid, int32_t aiv0_wid, int32_t aiv1_wid, int32_t die = -1) {
         always_assert(cluster_idx >= 0 && cluster_idx < MAX_CLUSTERS && "cluster_idx outside CoreTracker capacity");
-        core_id_map_[cluster_idx * 3] = aic_wid;
-        core_id_map_[cluster_idx * 3 + 1] = aiv0_wid;
-        core_id_map_[cluster_idx * 3 + 2] = aiv1_wid;
+        const int32_t cluster_offset = cluster_idx * PLATFORM_CORES_PER_BLOCKDIM;
+        core_id_map_[cluster_offset] = aic_wid;
+        core_id_map_[cluster_offset + 1] = aiv0_wid;
+        core_id_map_[cluster_offset + 2] = aiv1_wid;
+        if (die == 0 || die == 1) {
+            die_masks_[die] |= BitStates::bit(cluster_offset) | BitStates::bit(cluster_offset + 1) |
+                               BitStates::bit(cluster_offset + 2);
+        }
     }
 
     int32_t get_cluster_count() const { return cluster_count_; }
@@ -255,6 +262,31 @@ public:
 
     BitStates get_all_running_cores() const { return (~core_states_) & (aic_mask_ | aiv_mask_); }
     BitStates get_cluster_offset_states() const { return aic_mask_; }
+
+    // Pop the lowest available local core on preferred_die. If that die has no
+    // candidate in `states` (or the task has no valid hint), immediately fall
+    // back to the original global pop_first ordering.
+    int32_t pop_first_preferred_die(BitStates &states, int32_t preferred_die) const {
+        if (preferred_die == 0 || preferred_die == 1) {
+            BitStates preferred = states & die_masks_[preferred_die];
+            if (preferred.has_value()) {
+                const int32_t offset = preferred.pop_first();
+                states.clear_bit(offset);
+                return offset;
+            }
+        }
+        return states.pop_first();
+    }
+
+    BitStates restrict_to_die(const BitStates &states, int32_t die) const {
+        if (die != 0 && die != 1) return states;
+        return states & die_masks_[die];
+    }
+
+    bool owns_die(int32_t die) const {
+        if (die != 0 && die != 1) return false;
+        return die_masks_[die].has_value();
+    }
 
     // Every core whose pending slot is free has capacity for early-dispatch
     // staging: an idle core uses its running slot, while a running core uses its
@@ -486,6 +518,7 @@ private:
     int32_t cluster_count_;
     BitStates aic_mask_;
     BitStates aiv_mask_;
+    BitStates die_masks_[2];
     BitStates core_states_;
     BitStates pending_occupied_;
     int32_t core_id_map_[MAX_CORE_PER_THREAD];  // bit position -> worker id
