@@ -71,10 +71,10 @@ public:
     // (partitioned by tidx/nthreads). Each core is touched by exactly one thread.
     void handshake_partition(Runtime *runtime, int32_t tidx, int32_t nthreads);
     // Handshake exactly the cores this scheduler thread will later manage:
-    // clusters {tidx, tidx+active, ...}, cluster ci =
-    // {ci, N/3+2ci, N/3+2ci+1} (blocked layout: [0,N/3) AIC, [N/3,N) AIV). Matches
-    // assign_cores_to_threads' round-robin so handshake warms the same
-    // core_exec_states_ the thread later dispatches from.
+    // a balanced contiguous range of normalized physical cluster ordinals;
+    // cluster ci = {ci, N/3+2ci, N/3+2ci+1} in blocked layout ([0,N/3) AIC,
+    // [N/3,N) AIV). This matches assign_cores_to_threads so handshake warms
+    // the same core_exec_states_ the thread later dispatches from.
     void handshake_owned_clusters(Runtime *runtime, int32_t tidx, int32_t active_threads);
     // Barrier-free counterpart of assign_cores_to_threads: thread tidx populates
     // its own CoreTracker + per-core sub_block_id for the clusters it owns, right
@@ -218,7 +218,8 @@ private:
     // Core management (scheduler_cold_path.cpp)
     // =========================================================================
 
-    // Assign discovered cores (cluster = 1 AIC + 2 AIV) round-robin across scheduler threads.
+    // Assign discovered cores (cluster = 1 AIC + 2 AIV) as balanced contiguous
+    // ranges in normalized physical-cluster order.
     bool assign_cores_to_threads();
 
     // Emergency shutdown: broadcast exit signal to every handshake'd core and
