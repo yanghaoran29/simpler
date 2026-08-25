@@ -436,8 +436,12 @@ static bool can_run_within_one_die(const PTO2OrchestratorState *orch, const PTO2
 }
 
 static TaskReadyDomain next_root_ready_domain(PTO2OrchestratorState *orch, PTO2ResourceShape shape) {
-    uint8_t &turn = orch->root_ready_domain_turn[static_cast<int32_t>(shape)];
-    return (turn++ & 1U) == 0 ? TaskReadyDomain::DIE0 : TaskReadyDomain::DIE1;
+    int32_t shape_idx = static_cast<int32_t>(shape);
+    // Keep the byte load and store explicit: this counter lives in the AICPU runtime state,
+    // and the target compiler must materialize the update before the next root submission.
+    uint8_t turn = orch->root_ready_domain_turn[shape_idx];
+    orch->root_ready_domain_turn[shape_idx] = static_cast<uint8_t>(turn + 1U);
+    return (turn & 1U) == 0 ? TaskReadyDomain::DIE0 : TaskReadyDomain::DIE1;
 }
 
 static TaskReadyDomain choose_direct_ready_domain(
