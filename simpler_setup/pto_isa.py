@@ -12,13 +12,15 @@
 ``ensure_pto_isa_root()`` always manages ``PROJECT_ROOT/build/pto-isa``:
 
 1. Read the required commit from ``pto_isa.pin``.
-2. If a managed checkout already exists **clean and at exactly the pin**, use it
-   as-is — it already *is* the pinned ISA, so no checkout and no network.
+2. If a managed checkout already exists **clean and at exactly the pin**, reuse
+   it without a checkout or network access.
 3. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh: clone
    over HTTPS (``--no-checkout`` so the default branch is never materialized)
    and force-check-out the pin. GitHub is attempted three times; if it cannot
    provide the complete pinned checkout, fall back to the GitCode mirror.
-4. Verify HEAD exactly matches the pin before returning.
+4. Assemble any pin-specific consumer header layout under the checkout's
+   ignored ``build/`` directory, leaving the pinned Git worktree pristine.
+5. Verify HEAD exactly matches the pin before returning.
 
 Two deliberate choices:
 
@@ -62,6 +64,8 @@ logger = logging.getLogger(__name__)
 _PTO_ISA_GITHUB_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
 _PTO_ISA_GITCODE_HTTPS = "https://gitcode.com/luohuan40/pto-isa.git"
 _PTO_ISA_PIN_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_PTO_ISA_0DB = "0dbecbe7fc26631b615e843ee77d4745b70cee43"
+_CONSUMER_ADAPTER_SCHEMA = 1
 PTO_ISA_PIN_FILE = "pto_isa.pin"
 PTO_ISA_BUILD_METADATA = "pto_isa_build.json"
 
@@ -383,6 +387,71 @@ def _is_pristine_at_commit(clone_path: Path, commit: str, verbose: bool) -> bool
     return result.returncode == 0 and not result.stdout.strip()
 
 
+def _replace_consumer_header_text(path: Path, old: str, new: str) -> None:
+    text = path.read_text()
+    if text.count(old) != 1:
+        raise RuntimeError(f"PTO-ISA consumer adapter expected one match in {path}, found {text.count(old)}")
+    path.write_text(text.replace(old, new))
+
+
+def _prepare_consumer_root(clone_path: Path, commit: str) -> Path:
+    """Return the header root consumed by simpler for a pinned checkout."""
+    if commit != _PTO_ISA_0DB:
+        return clone_path
+
+    consumer_root = clone_path / "build" / "simpler-consumer"
+    marker_path = consumer_root / ".adapter.json"
+    marker = {"schema_version": _CONSUMER_ADAPTER_SCHEMA, "pto_isa_commit": commit}
+    if marker_path.is_file() and (consumer_root / "include").is_dir():
+        try:
+            if json.loads(marker_path.read_text()) == marker:
+                return consumer_root
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    staging_root = consumer_root.with_name(f".{consumer_root.name}.tmp")
+    shutil.rmtree(staging_root, ignore_errors=True)
+    shutil.copytree(clone_path / "include", staging_root / "include")
+    pkg_include = clone_path / "pkg_inc"
+    if pkg_include.is_dir():
+        shutil.copytree(pkg_include, staging_root / "include", dirs_exist_ok=True)
+
+    instr_path = staging_root / "include" / "pto" / "common" / "pto_instr.hpp"
+    _replace_consumer_header_text(
+        instr_path,
+        '#include "pto/common/utils.hpp"\n#include "pto/common/pto_instr_impl.hpp"',
+        '#include "pto/common/utils.hpp"\n\n'
+        "namespace pto {\n"
+        "struct MrgSortExecutedNumList {\n"
+        "    uint16_t mrgSortList0;\n"
+        "    uint16_t mrgSortList1;\n"
+        "    uint16_t mrgSortList2;\n"
+        "    uint16_t mrgSortList3;\n"
+        "};\n"
+        "} // namespace pto\n\n"
+        '#include "pto/common/pto_instr_impl.hpp"',
+    )
+    impl_path = staging_root / "include" / "pto" / "common" / "pto_instr_impl.hpp"
+    _replace_consumer_header_text(
+        impl_path,
+        '#include "pto/npu/a5/TLoad.hpp"\n#ifdef __DAV_VEC__\n#include "pto/npu/a5/TCvt.hpp"',
+        '#include "pto/npu/a5/TLoad.hpp"\n'
+        "#if defined(__DAV_VEC__) || defined(__DAV_CUBE__)\n"
+        '#include "pto/npu/a5/TCvt.hpp"',
+    )
+    _replace_consumer_header_text(
+        impl_path,
+        '#include "pto/npu/a5/TDeInterleave.hpp"\n#endif // __COSTMODEL',
+        '#include "pto/npu/a5/TDeInterleave.hpp"\n#endif // __DAV_VEC__\n#endif // __COSTMODEL',
+    )
+
+    marker_path = staging_root / ".adapter.json"
+    marker_path.write_text(json.dumps(marker, sort_keys=True) + "\n")
+    shutil.rmtree(consumer_root, ignore_errors=True)
+    staging_root.replace(consumer_root)
+    return consumer_root
+
+
 def _clone_from_remote(target: Path, commit: str, remote: str, attempts: int, verbose: bool) -> bool:
     """Try complete clone-and-pin acquisitions from one remote."""
     for attempt in range(1, attempts + 1):
@@ -495,7 +564,7 @@ def _ensure_locked(clone_path: Path, required_commit: str, verbose: bool) -> Opt
     # content-addressed), so use it as-is — no checkout, no network. This is the
     # warm-cache path on persistent runners.
     if _is_cloned(clone_path) and _is_pristine_at_commit(clone_path, required_commit, verbose=verbose):
-        return str(clone_path.resolve())
+        return str(_prepare_consumer_root(clone_path, required_commit).resolve())
 
     # Otherwise (missing, wrong revision, or dirty) obtain the pin *fresh* rather
     # than checking out over the existing tree: re-clone directly at the pin. We
@@ -520,4 +589,4 @@ def _ensure_locked(clone_path: Path, required_commit: str, verbose: bool) -> Opt
             logger.warning(f"pto-isa HEAD mismatch: expected {required_commit}, got {actual_commit or '<unknown>'}")
         return None
 
-    return str(clone_path.resolve())
+    return str(_prepare_consumer_root(clone_path, required_commit).resolve())

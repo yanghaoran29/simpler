@@ -17,6 +17,7 @@ from simpler_setup import pto_isa
 
 PIN_A = "a" * 40
 PIN_B = "b" * 40
+PTO_ISA_0DB = "0dbecbe7fc26631b615e843ee77d4745b70cee43"
 RUNTIME_A = "a2a3/onboard/host_build_graph"
 RUNTIME_B = "a2a3/onboard/tensormap_and_ringbuffer"
 
@@ -200,6 +201,48 @@ def test_ensure_pto_isa_root_rejects_when_reclone_lands_wrong_commit(tmp_path, m
 
     with pytest.raises(OSError, match="PTO-ISA not available"):
         pto_isa.ensure_pto_isa_root()
+
+
+def test_prepare_consumer_root_adapts_pto_isa_0db(tmp_path):
+    clone_path = tmp_path / "pto-isa"
+    include_root = clone_path / "include" / "pto"
+    common = include_root / "common"
+    common.mkdir(parents=True)
+    (common / "pto_instr.hpp").write_text('#include "pto/common/utils.hpp"\n#include "pto/common/pto_instr_impl.hpp"\n')
+    (common / "pto_instr_impl.hpp").write_text(
+        '#include "pto/npu/a5/TLoad.hpp"\n'
+        "#ifdef __DAV_VEC__\n"
+        '#include "pto/npu/a5/TCvt.hpp"\n'
+        '#include "pto/npu/a5/TDeInterleave.hpp"\n'
+        "#endif // __COSTMODEL\n"
+    )
+    overlay = clone_path / "pkg_inc" / "pto" / "comm" / "a2a3" / "async"
+    overlay.mkdir(parents=True)
+    (overlay / "TPutAsyncNotify.hpp").write_text("// packaged overlay\n")
+
+    consumer_root = pto_isa._prepare_consumer_root(clone_path, PTO_ISA_0DB)
+
+    consumer_include = consumer_root / "include" / "pto"
+    instr = (consumer_include / "common" / "pto_instr.hpp").read_text()
+    impl = (consumer_include / "common" / "pto_instr_impl.hpp").read_text()
+    assert instr.index("struct MrgSortExecutedNumList") < instr.index("pto_instr_impl.hpp")
+    assert "#if defined(__DAV_VEC__) || defined(__DAV_CUBE__)" in impl
+    assert "#endif // __DAV_VEC__\n#endif // __COSTMODEL" in impl
+    assert (consumer_include / "comm" / "a2a3" / "async" / "TPutAsyncNotify.hpp").is_file()
+    assert not (clone_path / "include" / "pto" / "comm" / "a2a3" / "async" / "TPutAsyncNotify.hpp").exists()
+
+
+def test_prepare_consumer_root_reuses_matching_adapter(tmp_path, monkeypatch):
+    clone_path = tmp_path / "pto-isa"
+    (clone_path / "include" / "pto" / "common").mkdir(parents=True)
+    consumer_root = clone_path / "build" / "simpler-consumer"
+    (consumer_root / "include").mkdir(parents=True)
+    (consumer_root / ".adapter.json").write_text(
+        json.dumps({"schema_version": 1, "pto_isa_commit": PTO_ISA_0DB}) + "\n"
+    )
+    monkeypatch.setattr(pto_isa.shutil, "copytree", lambda *a, **k: pytest.fail("adapter should be reused"))
+
+    assert pto_isa._prepare_consumer_root(clone_path, PTO_ISA_0DB) == consumer_root
 
 
 def test_is_pristine_at_commit_true_when_clean_and_at_pin(tmp_path, monkeypatch):
