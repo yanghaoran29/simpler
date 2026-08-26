@@ -449,6 +449,14 @@ static TaskReadyDomain choose_direct_ready_domain(
 ) {
     if (!can_run_within_one_die(orch, slot_state)) return TaskReadyDomain::GLOBAL;
 
+    // A Die-affine scope represents one locality unit selected by the orchestration
+    // program (for example, one paged-attention batch chain). Pin every task in
+    // that unit to the scope's Die instead of alternating each independent root.
+    if (orch->in_die_affine_scope()) {
+        TaskReadyDomain domain = orch->die_affine_scope_ready_domain;
+        if (domain == TaskReadyDomain::DIE0 || domain == TaskReadyDomain::DIE1) return domain;
+    }
+
     TaskReadyDomain inherited = TaskReadyDomain::UNASSIGNED;
     uint64_t highest_task_id = 0;
     bool found = false;
@@ -723,16 +731,31 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
         return;
     }
     assert(orch->scope_stack_top < static_cast<int32_t>(orch->scope_stack_capacity - 1) && "Scope stack overflow");
-    if (mode == PTO2ScopeMode::AUTO && orch->in_manual_scope()) {
+    bool uses_auto_dependencies = mode == PTO2ScopeMode::AUTO || mode == PTO2ScopeMode::AUTO_DIE_AFFINE;
+    if (uses_auto_dependencies && orch->in_manual_scope()) {
         report_fatal(PTO2_ERROR_INVALID_ARGS, __FUNCTION__, "auto scope nested inside manual scope is not supported");
         return;
     }
 
     bool already_in_manual_scope = orch->in_manual_scope();
+    bool already_in_die_affine_scope = orch->in_die_affine_scope();
     ++orch->scope_stack_top;
     orch->scope_begins[orch->scope_stack_top] = orch->scope_tasks_size;
-    if (mode == PTO2ScopeMode::MANUAL && !already_in_manual_scope) {
+    bool starts_manual_scope = mode == PTO2ScopeMode::MANUAL || mode == PTO2ScopeMode::DIE_AFFINE;
+    if (starts_manual_scope && !already_in_manual_scope) {
         orch->manual_begin_depth = orch->scope_stack_top;
+    }
+    bool starts_die_affine_scope =
+        (mode == PTO2ScopeMode::DIE_AFFINE && !already_in_manual_scope) ||
+        mode == PTO2ScopeMode::AUTO_DIE_AFFINE;
+    if (starts_die_affine_scope && !already_in_die_affine_scope) {
+        orch->die_affine_begin_depth = orch->scope_stack_top;
+        // Keep the load and store explicit for the AICPU compiler, as with the
+        // root-task turn counter used by next_root_ready_domain().
+        uint8_t turn = orch->die_affine_scope_ready_domain_turn;
+        orch->die_affine_scope_ready_domain_turn = static_cast<uint8_t>(turn + 1U);
+        orch->die_affine_scope_ready_domain =
+            (turn & 1U) == 0 ? TaskReadyDomain::DIE0 : TaskReadyDomain::DIE1;
     }
 #if SIMPLER_DFX
     // Gate via is_scope_stats_enabled() (weak-false in host builds) BEFORE the
@@ -787,10 +810,15 @@ void PTO2OrchestratorState::end_scope() {
 #endif
 
     bool ending_manual_scope = orch->scope_stack_top == orch->manual_begin_depth;
+    bool ending_die_affine_scope = orch->scope_stack_top == orch->die_affine_begin_depth;
     int32_t begin = orch->scope_begins[orch->scope_stack_top--];
     int32_t count = orch->scope_tasks_size - begin;
     if (ending_manual_scope) {
         orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    }
+    if (ending_die_affine_scope) {
+        orch->die_affine_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+        orch->die_affine_scope_ready_domain = TaskReadyDomain::UNASSIGNED;
     }
 
     if (orch->scheduler && count > 0) {
@@ -1147,6 +1175,11 @@ static TaskOutputTensors submit_task_common(
     // Zero-fanin tasks and tasks whose claimed producers are already completed
     // do not need fanout links or dep_pool entries. Tasks with live producers
     // allocate fanout links here before any scheduler thread can dispatch them.
+    // Pre-assign live-fanin tasks too: otherwise the Scheduler that releases the
+    // final dependency would replace scope locality with last-completer locality.
+    if (orch->in_die_affine_scope() && can_run_within_one_die(orch, cur_slot_state)) {
+        cur_slot_state.assign_ready_domain_once(orch->die_affine_scope_ready_domain);
+    }
     if (fanin_builder.count == 0) {
         cur_slot_state.fanin_count = 1;
         cur_slot_state.fanin_refcount.store(1, std::memory_order_release);
@@ -1432,6 +1465,8 @@ void PTO2OrchestratorState::mark_done() {
     orch->scope_tasks_size = 0;
     orch->scope_stack_top = -1;
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->die_affine_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->die_affine_scope_ready_domain = TaskReadyDomain::UNASSIGNED;
 #if !SIMPLER_ORCH_PROFILING && SIMPLER_DFX
     g_orch_submit_idx = 0;
 #endif

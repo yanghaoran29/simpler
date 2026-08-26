@@ -1,0 +1,13 @@
+metric,baseline_or_die0,new_or_die1,change_pct,notes
+device_mean_us,7200.981,7054.295,-2.037,vs_previous_scope_affinity_card1_historical
+device_mean_us,7434.600,7054.295,-5.115,vs_main_card1_historical
+device_p50_us,,7046.493,,new_100_samples
+device_p95_us,,7171.663,,new_100_samples
+aicore_window_us,7054.969,6586.657,-6.638,card2_single_level4_swimlane
+aicore_p90_us,5253.553,5219.627,-0.646,card2_single_level4_swimlane
+aicore_tail10_us,1801.416,1367.030,-24.114,card2_single_level4_swimlane
+qk_tasks,512,512,,die0_vs_die1
+sf_tasks,512,512,,die0_vs_die1
+pv_tasks,512,512,,die0_vs_die1
+up_tasks,512,512,,die0_vs_die1
+all_tasks,2048,2048,,die0_vs_die1

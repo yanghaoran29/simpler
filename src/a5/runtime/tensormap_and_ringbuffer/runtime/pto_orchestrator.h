@@ -85,6 +85,9 @@ struct PTO2OrchestratorState {
     int32_t scope_stack_top;          // Current top of stack (-1 = no scope open)
     uint64_t scope_stack_capacity;    // Max nesting depth (PTO2_MAX_SCOPE_DEPTH)
     int32_t manual_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    int32_t die_affine_begin_depth{PTO2_MAX_SCOPE_DEPTH};
+    TaskReadyDomain die_affine_scope_ready_domain{TaskReadyDomain::UNASSIGNED};
+    uint8_t die_affine_scope_ready_domain_turn{0};
 
     // === SCHEDULER STATE ACCESS ===
     // Same runtime-arena scheduler object; Orch-side wiring mutates dep_pool
@@ -133,6 +136,10 @@ struct PTO2OrchestratorState {
     }
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
+    bool in_die_affine_scope() const {
+        return die_affine_scope_ready_domain == TaskReadyDomain::DIE0 ||
+               die_affine_scope_ready_domain == TaskReadyDomain::DIE1;
+    }
 
     // === Cold-path API (defined in pto_orchestrator.cpp) ===
 

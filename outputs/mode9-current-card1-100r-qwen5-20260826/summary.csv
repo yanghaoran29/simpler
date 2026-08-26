@@ -1,0 +1,9 @@
+case,main_device_us,current_device_us,device_change_pct,main_effective_us,current_effective_us,effective_change_pct,main_orch_us,current_orch_us,orch_change_pct,main_scheduler_us,current_scheduler_us,scheduler_change_pct,current_p50_us,current_p95_us,main_samples,current_samples,comparison
+alternating_matmul_add_Case1,1441.850,1615.180,12.021,1409.450,1583.109,12.321,1407.350,1580.831,12.327,1404.100,1578.154,12.396,1593.050,1819.300,200,100,historical_card1
+benchmark_bgemm_Case0,1458.300,1419.827,-2.638,1427.400,1390.049,-2.617,1336.800,1302.228,-2.586,1421.750,1383.106,-2.718,1404.500,1544.400,200,100,historical_card1
+paged_attention_unroll_Case1,1558.700,1735.035,11.313,1528.750,1704.881,11.521,1231.200,1400.907,13.784,1523.400,1700.190,11.605,1728.850,1833.600,200,100,historical_card1
+paged_attention_unroll_Case2,901.100,987.058,9.539,871.550,957.547,9.867,634.900,687.245,8.245,865.250,952.189,10.048,979.000,1051.700,200,100,historical_card1
+paged_attention_unroll_manual_scope_Case1,1629.500,1733.783,6.400,1599.950,1703.850,6.494,1151.400,1289.333,11.980,1594.400,1698.430,6.525,1730.650,1851.800,200,100,historical_card1
+paged_attention_unroll_manual_scope_Case2,925.550,1011.739,9.312,895.600,981.145,9.552,542.050,597.993,10.321,889.850,976.281,9.713,1011.000,1095.400,200,100,historical_card1
+batch_paged_attention_Case1,7434.600,7066.457,-4.952,7401.800,7033.151,-4.981,6300.900,6016.173,-4.519,7397.050,7028.553,-4.982,7069.350,7164.800,200,100,historical_card1
+qwen3_14b_decode_StressBatch16Seq3500,36083.248,35014.167,-2.963,36046.949,34980.400,-2.959,10279.340,10156.167,-1.198,36043.855,34978.900,-2.955,35101.400,35118.100,3,3,historical_card1_trimmed_middle3_of_5

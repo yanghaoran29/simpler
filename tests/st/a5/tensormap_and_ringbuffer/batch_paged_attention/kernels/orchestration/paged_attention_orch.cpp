@@ -121,7 +121,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             if (chunk_bc > IN_CORE_BATCH) chunk_bc = IN_CORE_BATCH;
             uint64_t batch_start = chunk_idx * IN_CORE_BATCH;
 
-            PTO2_SCOPE() {
+            // Alternate whole chunks across Dies while preserving AUTO
+            // TensorMap dependency inference for the nested per-block scopes.
+            PTO2_SCOPE(PTO2ScopeMode::AUTO_DIE_AFFINE) {
                 uint32_t oi_acc_shapes[2] = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t scalar_acc_shapes[1] = {static_cast<uint32_t>(chunk_bc * q_tile)};
                 TensorCreateInfo oi_batch_ci(oi_acc_shapes, 2, DataType::FLOAT32);

@@ -1,0 +1,9 @@
+case,aicore_tasks,main_p90_complete_us,mode9_p90_complete_us,change_pct
+alternating_matmul_add_Case1,1000,804.149,670.445,-16.627
+benchmark_bgemm_Case0,1000,944.140,963.411,2.041
+paged_attention_unroll_Case1,1024,1124.307,1099.019,-2.249
+paged_attention_unroll_Case2,512,580.328,526.421,-9.289
+paged_attention_unroll_manual_scope_Case1,1024,1254.948,1159.881,-7.575
+paged_attention_unroll_manual_scope_Case2,512,622.908,600.419,-3.610
+batch_paged_attention_Case1,4096,4818.439,5219.627,8.326
+qwen3_14b_decode_StressBatch16Seq3500,19208,34263.859,33104.489,-3.384

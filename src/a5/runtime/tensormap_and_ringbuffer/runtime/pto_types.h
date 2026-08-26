@@ -69,6 +69,12 @@ enum class CompletionType : int32_t {
 enum class PTO2ScopeMode : uint8_t {
     AUTO = 0,
     MANUAL = 1,
+    // Use MANUAL dependency semantics and keep all single-Die-capable tasks
+    // in the outermost scope on one Die. Successive scopes alternate Dies.
+    DIE_AFFINE = 2,
+    // Keep AUTO TensorMap dependency inference while pinning all tasks that can
+    // execute within one Die to the outermost affine scope's alternating Die.
+    AUTO_DIE_AFFINE = 3,
 };
 
 /**

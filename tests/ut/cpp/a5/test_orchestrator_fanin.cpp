@@ -79,6 +79,121 @@ add_runtime_output_arg(CoreTaskArgs &args, std::vector<TensorCreateInfo> &create
     args.add_output(create_infos.back());
 }
 
+TEST_F(OrchestratorFaninTest, DieAffineScopesAlternateDieAndPinLiveFaninTasks) {
+    orch.total_cluster_count = 28;
+    orch.total_aiv_count = 56;
+
+    auto submit_scope_chain = [&](TaskReadyDomain expected_domain) {
+        orch.begin_scope(PTO2ScopeMode::DIE_AFFINE);
+        EXPECT_EQ(orch.die_affine_scope_ready_domain, expected_domain);
+
+        MixedKernels producer_kernel{};
+        producer_kernel.aic_kernel_id = 0;
+        CoreTaskArgs producer_args;
+        TaskOutputTensors producer = orch.submit_task(producer_kernel, producer_args);
+        ASSERT_TRUE(producer.task_id().is_valid());
+
+        MixedKernels consumer_kernel{};
+        consumer_kernel.aiv0_kernel_id = 1;
+        PTO2TaskId deps[] = {producer.task_id()};
+        CoreTaskArgs consumer_args;
+        consumer_args.set_dependencies(deps, 1);
+        TaskOutputTensors consumer = orch.submit_task(consumer_kernel, consumer_args);
+        ASSERT_TRUE(consumer.task_id().is_valid());
+
+        auto &producer_slot = sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(
+            producer.task_id().local()
+        );
+        auto &consumer_slot = sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(
+            consumer.task_id().local()
+        );
+        EXPECT_EQ(producer_slot.ready_domain(), expected_domain);
+        EXPECT_EQ(consumer_slot.ready_domain(), expected_domain);
+
+        orch.end_scope();
+        EXPECT_EQ(orch.die_affine_scope_ready_domain, TaskReadyDomain::UNASSIGNED);
+    };
+
+    submit_scope_chain(TaskReadyDomain::DIE0);
+    submit_scope_chain(TaskReadyDomain::DIE1);
+}
+
+TEST_F(OrchestratorFaninTest, AutoDieAffineScopePreservesTensorMapDependenciesAndNestedAutoScope) {
+    orch.total_cluster_count = 28;
+    orch.total_aiv_count = 56;
+
+    orch.begin_scope(PTO2ScopeMode::AUTO_DIE_AFFINE);
+    EXPECT_FALSE(orch.in_manual_scope());
+    EXPECT_TRUE(orch.in_die_affine_scope());
+    EXPECT_EQ(orch.die_affine_scope_ready_domain, TaskReadyDomain::DIE0);
+
+    // Batch PA keeps its existing per-block AUTO scopes inside the new affine
+    // chunk scope, so this nesting must preserve automatic TensorMap fanin.
+    orch.begin_scope(PTO2ScopeMode::AUTO);
+    std::vector<TensorCreateInfo> create_infos;
+    MixedKernels producer_kernel{};
+    producer_kernel.aic_kernel_id = 0;
+    CoreTaskArgs producer_args;
+    add_runtime_output_arg(producer_args, create_infos, 4);
+    TaskOutputTensors producer = orch.submit_task(producer_kernel, producer_args);
+    ASSERT_TRUE(producer.task_id().is_valid());
+
+    MixedKernels consumer_kernel{};
+    consumer_kernel.aiv0_kernel_id = 1;
+    CoreTaskArgs consumer_args;
+    consumer_args.add_input(producer.get_ref(0));
+    TaskOutputTensors consumer = orch.submit_task(consumer_kernel, consumer_args);
+    ASSERT_TRUE(consumer.task_id().is_valid());
+
+    auto &producer_slot =
+        sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local());
+    auto &consumer_slot =
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local());
+    ASSERT_NE(consumer_slot.payload, nullptr);
+    EXPECT_EQ(consumer_slot.payload->fanin_actual_count, 1);
+    EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].slot_state(), &producer_slot);
+    EXPECT_EQ(producer_slot.ready_domain(), TaskReadyDomain::DIE0);
+    EXPECT_EQ(consumer_slot.ready_domain(), TaskReadyDomain::DIE0);
+
+    orch.end_scope();
+    EXPECT_TRUE(orch.in_die_affine_scope());
+    EXPECT_EQ(orch.die_affine_scope_ready_domain, TaskReadyDomain::DIE0);
+    orch.end_scope();
+    EXPECT_FALSE(orch.in_die_affine_scope());
+
+    // The next outer affinity unit must alternate independently of its nested
+    // AUTO scopes.
+    orch.begin_scope(PTO2ScopeMode::AUTO_DIE_AFFINE);
+    EXPECT_EQ(orch.die_affine_scope_ready_domain, TaskReadyDomain::DIE1);
+    orch.end_scope();
+}
+
+TEST_F(OrchestratorFaninTest, ManualScopeDoesNotEnableDieAffinity) {
+    orch.total_cluster_count = 28;
+    orch.total_aiv_count = 56;
+
+    orch.begin_scope(PTO2ScopeMode::MANUAL);
+    EXPECT_TRUE(orch.in_manual_scope());
+    EXPECT_FALSE(orch.in_die_affine_scope());
+
+    MixedKernels kernel{};
+    kernel.aic_kernel_id = 0;
+    CoreTaskArgs first_args;
+    TaskOutputTensors first = orch.submit_task(kernel, first_args);
+    ASSERT_TRUE(first.task_id().is_valid());
+    CoreTaskArgs second_args;
+    TaskOutputTensors second = orch.submit_task(kernel, second_args);
+    ASSERT_TRUE(second.task_id().is_valid());
+
+    auto &first_slot =
+        sm_handle->header->rings[first.task_id().ring()].get_slot_state_by_task_id(first.task_id().local());
+    auto &second_slot =
+        sm_handle->header->rings[second.task_id().ring()].get_slot_state_by_task_id(second.task_id().local());
+    EXPECT_EQ(first_slot.ready_domain(), TaskReadyDomain::DIE0);
+    EXPECT_EQ(second_slot.ready_domain(), TaskReadyDomain::DIE1);
+    orch.end_scope();
+}
+
 TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
     orch.begin_scope();
 

@@ -461,6 +461,9 @@ bool PTO2OrchestratorState::init_data_from_layout(
     orch->scope_stack_top = -1;
     orch->scope_stack_capacity = layout.scope_stack_capacity;
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->die_affine_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->die_affine_scope_ready_domain = TaskReadyDomain::UNASSIGNED;
+    orch->die_affine_scope_ready_domain_turn = 0;
     memset(orch->root_ready_domain_turn, 0, sizeof(orch->root_ready_domain_turn));
 
     return true;
@@ -521,6 +524,9 @@ bool PTO2OrchestratorState::reset_for_reuse(
     orch->scope_stack_top = -1;
     orch->scope_stack_capacity = layout.scope_stack_capacity;
     orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->die_affine_begin_depth = PTO2_MAX_SCOPE_DEPTH;
+    orch->die_affine_scope_ready_domain = TaskReadyDomain::UNASSIGNED;
+    orch->die_affine_scope_ready_domain_turn = 0;
     orch->total_cluster_count = 0;
     orch->total_aiv_count = 0;
     memset(orch->root_ready_domain_turn, 0, sizeof(orch->root_ready_domain_turn));

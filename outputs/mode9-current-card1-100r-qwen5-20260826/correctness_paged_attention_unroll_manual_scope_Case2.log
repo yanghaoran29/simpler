@@ -1,0 +1,24 @@
+[mono_ns=84017577990910][T0x71a2a6dba740][TIMING] clock_anchor: [CLOCK_ANCHOR] v=1 pid=3998810 mono_ns=84017577990189 wall_ns=1787730399222134213
+
+=== Runtime: tensormap_and_ringbuffer  Level: 2 ===
+  TestPagedAttentionUnrollManualScope::Case2 ...
+[mono_ns=84019538305704][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=2 name=chip.run.bind.args ts=84019500385429 dur=37915358 
+[mono_ns=84019558805583][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=2 name=chip.run.bind.prebuilt ts=84019538344963 dur=20455683 
+[mono_ns=84019558835688][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=1 name=chip.run.bind ts=84019499543305 dur=59291191 
+[mono_ns=84019568386423][T0x71a2a6dba740][WARN] query_cpu_topo: [aicpu_topology_probe.cpp:125] aicpu_topology_probe: halGetDeviceInfoByBuff(CPU_TOPO) rc=65534 total=0
+[mono_ns=84019570484762][T0x71a2a6dba740][WARN] query_cpu_topo: [aicpu_topology_probe.cpp:137] aicpu_topology_probe: dsmi_get_device_info(CPU_TOPO) rc=65534 total=0
+[mono_ns=84019570606996][T0x71a2a6dba740][WARN] prepare_execution: [device_runner.cpp:342] AICPU CPU_TOPO unavailable; using json_fallback: soc=Ascend950PR_9579 occupy=0x3e stable_reachable=5 requested=0 effective=5 affinity=[1, 2, 3, 4, 5(orch)]
+[mono_ns=84019572863593][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=1 name=chip.run.runner_run ts=84019570690712 dur=2171138 
+[mono_ns=84019573241059][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=1 name=chip.run.validate ts=84019572876112 dur=364316 
+[mono_ns=84019573248721][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=2 name=chip.run.runner_run.device_wall ts=0 dur=1269004 clk=dev
+[mono_ns=84019573250694][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.preamble ts=0 dur=313065 clk=dev
+[mono_ns=84019573252366][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.graph_build ts=51976 dur=1200717 clk=dev
+[mono_ns=84019573254119][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.config_validate ts=59564 dur=3035 clk=dev
+[mono_ns=84019573256943][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.arena_wire ts=62641 dur=18596 clk=dev
+[mono_ns=84019573258676][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.sm_reset ts=81273 dur=39216 clk=dev
+[mono_ns=84019573260028][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.post_orch ts=1252969 dur=9911 clk=dev
+[mono_ns=84019573261240][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.orch ts=121938 dur=470008 clk=dev
+[mono_ns=84019573262401][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=3 name=chip.run.runner_run.device_wall.sched ts=315534 dur=905052 clk=dev
+[mono_ns=84019573264104][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=1 name=chip.run.claim_release ts=84019573263503 dur=301 
+[mono_ns=84019573266227][T0x71a2a6dba740][TIMING] emit_host_span: [STRACE] v=1 pid=3998810 tid=3998810 inv=1 hid=4e691a1ac652a1b3 depth=0 name=chip.run ts=84019499500040 dur=73765827 run_id=0 dispatch_id=0 slot_id=0 generation=1 run_epoch=1
+  TestPagedAttentionUnrollManualScope::Case2 PASSED

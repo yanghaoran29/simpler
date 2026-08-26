@@ -59,7 +59,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int total_add = 0;
 
     for (int group_idx = 0; group_idx < num_groups; group_idx++) {
-        PTO2_SCOPE_GUARD();
+        // Treat one independent reduction chain as one locality unit. Alternate
+        // groups across Dies while keeping both GEMMs and the serial ADD chain
+        // in a group on the same Die.
+        PTO2_SCOPE_GUARD(PTO2ScopeMode::AUTO_DIE_AFFINE);
 
         uint32_t c_elem_offset = static_cast<uint32_t>(static_cast<uint64_t>(group_idx) * group_tile_elems);
         uint32_t c_view_offsets[1] = {c_elem_offset};
