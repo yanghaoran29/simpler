@@ -252,9 +252,10 @@ The ring buffer mechanism provides **flow control** between the orchestrator (pr
 **TensorMap pool back-pressure**: Before STEP 4 registers a task's outputs, the orchestrator's `ensure_tensormap_capacity` reserves pool space for the inserts. When the shared entry pool is exhausted, it reclaims retired entries across all rings and spin-waits until reclaim actually frees entries, with a 500 ms wall-clock deadlock backstop (see Section 5.4).
 
 On A5, a reclaim consumer that observes no reclaim progress for 10 ms sets its
-ring bit in `publication_request_mask`. The scheduler force-publishes its exact
-local `last_task_alive` under `advance_lock` and acknowledges the request before
-the orchestrator uses the watermark for structural deadlock detection.
+ring bit in the matching domain's `publication_request_masks` cache line. A
+scheduler assigned to that domain force-publishes its exact local
+`last_task_alive` under `advance_lock` and acknowledges the request before the
+orchestrator uses the watermark for structural deadlock detection.
 TensorMap pressure requests this publication from every ring because all rings
 share one entry pool. K=16 batching is enabled only after every reclaim
 consumer is wired to the current request/ack masks; incomplete wiring keeps
@@ -604,7 +605,7 @@ advance_ring_pointers(ring_id):  // protected by per-ring advance_lock
         sync_to_sm()  // release-store last_task_alive
 ```
 
-This is protected by a per-ring try-lock (`advance_lock`) in `RingSchedState`, ensuring only one scheduler thread advances a given ring's watermark at a time. A scheduler thread that changes a ring head to `CONSUMED` but loses this try-lock sets the ring bit in `advance_pending_mask`; no-progress loops drain that mask. An orchestrator reclaim consumer with no reclaim progress for 10 ms instead sets `publication_request_mask`. Scheduler thread 0 drains only that request mask in both productive and no-progress iterations, force-publishes the exact watermark, and sets the matching bit in `publication_ack_mask`. The two masks occupy separate cache lines, so scheduler lock contention neither triggers acknowledgments nor invalidates the productive-loop request poll. Runtime wiring, relocation, and reuse enable K=16 batching only after the allocator, fanin pool, and dependency pool all point to the current masks; otherwise `sync_to_sm()` publishes each advance.
+This is protected by a per-ring try-lock (`advance_lock`) in `RingSchedState`, ensuring only one scheduler thread advances a given ring's watermark at a time. A scheduler thread that changes a ring head to `CONSUMED` but loses this try-lock sets the ring bit in its domain's `advance_pending_masks` cache line; no-progress loops drain only the worker's domain, while thread 0 also drains GLOBAL. Orchestrator publication request/ack masks are split the same way. DIE0 and DIE1 scheduler threads therefore never poll or update the opposite Die's reclaim-control cache lines. Runtime wiring, relocation, and reuse enable K=16 batching only after the allocator, fanin pool, and dependency pool all point to the correct per-domain masks; otherwise `sync_to_sm()` publishes each advance.
 
 For ring-heap stall triage, a set request bit means no retry has yet acquired
 `advance_lock`. A matching acknowledgment means the published

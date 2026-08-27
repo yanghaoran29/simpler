@@ -73,6 +73,14 @@ enum class ScopeMode : uint8_t {
     MANUAL = 1,
 };
 
+// Host graph construction preserves the placement annotation in its public
+// ABI even though placement is consumed only by the onboard runtime.
+enum class TaskDomain : uint8_t {
+    GLOBAL = 0,
+    DIE0 = 1,
+    DIE1 = 2,
+};
+
 /**
  * TaskOutputTensors — returned by submit, holds materialized output ChipTensors.
  *
