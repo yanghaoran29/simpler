@@ -80,6 +80,153 @@ add_runtime_output_arg(CoreTaskArgs &args, std::vector<TensorCreateInfo> &create
     args.add_output(create_infos.back());
 }
 
+TEST_F(OrchestratorFaninTest, ExplicitTaskDomainPinsRootAndLiveFaninTasks) {
+    orch.total_cluster_count = 28;
+    orch.total_aiv_count = 56;
+
+    auto submit_scope_chain = [&](TaskReadyDomain domain) {
+        orch.begin_scope(ScopeMode::AUTO);
+
+        MixedKernels producer_kernel{};
+        producer_kernel.aic_kernel_id = 0;
+        CoreTaskArgs producer_args;
+        producer_args.set_task_domain(domain);
+        TaskOutputTensors producer = orch.submit_task(producer_kernel, producer_args);
+        ASSERT_TRUE(producer.task_id().is_valid());
+        EXPECT_TRUE(sched.is_die_routing_active());
+
+        MixedKernels consumer_kernel{};
+        consumer_kernel.aiv0_kernel_id = 1;
+        TaskId deps[] = {producer.task_id()};
+        CoreTaskArgs consumer_args;
+        consumer_args.set_task_domain(domain);
+        consumer_args.set_dependencies(deps, 1);
+        TaskOutputTensors consumer = orch.submit_task(consumer_kernel, consumer_args);
+        ASSERT_TRUE(consumer.task_id().is_valid());
+        EXPECT_EQ(simpler::tmr::task_ring(producer.task_id()), task_ring_id(domain, 0));
+        EXPECT_EQ(simpler::tmr::task_ring(consumer.task_id()), task_ring_id(domain, 0));
+
+        auto &producer_slot =
+            sm_handle->header->rings[simpler::tmr::task_ring(producer.task_id())].get_slot_state_by_task_id(
+                simpler::tmr::task_local_id(producer.task_id())
+            );
+        auto &consumer_slot =
+            sm_handle->header->rings[simpler::tmr::task_ring(consumer.task_id())].get_slot_state_by_task_id(
+                simpler::tmr::task_local_id(consumer.task_id())
+            );
+        EXPECT_EQ(producer_slot.ready_domain(), domain);
+        EXPECT_EQ(consumer_slot.ready_domain(), domain);
+
+        orch.end_scope();
+    };
+
+    submit_scope_chain(TaskReadyDomain::DIE0);
+    submit_scope_chain(TaskReadyDomain::DIE1);
+}
+
+TEST_F(OrchestratorFaninTest, NestedScopeUsesPerTaskDomainAndPreservesTensorMapDependencies) {
+    orch.total_cluster_count = 28;
+    orch.total_aiv_count = 56;
+
+    orch.begin_scope(ScopeMode::AUTO);
+    EXPECT_FALSE(orch.in_manual_scope());
+
+    // Placement belongs to each task and is independent of scope nesting.
+    orch.begin_scope(ScopeMode::AUTO);
+    std::vector<TensorCreateInfo> create_infos;
+    MixedKernels producer_kernel{};
+    producer_kernel.aic_kernel_id = 0;
+    CoreTaskArgs producer_args;
+    producer_args.set_task_domain(TaskReadyDomain::DIE0);
+    add_runtime_output_arg(producer_args, create_infos, 4);
+    TaskOutputTensors producer = orch.submit_task(producer_kernel, producer_args);
+    ASSERT_TRUE(producer.task_id().is_valid());
+
+    MixedKernels consumer_kernel{};
+    consumer_kernel.aiv0_kernel_id = 1;
+    CoreTaskArgs consumer_args;
+    consumer_args.set_task_domain(TaskReadyDomain::DIE0);
+    consumer_args.add_input(producer.get_ref(0));
+    TaskOutputTensors consumer = orch.submit_task(consumer_kernel, consumer_args);
+    ASSERT_TRUE(consumer.task_id().is_valid());
+    EXPECT_EQ(simpler::tmr::task_ring(producer.task_id()), task_ring_id(TaskReadyDomain::DIE0, 1));
+    EXPECT_EQ(simpler::tmr::task_ring(consumer.task_id()), task_ring_id(TaskReadyDomain::DIE0, 1));
+
+    auto &producer_slot =
+        sm_handle->header->rings[simpler::tmr::task_ring(producer.task_id())].get_slot_state_by_task_id(
+            simpler::tmr::task_local_id(producer.task_id())
+        );
+    auto &consumer_slot =
+        sm_handle->header->rings[simpler::tmr::task_ring(consumer.task_id())].get_slot_state_by_task_id(
+            simpler::tmr::task_local_id(consumer.task_id())
+        );
+    ASSERT_NE(consumer_slot.payload, nullptr);
+    EXPECT_EQ(consumer_slot.payload->fanin_actual_count, 1);
+    EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].slot_state(), &producer_slot);
+    EXPECT_EQ(producer_slot.ready_domain(), TaskReadyDomain::DIE0);
+    EXPECT_EQ(consumer_slot.ready_domain(), TaskReadyDomain::DIE0);
+
+    orch.end_scope();
+    orch.end_scope();
+}
+
+TEST_F(OrchestratorFaninTest, UnspecifiedManualScopeUsesGlobalDomain) {
+    orch.total_cluster_count = 28;
+    orch.total_aiv_count = 56;
+
+    orch.begin_scope(ScopeMode::MANUAL);
+    EXPECT_TRUE(orch.in_manual_scope());
+
+    MixedKernels kernel{};
+    kernel.aic_kernel_id = 0;
+    CoreTaskArgs first_args;
+    TaskOutputTensors first = orch.submit_task(kernel, first_args);
+    ASSERT_TRUE(first.task_id().is_valid());
+    CoreTaskArgs second_args;
+    TaskOutputTensors second = orch.submit_task(kernel, second_args);
+    ASSERT_TRUE(second.task_id().is_valid());
+    EXPECT_EQ(simpler::tmr::task_ring(first.task_id()), task_ring_id(TaskReadyDomain::GLOBAL, 0));
+    EXPECT_EQ(simpler::tmr::task_ring(second.task_id()), task_ring_id(TaskReadyDomain::GLOBAL, 0));
+
+    auto &first_slot = sm_handle->header->rings[simpler::tmr::task_ring(first.task_id())].get_slot_state_by_task_id(
+        simpler::tmr::task_local_id(first.task_id())
+    );
+    auto &second_slot = sm_handle->header->rings[simpler::tmr::task_ring(second.task_id())].get_slot_state_by_task_id(
+        simpler::tmr::task_local_id(second.task_id())
+    );
+    EXPECT_EQ(first_slot.ready_domain(), TaskReadyDomain::GLOBAL);
+    EXPECT_EQ(second_slot.ready_domain(), TaskReadyDomain::GLOBAL);
+    orch.end_scope();
+}
+
+TEST_F(OrchestratorFaninTest, OppositeExplicitDieDependencyIsNotCheckedOnSubmitHotPath) {
+    orch.total_cluster_count = 28;
+    orch.total_aiv_count = 56;
+
+    orch.begin_scope(ScopeMode::AUTO);
+    MixedKernels producer_kernel{};
+    producer_kernel.aic_kernel_id = 0;
+    CoreTaskArgs producer_args;
+    producer_args.set_task_domain(TaskReadyDomain::DIE0);
+    TaskOutputTensors producer = orch.submit_task(producer_kernel, producer_args);
+    ASSERT_TRUE(producer.task_id().is_valid());
+
+    orch.begin_scope(ScopeMode::AUTO);
+    MixedKernels consumer_kernel{};
+    consumer_kernel.aiv0_kernel_id = 1;
+    TaskId deps[] = {producer.task_id()};
+    CoreTaskArgs consumer_args;
+    consumer_args.set_task_domain(TaskReadyDomain::DIE1);
+    consumer_args.set_dependencies(deps, 1);
+    TaskOutputTensors consumer = orch.submit_task(consumer_kernel, consumer_args);
+
+    EXPECT_TRUE(consumer.task_id().is_valid());
+    EXPECT_FALSE(orch.fatal);
+    EXPECT_EQ(simpler::tmr::task_ring(producer.task_id()), task_ring_id(TaskReadyDomain::DIE0, 0));
+    EXPECT_EQ(simpler::tmr::task_ring(consumer.task_id()), task_ring_id(TaskReadyDomain::DIE1, 1));
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), SIMPLER_ERROR_NONE);
+}
+
 TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
     orch.begin_scope();
 
@@ -308,10 +455,10 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
     std::vector<TensorCreateInfo> create_infos;
     create_infos.reserve(2);
 
-    for (int32_t depth = 0; depth < CHIP_MAX_RING_DEPTH; ++depth) {
+    for (int32_t depth = 0; depth < TASK_RING_SCOPE_DEPTH; ++depth) {
         orch.begin_scope();
     }
-    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), task_ring_id(TaskReadyDomain::GLOBAL, TASK_RING_SCOPE_DEPTH - 1));
 
     CoreTaskArgs parent_args;
     add_runtime_output_arg(parent_args, create_infos, 1024);
@@ -319,7 +466,7 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
     ASSERT_TRUE(parent.task_id().is_valid());
 
     orch.begin_scope();
-    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), task_ring_id(TaskReadyDomain::GLOBAL, TASK_RING_SCOPE_DEPTH - 1));
 
     CoreTaskArgs child_args;
     add_runtime_output_arg(child_args, create_infos, 1);
@@ -338,11 +485,11 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
     std::vector<TensorCreateInfo> create_infos;
     create_infos.reserve(3);
 
-    for (int32_t depth = 0; depth < CHIP_MAX_RING_DEPTH; ++depth) {
+    for (int32_t depth = 0; depth < TASK_RING_SCOPE_DEPTH; ++depth) {
         orch.begin_scope();
     }
     orch.begin_scope();
-    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), task_ring_id(TaskReadyDomain::GLOBAL, TASK_RING_SCOPE_DEPTH - 1));
 
     CoreTaskArgs child_args;
     add_runtime_output_arg(child_args, create_infos, 768);
@@ -350,7 +497,7 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
     ASSERT_TRUE(child.task_id().is_valid());
 
     orch.end_scope();
-    ASSERT_EQ(orch.current_ring_id(), CHIP_MAX_RING_DEPTH - 1);
+    ASSERT_EQ(orch.current_ring_id(), task_ring_id(TaskReadyDomain::GLOBAL, TASK_RING_SCOPE_DEPTH - 1));
 
     CoreTaskArgs parent_args;
     add_runtime_output_arg(parent_args, create_infos, 256);

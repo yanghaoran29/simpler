@@ -34,7 +34,8 @@
 
 namespace {
 inline constexpr int32_t DEFERRED_RELEASE_CAP = 256;
-}
+inline constexpr int32_t DEFERRED_RELEASE_BATCH = 16;
+}  // namespace
 
 // Pure function: read register result -> SlotTransition (no side effects).
 SlotTransition SchedulerContext::decide_slot_transition(
@@ -179,9 +180,11 @@ void SchedulerContext::complete_slot_task(
         // SCHED_PROFILING variant takes thread_idx for its per-thread atomic
         // counter side-effects (g_sched_*_atomic_count[thread_idx], consumed
         // by the otc_* log lines). The returned fanout_edges feeds Resolve.
-        [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(slot_state, thread_idx).fanout_edges;
+        [[maybe_unused]] uint32_t consumers_resolved =
+            sched_->on_task_complete(slot_state, thread_idx, thread_ready_domain(thread_idx)).fanout_edges;
 #else
-        [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(slot_state);
+        [[maybe_unused]] uint32_t consumers_resolved =
+            sched_->on_task_complete(slot_state, thread_idx, thread_ready_domain(thread_idx));
 #endif
 #if SIMPLER_DFX
         if (resolve_t0 != 0) {
@@ -201,13 +204,9 @@ void SchedulerContext::complete_slot_task(
         if (deferred_release_count < DEFERRED_RELEASE_CAP) {
             deferred_release_slot_states[deferred_release_count++] = &slot_state;
         } else {
-            while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-            }
+            sched_->release_deferred_batch(
+                deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_BATCH, thread_idx
+            );
             deferred_release_slot_states[deferred_release_count++] = &slot_state;
         }
         completed_this_turn++;

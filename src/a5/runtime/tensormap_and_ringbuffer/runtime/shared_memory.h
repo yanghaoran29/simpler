@@ -163,11 +163,11 @@ struct alignas(CHIP_ALIGN_SIZE) SharedMemoryHeader {
     std::atomic<int32_t> sched_stall_core;         // S1: stuck core id (-1 if N/A)
 };
 
-static_assert(sizeof(SharedMemoryHeader) == 896, "SharedMemoryHeader layout drift");
-static_assert(offsetof(SharedMemoryHeader, total_size) == 776, "SharedMemoryHeader total_size layout drift");
-static_assert(offsetof(SharedMemoryHeader, orch_error_code) == 784, "SharedMemoryHeader orch_error_code layout drift");
+static_assert(sizeof(SharedMemoryHeader) == 2432, "SharedMemoryHeader layout drift");
+static_assert(offsetof(SharedMemoryHeader, total_size) == 2312, "SharedMemoryHeader total_size layout drift");
+static_assert(offsetof(SharedMemoryHeader, orch_error_code) == 2320, "SharedMemoryHeader orch_error_code layout drift");
 static_assert(
-    offsetof(SharedMemoryHeader, sched_stall_task_id) == 832, "SharedMemoryHeader sched_stall_task_id layout drift"
+    offsetof(SharedMemoryHeader, sched_stall_task_id) == 2368, "SharedMemoryHeader sched_stall_task_id layout drift"
 );
 
 // =============================================================================

@@ -145,6 +145,7 @@ typedef struct RuntimeOps {
 struct RuntimeContext {
     const RuntimeOps *ops;
     ScopeMode pending_scope_mode;
+    TaskDomain pending_scope_domain;
 };
 
 // =============================================================================
@@ -309,12 +310,13 @@ static inline void rt_graph_commit() {
     if (!rt->ops->is_fatal(rt) && rt->ops->graph_commit != nullptr) rt->ops->graph_commit(rt);
 }
 
-static inline void rt_scope_begin(ScopeMode mode = ScopeMode::AUTO) {
+static inline void rt_scope_begin(ScopeMode mode = ScopeMode::AUTO, TaskDomain domain = TaskDomain::GLOBAL) {
     RuntimeContext *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;
     }
     rt->pending_scope_mode = mode;
+    rt->pending_scope_domain = domain;
     rt->ops->scope_begin(rt);
 }
 
@@ -457,10 +459,11 @@ set_tensor_data(const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32
  */
 class ScopeGuard {
 public:
-    explicit ScopeGuard(ScopeMode mode = ScopeMode::AUTO) :
+    explicit ScopeGuard(ScopeMode mode = ScopeMode::AUTO, TaskDomain domain = TaskDomain::GLOBAL) :
         rt_(current_runtime()) {
         if (!rt_->ops->is_fatal(rt_)) {
             rt_->pending_scope_mode = mode;
+            rt_->pending_scope_domain = domain;
             rt_->ops->scope_begin(rt_);
         }
     }

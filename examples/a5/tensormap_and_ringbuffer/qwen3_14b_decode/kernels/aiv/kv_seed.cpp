@@ -49,52 +49,52 @@ static __aicore__ inline void ptoas_auto_sync_tail(PTOAutoSyncTailMode mode = PT
     }
 }
 
-static __aicore__ void kv_seed(__gm__ float *v1, __gm__ float *v2) {
+static __aicore__ void kv_seed(__gm__ float *v1, __gm__ float *v2, int32_t half_idx) {
     const float v3 = 0.0f;
     const int64_t v4 = 1;
-    const int64_t v5 = 1024;
+    const int64_t v5 = 512;
     const int64_t v6 = 16;
-    const int64_t v7 = 0;
+    const int64_t v7 = static_cast<int64_t>(half_idx) * 512;
     using T = float;
 
 #if defined(__DAV_VEC__)
     set_mask_norm();
     set_vector_mask(-1, -1);
     Tile<
-        TileType::Vec, float, 16, 1024, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+        TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
         CompactMode::Null>
         v8 = Tile<
-            TileType::Vec, float, 16, 1024, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+            TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
             CompactMode::Null>(v6, v5);
     uint64_t v9 = (uint64_t)v7;
     TASSIGN(v8, v9);
     TEXPANDS(v8, v3);
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-    pto::Shape<1, 1, 1, 16, 1024> v10 = pto::Shape<1, 1, 1, 16, 1024>();
+    pto::Shape<1, 1, 1, 16, 512> v10 = pto::Shape<1, 1, 1, 16, 512>();
     pto::Stride<16384, 16384, 16384, 1024, 1> v11 = pto::Stride<16384, 16384, 16384, 1024, 1>();
-    GlobalTensor<float, pto::Shape<1, 1, 1, 16, 1024>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND> v12 =
-        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 1024>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND>(
-            v1 + (v7 + v7 * v5 + v7 * v4), v10, v11
+    GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND> v12 =
+        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND>(
+            v1 + v7, v10, v11
         );
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     TSTORE(v12, v8);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     Tile<
-        TileType::Vec, float, 16, 1024, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+        TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
         CompactMode::Null>
         v13 = Tile<
-            TileType::Vec, float, 16, 1024, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+            TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
             CompactMode::Null>(v6, v5);
     uint64_t v14 = (uint64_t)v7;
     TASSIGN(v13, v14);
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     TEXPANDS(v13, v3);
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
-    pto::Shape<1, 1, 1, 16, 1024> v15 = pto::Shape<1, 1, 1, 16, 1024>();
+    pto::Shape<1, 1, 1, 16, 512> v15 = pto::Shape<1, 1, 1, 16, 512>();
     pto::Stride<16384, 16384, 16384, 1024, 1> v16 = pto::Stride<16384, 16384, 16384, 1024, 1>();
-    GlobalTensor<float, pto::Shape<1, 1, 1, 16, 1024>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND> v17 =
-        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 1024>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND>(
-            v2 + (v7 + v7 * v5 + v7 * v4), v15, v16
+    GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND> v17 =
+        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<16384, 16384, 16384, 1024, 1>, pto::Layout::ND>(
+            v2 + v7, v15, v16
         );
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
     TSTORE(v17, v13);
@@ -117,6 +117,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         reinterpret_cast<__gm__ float *>(v_proj_inline255__ssa_v0_tensor->buffer.addr) +
         v_proj_inline255__ssa_v0_tensor->start_offset;
 
+    union {
+        int32_t value;
+        uint64_t raw;
+    } half_idx_conv;
+    half_idx_conv.raw = args[2];
+
     // Forward to ptoas-generated function
-    kv_seed(k_proj_inline135__ssa_v0, v_proj_inline255__ssa_v0);
+    kv_seed(k_proj_inline135__ssa_v0, v_proj_inline255__ssa_v0, half_idx_conv.value);
 }

@@ -122,6 +122,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             if (chunk_bc > IN_CORE_BATCH) chunk_bc = IN_CORE_BATCH;
             uint64_t batch_start = chunk_idx * IN_CORE_BATCH;
 
+            // Place each independent chunk explicitly. Nested scopes repeat the
+            // same domain so there is no implicit placement inheritance.
+            uint64_t chain_idx = q_idx * num_chunks + chunk_idx;
+            TaskDomain chain_domain = (chain_idx & 1U) == 0 ? TaskDomain::DIE0 : TaskDomain::DIE1;
             SIMPLER_SCOPE() {
                 uint32_t oi_acc_shapes[2] = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t scalar_acc_shapes[1] = {static_cast<uint32_t>(chunk_bc * q_tile)};
@@ -144,6 +148,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 for (uint64_t bn = 0; bn < max_bn; bn++) {
                     SIMPLER_SCOPE() {
                         CoreTaskArgs params_qk;
+                        params_qk.set_task_domain(chain_domain);
                         params_qk.add_input(query);
                         params_qk.add_input(key_cache);
                         params_qk.add_input(block_table);
@@ -158,6 +163,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         const simpler::tmr::Tensor &sij_b = qk_outs.get_ref(0);
 
                         CoreTaskArgs params_sf;
+                        params_sf.set_task_domain(chain_domain);
                         params_sf.add_input(sij_b);
                         params_sf.add_input(context_lens);
                         params_sf.add_output(pij_ci);
@@ -173,6 +179,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         const simpler::tmr::Tensor &lij_b = sf_outs.get_ref(2);
 
                         CoreTaskArgs params_pv;
+                        params_pv.set_task_domain(chain_domain);
                         params_pv.add_input(pij_b);
                         params_pv.add_input(value_cache);
                         params_pv.add_input(block_table);
@@ -187,6 +194,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         uint64_t is_first = (bn == 0) ? 1 : 0;
                         uint64_t is_last = (bn == max_bn - 1) ? 1 : 0;
                         CoreTaskArgs params_up;
+                        params_up.set_task_domain(chain_domain);
                         params_up.add_input(mij_b);
                         params_up.add_input(lij_b);
                         params_up.add_input(oi_new_b);
