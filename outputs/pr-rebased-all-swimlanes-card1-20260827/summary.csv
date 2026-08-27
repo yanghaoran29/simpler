@@ -1,0 +1,9 @@
+case,main_device_us,pr_device_us,device_change_pct,main_effective_us,pr_effective_us,effective_change_pct,main_orchestrator_us,pr_orchestrator_us,orchestrator_change_pct,main_scheduler_us,pr_scheduler_us,scheduler_change_pct,main_base,samples
+alternating_matmul_add_Case1,1621.5,1488.7,-8.190,1587.0,1457.7,-8.147,1581.9,1449.9,-8.344,1583.8,1449.5,-8.480,80dd3cd9,100
+benchmark_bgemm_Case0,1540.3,1550.3,0.649,1506.5,1520.0,0.896,1416.7,1391.3,-1.793,1503.9,1512.7,0.585,80dd3cd9,100
+paged_attention_unroll_Case1,1730.8,2024.4,16.963,1698.1,1993.2,17.378,1399.9,1333.6,-4.736,1695.8,1986.4,17.136,80dd3cd9,100
+paged_attention_unroll_Case2,974.8,1119.9,14.885,942.8,1089.9,15.602,694.6,667.5,-3.902,939.9,1082.2,15.140,80dd3cd9,100
+paged_attention_unroll_manual_scope_Case1,1667.7,1996.3,19.704,1636.5,1965.7,20.116,1233.2,1260.2,2.189,1632.9,1958.5,19.940,80dd3cd9,100
+paged_attention_unroll_manual_scope_Case2,941.9,1143.5,21.404,911.6,1113.9,22.192,591.4,581.9,-1.606,908.1,1106.5,21.848,80dd3cd9,100
+batch_paged_attention_Case1,6814.1,6685.5,-1.887,6776.9,6651.4,-1.852,5558.4,5339.7,-3.935,6774.1,6644.7,-1.910,80dd3cd9,100
+qwen3_14b_decode_StressBatch16Seq3500,42501.2,40107.1,-5.633,42461.4,40018.433,-5.753,9580.8,10376.4,8.304,42460.767,39916.367,-5.992,80dd3cd9,3_of_5_middle_by_device

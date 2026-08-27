@@ -58,6 +58,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int total_add = 0;
 
     for (int group_idx = 0; group_idx < num_groups; group_idx++) {
+        // Treat one independent reduction chain as one explicit locality unit.
+        // No runtime completion-order heuristic may change this placement.
+        TaskDomain group_domain = (group_idx & 1) == 0 ? TaskDomain::DIE0 : TaskDomain::DIE1;
         SIMPLER_SCOPE_GUARD();
 
         uint32_t c_elem_offset = static_cast<uint32_t>(static_cast<uint64_t>(group_idx) * group_tile_elems);
@@ -74,6 +77,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             simpler::tmr::Tensor B_view = ext_B.view(group_shapes, b_view_offsets);
 
             CoreTaskArgs params_gemm;
+            params_gemm.set_task_domain(group_domain);
             params_gemm.add_input(A_view);
             params_gemm.add_input(B_view);
             params_gemm.add_output(group_ci);
@@ -81,6 +85,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             total_gemm++;
 
             CoreTaskArgs params_add;
+            params_add.set_task_domain(group_domain);
             params_add.add_inout(C_view);
             params_add.add_input(gemm_outs.get_ref(0));
             rt_submit_aiv_task(FUNC_TILE_ADD, params_add);

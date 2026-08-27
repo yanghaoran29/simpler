@@ -142,8 +142,16 @@ SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capaci
         layout.dep_pool_capacities[r] = dep_pool_capacities[r];
     }
 
-    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+    for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            layout.off_domain_ready_queue_slots[domain][i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
+        }
+    }
+    for (int32_t thread = 0; thread < PLATFORM_MAX_AICPU_THREADS - 1; thread++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            layout.off_continuation_ready_queue_slots[thread][i] =
+                ready_queue_reserve_layout(arena, CHIP_LOCAL_CONTINUATION_QUEUE_SIZE);
+        }
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, CHIP_READY_QUEUE_SIZE);
@@ -165,9 +173,23 @@ SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capaci
 bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, DeviceArena &arena, void *sm_dev_base) {
     SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
-    sched->advance_pending_mask.store(0, std::memory_order_relaxed);
-    sched->publication_request_mask.store(0, std::memory_order_relaxed);
-    sched->publication_ack_mask.store(0, std::memory_order_relaxed);
+    sched->die_routing_active.store(false, std::memory_order_relaxed);
+    for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+        sched->advance_pending_masks[domain].bits.store(0, std::memory_order_relaxed);
+        sched->publication_request_masks[domain].bits.store(0, std::memory_order_relaxed);
+        sched->publication_ack_masks[domain].bits.store(0, std::memory_order_relaxed);
+    }
+    for (int32_t thread = 0; thread < PLATFORM_MAX_AICPU_THREADS - 1; thread++) {
+        sched->continuation_routing_active[thread] = false;
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            if (!ready_queue_init_data_from_layout(
+                    &sched->continuation_ready_queues[thread][i], arena,
+                    layout.off_continuation_ready_queue_slots[thread][i], CHIP_LOCAL_CONTINUATION_QUEUE_SIZE
+                )) {
+                return false;
+            }
+        }
+    }
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -179,11 +201,14 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
         }
     }
 
-    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        if (!ready_queue_init_data_from_layout(
-                &sched->ready_queues[i], arena, layout.off_ready_queue_slots[i], layout.ready_queue_capacity
-            )) {
-            return false;
+    for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            if (!ready_queue_init_data_from_layout(
+                    &sched->domain_ready_queues[domain][i], arena, layout.off_domain_ready_queue_slots[domain][i],
+                    layout.ready_queue_capacity
+                )) {
+                return false;
+            }
         }
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
@@ -219,7 +244,8 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
         memset(dep_entries, 0, static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(DepListEntry));
         sched->ring_sched_states[r].dep_pool.init(dep_entries, layout.dep_pool_capacities[r], orch_err);
         sched->ring_sched_states[r].dep_pool.set_reclaim_publication_request(
-            &sched->publication_request_mask, &sched->publication_ack_mask, static_cast<uint8_t>(r)
+            sched->publication_request_mask_for_ring(r), sched->publication_ack_mask_for_ring(r),
+            static_cast<uint8_t>(r)
         );
     }
 
@@ -229,9 +255,15 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
 void SchedulerState::reset_for_reuse(const SchedulerLayout &layout, void *sm_dev_base) {
     SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<SharedMemoryHeader *>(sm_dev_base);
-    sched->advance_pending_mask.store(0, std::memory_order_relaxed);
-    sched->publication_request_mask.store(0, std::memory_order_relaxed);
-    sched->publication_ack_mask.store(0, std::memory_order_relaxed);
+    sched->die_routing_active.store(false, std::memory_order_relaxed);
+    for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+        sched->advance_pending_masks[domain].bits.store(0, std::memory_order_relaxed);
+        sched->publication_request_masks[domain].bits.store(0, std::memory_order_relaxed);
+        sched->publication_ack_masks[domain].bits.store(0, std::memory_order_relaxed);
+    }
+    for (int32_t thread = 0; thread < PLATFORM_MAX_AICPU_THREADS - 1; thread++) {
+        sched->continuation_routing_active[thread] = false;
+    }
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -242,8 +274,15 @@ void SchedulerState::reset_for_reuse(const SchedulerLayout &layout, void *sm_dev
         sched->ring_sched_states[r].reset_for_reuse(sm_dev_base, r, orch_err);
     }
 
-    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        sched->ready_queues[i].reset_for_reuse();
+    for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            sched->domain_ready_queues[domain][i].reset_for_reuse();
+        }
+    }
+    for (int32_t thread = 0; thread < PLATFORM_MAX_AICPU_THREADS - 1; thread++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            sched->continuation_ready_queues[thread][i].reset_for_reuse();
+        }
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         sched->ready_sync_queues[i].reset_for_reuse();
@@ -260,8 +299,20 @@ void SchedulerState::reset_for_reuse(const SchedulerLayout &layout, void *sm_dev
 
 void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceArena &arena) {
     SchedulerState *sched = this;
-    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
+    for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_wire_arena_pointers(
+                &sched->domain_ready_queues[domain][i], arena, layout.off_domain_ready_queue_slots[domain][i]
+            );
+        }
+    }
+    for (int32_t thread = 0; thread < PLATFORM_MAX_AICPU_THREADS - 1; thread++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_wire_arena_pointers(
+                &sched->continuation_ready_queues[thread][i], arena,
+                layout.off_continuation_ready_queue_slots[thread][i]
+            );
+        }
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_sync_queues[i], arena, layout.off_ready_sync_queue_slots[i]);
@@ -277,7 +328,8 @@ void SchedulerState::wire_arena_pointers(const SchedulerLayout &layout, DeviceAr
         auto &dep_pool = sched->ring_sched_states[r].dep_pool;
         dep_pool.base = static_cast<DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
         dep_pool.set_reclaim_publication_request(
-            &sched->publication_request_mask, &sched->publication_ack_mask, static_cast<uint8_t>(r)
+            sched->publication_request_mask_for_ring(r), sched->publication_ack_mask_for_ring(r),
+            static_cast<uint8_t>(r)
         );
     }
 }
@@ -288,8 +340,15 @@ void SchedulerState::destroy() {
         sched->ring_sched_states[r].destroy();
         sched->ring_sched_states[r].dep_pool.base = nullptr;
     }
-    for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
-        ready_queue_destroy(&sched->ready_queues[i]);
+    for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_destroy(&sched->domain_ready_queues[domain][i]);
+        }
+    }
+    for (int32_t thread = 0; thread < PLATFORM_MAX_AICPU_THREADS - 1; thread++) {
+        for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
+            ready_queue_destroy(&sched->continuation_ready_queues[thread][i]);
+        }
     }
     for (int i = 0; i < NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_sync_queues[i]);
@@ -427,6 +486,9 @@ bool OrchestratorState::init_data_from_layout(
     orch->scope_stack_top = -1;
     orch->scope_stack_capacity = layout.scope_stack_capacity;
     orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
+    orch->die_routing_enabled = false;
+    memset(orch->oldest_open_tasks_by_ring, 0, sizeof(orch->oldest_open_tasks_by_ring));
+    memset(orch->scope_oldest_ring_masks, 0, sizeof(orch->scope_oldest_ring_masks));
 
     return true;
 }
@@ -473,7 +535,7 @@ bool OrchestratorState::reset_for_reuse(
         );
         if (orch->scheduler != nullptr) {
             orch->rings[r].task_allocator.set_reclaim_publication_request(
-                &orch->scheduler->publication_request_mask, &orch->scheduler->publication_ack_mask
+                orch->scheduler->publication_request_mask_for_ring(r), orch->scheduler->publication_ack_mask_for_ring(r)
             );
         }
         heap_offset += heap_sizes[r];
@@ -486,6 +548,9 @@ bool OrchestratorState::reset_for_reuse(
     orch->scope_stack_top = -1;
     orch->scope_stack_capacity = layout.scope_stack_capacity;
     orch->manual_begin_depth = CHIP_MAX_SCOPE_DEPTH;
+    orch->die_routing_enabled = false;
+    memset(orch->oldest_open_tasks_by_ring, 0, sizeof(orch->oldest_open_tasks_by_ring));
+    memset(orch->scope_oldest_ring_masks, 0, sizeof(orch->scope_oldest_ring_masks));
     orch->total_cluster_count = 0;
     orch->total_aiv_count = 0;
 #if SIMPLER_DFX
@@ -526,10 +591,11 @@ void OrchestratorState::set_scheduler(SchedulerState *scheduler_arg) {
     if (scheduler == nullptr) return;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         rings[r].task_allocator.set_reclaim_publication_request(
-            &scheduler->publication_request_mask, &scheduler->publication_ack_mask
+            scheduler->publication_request_mask_for_ring(r), scheduler->publication_ack_mask_for_ring(r)
         );
         rings[r].fanin_pool.set_reclaim_publication_request(
-            &scheduler->publication_request_mask, &scheduler->publication_ack_mask, static_cast<uint8_t>(r)
+            scheduler->publication_request_mask_for_ring(r), scheduler->publication_ack_mask_for_ring(r),
+            static_cast<uint8_t>(r)
         );
     }
 }
@@ -626,10 +692,10 @@ RuntimeContext *runtime_init_data_from_layout(
 static bool reclaim_publication_wiring_is_complete(const RuntimeContext *rt) {
     if (rt == nullptr || rt->orchestrator.scheduler != &rt->scheduler) return false;
 
-    const auto *request_mask = &rt->scheduler.publication_request_mask;
-    const auto *ack_mask = &rt->scheduler.publication_ack_mask;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         uint8_t ring_id = static_cast<uint8_t>(r);
+        const auto *request_mask = rt->scheduler.publication_request_mask_for_ring(r);
+        const auto *ack_mask = rt->scheduler.publication_ack_mask_for_ring(r);
         if (!rt->orchestrator.rings[r].task_allocator.reclaim_publication_is_wired_to(
                 request_mask, ack_mask, ring_id
             ) ||

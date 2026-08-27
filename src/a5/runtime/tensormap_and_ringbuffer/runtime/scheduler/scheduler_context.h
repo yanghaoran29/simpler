@@ -71,10 +71,10 @@ public:
     // (partitioned by tidx/nthreads). Each core is touched by exactly one thread.
     void handshake_partition(Runtime *runtime, int32_t tidx, int32_t nthreads);
     // Handshake exactly the cores this scheduler thread will later manage:
-    // clusters {tidx, tidx+active, ...}, cluster ci =
-    // {ci, N/3+2ci, N/3+2ci+1} (blocked layout: [0,N/3) AIC, [N/3,N) AIV). Matches
-    // assign_cores_to_threads' round-robin so handshake warms the same
-    // core_exec_states_ the thread later dispatches from.
+    // a balanced contiguous range of normalized physical cluster ordinals;
+    // cluster ci = {ci, N/3+2ci, N/3+2ci+1} in blocked layout ([0,N/3) AIC,
+    // [N/3,N) AIV). This matches assign_cores_to_threads so handshake warms
+    // the same core_exec_states_ the thread later dispatches from.
     void handshake_owned_clusters(Runtime *runtime, int32_t tidx, int32_t active_threads);
     // Barrier-free counterpart of assign_cores_to_threads: thread tidx populates
     // its own CoreTracker + per-core sub_block_id for the clusters it owns, right
@@ -185,6 +185,9 @@ private:
     int32_t sched_thread_num_{0};
     int32_t aicpu_thread_num_{0};
     int32_t cores_total_num_{0};
+    TaskReadyDomain thread_ready_domains_[MAX_AICPU_THREADS]{};
+    bool regular_queue_global_first_[MAX_AICPU_THREADS]{};
+    bool die_routing_active_cache_[MAX_AICPU_THREADS]{};
 
     // Cluster-ordered worker_id lists, populated by post_handshake_init().
     int32_t aic_worker_ids_[RUNTIME_MAX_WORKER]{};
@@ -218,8 +221,12 @@ private:
     // Core management (scheduler_cold_path.cpp)
     // =========================================================================
 
-    // Assign discovered cores (cluster = 1 AIC + 2 AIV) round-robin across scheduler threads.
+    // Assign discovered cores (cluster = 1 AIC + 2 AIV) as balanced contiguous
+    // ranges in normalized physical-cluster order.
     bool assign_cores_to_threads();
+    bool assign_thread_ready_domain(int32_t thread_idx);
+
+    TaskReadyDomain thread_ready_domain(int32_t thread_idx) const { return thread_ready_domains_[thread_idx]; }
 
     // Emergency shutdown: broadcast exit signal to every handshake'd core and
     // deinit their AICore register blocks. Idempotent.
@@ -351,7 +358,35 @@ private:
     // positions with std::memory_order_relaxed and may interleave with concurrent
     // push/pop. A stale read here causes at most one
     // extra/missed AIC/AIV skip and self-corrects on the next loop iteration.
-    bool has_residual_mix() const { return sched_->ready_queues[static_cast<int32_t>(ResourceShape::MIX)].size() > 0; }
+    ChipReadyQueue *local_ready_queues(int32_t thread_idx) const {
+        if (!die_routing_active_cache_[thread_idx]) return nullptr;
+        TaskReadyDomain domain = thread_ready_domain(thread_idx);
+        if (domain != TaskReadyDomain::DIE0 && domain != TaskReadyDomain::DIE1) return nullptr;
+        return sched_->domain_ready_queues[static_cast<int32_t>(domain)];
+    }
+
+    ChipReadyQueue *continuation_ready_queues(int32_t thread_idx) const {
+        if (thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS - 1) return nullptr;
+        return sched_->continuation_ready_queues[thread_idx];
+    }
+
+    bool has_continuation_work(int32_t thread_idx) const {
+        if (!sched_->continuation_routing_active[thread_idx]) return false;
+        ChipReadyQueue *queues = continuation_ready_queues(thread_idx);
+        for (int32_t shape = 0; shape < NUM_RESOURCE_SHAPES; shape++) {
+            if (queues[shape].size() > 0) return true;
+        }
+        return false;
+    }
+
+    bool has_residual_mix(int32_t thread_idx) const {
+        int32_t shape = static_cast<int32_t>(ResourceShape::MIX);
+        ChipReadyQueue *local = local_ready_queues(thread_idx);
+        ChipReadyQueue *continuation = continuation_ready_queues(thread_idx);
+        return sched_->domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][shape].size() > 0 ||
+               (local != nullptr && local[shape].size() > 0) ||
+               (continuation != nullptr && continuation[shape].size() > 0);
+    }
 
     // Tier-0 analog of has_residual_mix for the ready sync_start lane: true if MIX
     // sync_start cohorts remain queued, so the Tier-0 pass keeps MIX strict priority

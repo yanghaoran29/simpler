@@ -217,7 +217,7 @@ static __aicore__ void x_gamma0(__gm__ bfloat16_t *v1, __gm__ float *v2, __gm__ 
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Read logical SPMD block identity from runtime dispatch payload
-    int32_t __pypto_spmd_block_idx = get_block_idx(args);
+    int32_t __pypto_spmd_block_idx = get_block_idx(args) + static_cast<int32_t>(args[3]);
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: normed__ssa_v0

@@ -65,6 +65,20 @@ protected:
     TaskPayload slot_payload_pool_[kSlotPayloadPoolSize];
     int slot_payload_pool_idx_ = 0;
 
+    std::atomic<uint32_t> &advance_mask(int32_t ring_id) {
+        return sched.advance_pending_masks[SchedulerState::request_mask_index_for_ring(ring_id)].bits;
+    }
+
+    std::atomic<uint32_t> &request_mask(int32_t ring_id) { return *sched.publication_request_mask_for_ring(ring_id); }
+
+    std::atomic<uint32_t> &ack_mask(int32_t ring_id) { return *sched.publication_ack_mask_for_ring(ring_id); }
+
+    bool drain_pending(int32_t ring_id) { return sched.drain_pending_ring_advances(task_ring_domain(ring_id), false); }
+
+    bool drain_publication(int32_t ring_id) {
+        return sched.drain_publication_requests(task_ring_domain(ring_id), false);
+    }
+
     void SetUp() override {
         sm_handle = SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
@@ -136,7 +150,7 @@ protected:
         ring.fc.last_task_alive.store(0, std::memory_order_release);
         ring_sched.last_task_alive = 0;
         ring_sched.advance_lock.store(0, std::memory_order_release);
-        sched.advance_pending_mask.store(0, std::memory_order_release);
+        advance_mask(ring_id).store(0, std::memory_order_release);
 
         for (int32_t task_id = 0; task_id < current_task_index; task_id++) {
             ChipTaskState state = task_id < blocked_task_id ? CHIP_TASK_CONSUMED : CHIP_TASK_COMPLETED;
@@ -151,7 +165,7 @@ protected:
         ring.fc.last_task_alive.store(head_task_id, std::memory_order_release);
         ring_sched.last_task_alive = head_task_id;
         ring_sched.advance_lock.store(0, std::memory_order_release);
-        sched.advance_pending_mask.store(0, std::memory_order_release);
+        advance_mask(ring_id).store(0, std::memory_order_release);
         init_ring_slot(ring, head_task_id, CHIP_TASK_COMPLETED, static_cast<uint8_t>(ring_id));
         init_ring_slot(ring, head_task_id + 1, CHIP_TASK_COMPLETED, static_cast<uint8_t>(ring_id), 1, 0);
     }
@@ -207,7 +221,7 @@ TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
 
     ring_sched.advance_lock.store(1, std::memory_order_release);
     std::thread unlocker([&]() {
-        while ((sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit) == 0) {
+        while ((advance_mask(ring_id).load(std::memory_order_acquire) & pending_bit) == 0) {
             std::this_thread::yield();
         }
         ring_sched.advance_lock.store(0, std::memory_order_release);
@@ -216,7 +230,7 @@ TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
     sched.check_and_handle_consumed(head);
     unlocker.join();
 
-    EXPECT_TRUE(sched.drain_pending_ring_advances());
+    EXPECT_TRUE(drain_pending(ring_id));
     EXPECT_EQ(head.task_state.load(std::memory_order_acquire), CHIP_TASK_CONSUMED);
     EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 1)
         << "a CONSUMED ring head must not remain pinned after advance_lock contention clears";
@@ -256,17 +270,17 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadSetsPendingAndIdleDrainAdvances)
 
     EXPECT_EQ(head.task_state.load(std::memory_order_acquire), CHIP_TASK_CONSUMED);
     EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), head_task_id);
-    EXPECT_NE(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_NE(advance_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
 
-    EXPECT_FALSE(sched.drain_pending_ring_advances());
+    EXPECT_FALSE(drain_pending(ring_id));
     EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), head_task_id);
-    EXPECT_NE(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_NE(advance_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
 
     ring_sched.advance_lock.store(0, std::memory_order_release);
-    EXPECT_TRUE(sched.drain_pending_ring_advances());
+    EXPECT_TRUE(drain_pending(ring_id));
     EXPECT_EQ(ring_sched.last_task_alive, head_task_id + 1);
     EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), head_task_id + 1);
-    EXPECT_EQ(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_EQ(advance_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
 }
 
 TEST_F(SchedulerStateTest, DeferredAdvanceDoesNotAcknowledgePublication) {
@@ -279,14 +293,14 @@ TEST_F(SchedulerStateTest, DeferredAdvanceDoesNotAcknowledgePublication) {
     ChipTaskSlotState &head = ring.get_slot_state_by_task_id(head_task_id);
     uint32_t pending_bit = SchedulerState::ring_advance_pending_bit(ring_id);
 
-    sched.publication_ack_mask.store(0, std::memory_order_release);
+    ack_mask(ring_id).store(0, std::memory_order_release);
     ring_sched.advance_lock.store(1, std::memory_order_release);
     sched.check_and_handle_consumed(head);
     ring_sched.advance_lock.store(0, std::memory_order_release);
 
-    ASSERT_TRUE(sched.drain_pending_ring_advances());
-    EXPECT_EQ(sched.publication_ack_mask.load(std::memory_order_acquire) & pending_bit, 0u);
-    EXPECT_EQ(sched.publication_request_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    ASSERT_TRUE(drain_pending(ring_id));
+    EXPECT_EQ(ack_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_EQ(request_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
 }
 
 TEST_F(SchedulerStateTest, PublicationRequestDoesNotConsumeDeferredAdvance) {
@@ -294,16 +308,33 @@ TEST_F(SchedulerStateTest, PublicationRequestDoesNotConsumeDeferredAdvance) {
     setup_ring_for_reclaim_race(ring_id, /*current_task_index=*/1, /*blocked_task_id=*/1);
 
     uint32_t pending_bit = SchedulerState::ring_advance_pending_bit(ring_id);
-    sched.advance_pending_mask.fetch_or(pending_bit, std::memory_order_release);
-    sched.publication_request_mask.fetch_or(pending_bit, std::memory_order_release);
+    advance_mask(ring_id).fetch_or(pending_bit, std::memory_order_release);
+    request_mask(ring_id).fetch_or(pending_bit, std::memory_order_release);
 
-    ASSERT_TRUE(sched.drain_publication_requests());
-    EXPECT_EQ(sched.publication_request_mask.load(std::memory_order_acquire) & pending_bit, 0u);
-    EXPECT_NE(sched.publication_ack_mask.load(std::memory_order_acquire) & pending_bit, 0u);
-    EXPECT_NE(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    ASSERT_TRUE(drain_publication(ring_id));
+    EXPECT_EQ(request_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_NE(ack_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_NE(advance_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
 
-    EXPECT_FALSE(sched.drain_pending_ring_advances());
-    EXPECT_EQ(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_FALSE(drain_pending(ring_id));
+    EXPECT_EQ(advance_mask(ring_id).load(std::memory_order_acquire) & pending_bit, 0u);
+}
+
+TEST_F(SchedulerStateTest, PendingRingAdvanceDrainIsIsolatedByDomain) {
+    constexpr int32_t die0_ring = TASK_RING_SCOPE_DEPTH;
+    constexpr int32_t die1_ring = TASK_RING_SCOPE_DEPTH * 2;
+    uint32_t die0_bit = SchedulerState::ring_advance_pending_bit(die0_ring);
+    uint32_t die1_bit = SchedulerState::ring_advance_pending_bit(die1_ring);
+
+    sched.mark_ring_advance_pending(die0_ring);
+    sched.mark_ring_advance_pending(die1_ring);
+
+    EXPECT_FALSE(sched.drain_pending_ring_advances(TaskReadyDomain::DIE0, false));
+    EXPECT_EQ(advance_mask(die0_ring).load(std::memory_order_acquire) & die0_bit, 0u);
+    EXPECT_NE(advance_mask(die1_ring).load(std::memory_order_acquire) & die1_bit, 0u);
+
+    EXPECT_FALSE(sched.drain_pending_ring_advances(TaskReadyDomain::DIE1, false));
+    EXPECT_EQ(advance_mask(die1_ring).load(std::memory_order_acquire) & die1_bit, 0u);
 }
 
 TEST_F(SchedulerStateTest, ContendedConsumedHeadIdleDrainStress) {
@@ -322,7 +353,7 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadIdleDrainStress) {
             sched.check_and_handle_consumed(head);
             ring_sched.advance_lock.store(0, std::memory_order_release);
 
-            EXPECT_TRUE(sched.drain_pending_ring_advances());
+            EXPECT_TRUE(drain_pending(ring_id));
             EXPECT_EQ(ring_sched.last_task_alive, head_task_id + 1);
             EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), head_task_id + 1);
         }
@@ -417,7 +448,9 @@ TEST_F(SchedulerStateTest, GetReadyTasksBatchDrainsSharedQueue) {
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot_b));
 
     ChipTaskSlotState *out[4];
-    int count = sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 4);
+    int count = sched.get_ready_tasks_batch(
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)], ResourceShape::AIC, out, 4
+    );
 
     EXPECT_EQ(count, 2);
     // Shared queue is FIFO, so slot_a (pushed first) comes first.
@@ -433,9 +466,74 @@ TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot));
 
     ChipTaskSlotState *out[1];
-    EXPECT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, ResourceShape::AIC, out, 1), 0);
+    EXPECT_EQ(
+        sched.get_ready_tasks_batch(
+            sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)], ResourceShape::AIC, out, 1
+        ),
+        0
+    );
     ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_sync_queues, ResourceShape::AIC, out, 1), 1);
     EXPECT_EQ(out[0], &slot);
+}
+
+TEST_F(SchedulerStateTest, RegularReadyTaskRoutesToAssignedDieQueue) {
+    alignas(64) ChipTaskSlotState die0_slot, die1_slot;
+    init_slot(die0_slot, CHIP_TASK_PENDING, 1, 1);
+    init_slot(die1_slot, CHIP_TASK_PENDING, 1, 1);
+    die0_slot.bind_ring(task_ring_id(TaskReadyDomain::DIE0, 0));
+    die1_slot.bind_ring(task_ring_id(TaskReadyDomain::DIE1, 0));
+
+    sched.push_ready_routed(&die0_slot);
+    sched.push_ready_routed(&die1_slot);
+
+    auto shape = static_cast<int32_t>(ResourceShape::AIC);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][shape].pop(), nullptr);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE0)][shape].pop(), &die0_slot);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE1)][shape].pop(), &die1_slot);
+}
+
+TEST_F(SchedulerStateTest, SameDieSuccessorRoutesToSchedulerContinuationQueue) {
+    alignas(64) ChipTaskSlotState slot;
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
+    slot.bind_ring(task_ring_id(TaskReadyDomain::DIE0, 0));
+
+    ASSERT_TRUE(sched.release_fanin_and_check_ready(slot, TaskReadyDomain::DIE0, 1));
+
+    auto shape = static_cast<int32_t>(ResourceShape::AIC);
+    EXPECT_TRUE(sched.continuation_routing_active[1]);
+    EXPECT_EQ(sched.continuation_ready_queues[1][shape].pop(), &slot);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE0)][shape].pop(), nullptr);
+}
+
+TEST_F(SchedulerStateTest, CrossDomainSuccessorFallsBackToDomainQueue) {
+    alignas(64) ChipTaskSlotState slot;
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
+    slot.bind_ring(task_ring_id(TaskReadyDomain::DIE1, 0));
+
+    ASSERT_TRUE(sched.release_fanin_and_check_ready(slot, TaskReadyDomain::DIE0, 0));
+
+    auto shape = static_cast<int32_t>(ResourceShape::AIC);
+    EXPECT_FALSE(sched.continuation_routing_active[0]);
+    EXPECT_EQ(sched.continuation_ready_queues[0][shape].pop(), nullptr);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE1)][shape].pop(), &slot);
+}
+
+TEST_F(SchedulerStateTest, GlobalAndSyncReadyTasksBypassDieQueues) {
+    alignas(64) ChipTaskSlotState global_slot, sync_slot;
+    init_slot(global_slot, CHIP_TASK_PENDING, 1, 1);
+    init_slot(sync_slot, CHIP_TASK_PENDING, 1, 1);
+    global_slot.bind_ring(task_ring_id(TaskReadyDomain::GLOBAL, 0));
+    sync_slot.bind_ring(task_ring_id(TaskReadyDomain::DIE0, 0));
+    sync_slot.task_attrs.set_sync_start();
+
+    sched.push_ready_routed(&global_slot);
+    sched.push_ready_routed(&sync_slot);
+
+    auto shape = static_cast<int32_t>(ResourceShape::AIC);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][shape].pop(), &global_slot);
+    EXPECT_EQ(sched.ready_sync_queues[shape].pop(), &sync_slot);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE0)][shape].pop(), nullptr);
+    EXPECT_EQ(sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE1)][shape].pop(), nullptr);
 }
 
 TEST(CoreTrackerTest, MixPartiallyRunningClusterAdmittedAsPerCorePlacement) {

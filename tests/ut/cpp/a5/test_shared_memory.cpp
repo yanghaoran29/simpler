@@ -201,7 +201,7 @@ TEST(SharedMemoryCalcSize, LargerWindowGivesLargerSize) {
 TEST(SharedMemoryCalcSize, HeaderAligned) { EXPECT_EQ(sizeof(SharedMemoryHeader) % CHIP_ALIGN_SIZE, 0u); }
 
 TEST(SharedMemoryCalcSize, PerRingDifferentSizes) {
-    uint64_t ws[CHIP_MAX_RING_DEPTH] = {128, 256, 512, 1024};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {128, 256, 512, 1024, 128, 256, 512, 1024, 128, 256, 512, 1024};
     uint64_t size = SharedMemoryHandle::calculate_size_per_ring(ws);
 
     uint64_t uniform_size = SharedMemoryHandle::calculate_size(128);
@@ -209,8 +209,9 @@ TEST(SharedMemoryCalcSize, PerRingDifferentSizes) {
 }
 
 TEST(SharedMemoryLayout, InitPerRingWritesHeaderValues) {
-    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128, 16, 32, 64, 128, 16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024, 10 * 1024, 20 * 1024,
+                                           30 * 1024, 40 * 1024, 10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
     const uint64_t sm_size = SharedMemoryHandle::calculate_size_per_ring(ws);
 
     DeviceArena arena;
@@ -232,9 +233,10 @@ TEST(SharedMemoryLayout, InitPerRingWritesHeaderValues) {
 }
 
 TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
-    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
-    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128, 16, 32, 64, 128, 16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024, 10 * 1024, 20 * 1024,
+                                           30 * 1024, 40 * 1024, 10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
+    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32, 4, 8, 16, 32, 4, 8, 16, 32};
     const uint64_t sm_size = SharedMemoryHandle::calculate_size_per_ring(ws);
     uint64_t total_heap = 0;
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
@@ -280,9 +282,10 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
 }
 
 TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
-    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
-    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128, 16, 32, 64, 128, 16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024, 10 * 1024, 20 * 1024,
+                                           30 * 1024, 40 * 1024, 10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
+    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32, 4, 8, 16, 32, 4, 8, 16, 32};
     const uint64_t sm_size = SharedMemoryHandle::calculate_size_per_ring(ws);
 
     DeviceArena source_arena;
@@ -290,7 +293,7 @@ TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
     ASSERT_NE(source_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
 
     std::vector<char> sm(static_cast<size_t>(sm_size));
-    std::vector<char> gm(100 * 1024);
+    std::vector<char> gm(300 * 1024);
     RuntimeContext *source_rt =
         runtime_init_data_from_layout(source_arena, layout, MODE_EXECUTE, sm.data(), sm_size, gm.data(), heaps);
     ASSERT_NE(source_rt, nullptr);
@@ -309,17 +312,17 @@ TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
     ASSERT_NE(&relocated_rt->scheduler, &source_rt->scheduler);
     for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
         auto &dep_pool = relocated_rt->scheduler.ring_sched_states[r].dep_pool;
-        EXPECT_EQ(dep_pool.reclaim_request_mask, &relocated_rt->scheduler.publication_request_mask);
-        EXPECT_EQ(dep_pool.reclaim_ack_mask, &relocated_rt->scheduler.publication_ack_mask);
+        EXPECT_EQ(dep_pool.reclaim_request_mask, relocated_rt->scheduler.publication_request_mask_for_ring(r));
+        EXPECT_EQ(dep_pool.reclaim_ack_mask, relocated_rt->scheduler.publication_ack_mask_for_ring(r));
         EXPECT_EQ(dep_pool.ring_id, r);
         EXPECT_TRUE(relocated_rt->scheduler.ring_sched_states[r].publication_batching_enabled);
     }
 }
 
 TEST(RuntimeArenaLayout, RejectsOverflowingPerRingHeapSum) {
-    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128};
-    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {std::numeric_limits<uint64_t>::max(), 1, 0, 0};
-    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32};
+    uint64_t ws[CHIP_MAX_RING_DEPTH] = {16, 32, 64, 128, 16, 32, 64, 128, 16, 32, 64, 128};
+    uint64_t heaps[CHIP_MAX_RING_DEPTH] = {std::numeric_limits<uint64_t>::max(), 1};
+    int32_t dep_caps[CHIP_MAX_RING_DEPTH] = {4, 8, 16, 32, 4, 8, 16, 32, 4, 8, 16, 32};
 
     DeviceArena runtime_arena;
     RuntimeArenaLayout layout = runtime_reserve_layout(runtime_arena, ws, heaps, dep_caps);

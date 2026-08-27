@@ -116,8 +116,8 @@ protected:
     // Ask the scheduler for an exact publication on ring 0, the way a blocked
     // reclaim consumer does once it has spun without progress.
     void request_and_drain_publication(int32_t ring_id = 0) {
-        sched.publication_request_mask.store(ring_mask_bit(ring_id), std::memory_order_release);
-        ASSERT_TRUE(sched.drain_publication_requests());
+        sched.publication_request_mask_for_ring(ring_id)->store(ring_mask_bit(ring_id), std::memory_order_release);
+        ASSERT_TRUE(sched.drain_publication_requests(task_ring_domain(ring_id), false));
     }
 };
 
@@ -158,7 +158,8 @@ TEST_F(WiringTest, NoFaninTaskBecomesReady) {
 
     // Task should be in ready queue
     ResourceShape shape = task_slot.active_mask.to_shape();
-    auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
+    auto *popped =
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, &task_slot);
 }
 
@@ -196,7 +197,8 @@ TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
 
     // Task should be in ready queue
     ResourceShape shape = task_slot.active_mask.to_shape();
-    auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
+    auto *popped =
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, &task_slot);
 }
 
@@ -233,7 +235,8 @@ TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
 
     // Ready queue should be empty
     ResourceShape shape = task_slot.active_mask.to_shape();
-    auto *popped = sched.ready_queues[static_cast<int32_t>(shape)].pop();
+    auto *popped =
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][static_cast<int32_t>(shape)].pop();
     EXPECT_EQ(popped, nullptr);
 
     // Producers should have fanout_head pointing to task_slot
@@ -445,8 +448,10 @@ TEST_F(WiringTest, OnMixedTaskCompleteNotifiesConsumers) {
 
     // Both consumers should be ready (fanin_refcount == fanin_count)
     ResourceShape shape = consumer1.active_mask.to_shape();
-    auto *r1 = sched.ready_queues[static_cast<int32_t>(shape)].pop();
-    auto *r2 = sched.ready_queues[static_cast<int32_t>(shape)].pop();
+    auto *r1 =
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][static_cast<int32_t>(shape)].pop();
+    auto *r2 =
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][static_cast<int32_t>(shape)].pop();
     EXPECT_TRUE((r1 == &consumer1 && r2 == &consumer2) || (r1 == &consumer2 && r2 == &consumer1));
 }
 
@@ -489,6 +494,33 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
     // Producers with fanout_refcount == fanout_count AND COMPLETED -> CONSUMED
     EXPECT_EQ(producers[0].task_state.load(), CHIP_TASK_CONSUMED);
     EXPECT_EQ(producers[1].task_state.load(), CHIP_TASK_CONSUMED);
+}
+
+TEST_F(WiringTest, DeferredReleaseBatchCombinesSharedProducerReferences) {
+    alignas(64) ChipTaskSlotState producer;
+    alignas(64) ChipTaskSlotState consumers[2];
+    FaninPool spill_pool{};
+    FaninSpillEntry spill_entries[4];
+    std::atomic<int32_t> spill_error{SIMPLER_ERROR_NONE};
+    spill_pool.init(spill_entries, 4, &spill_error);
+
+    // Both completed consumers retain the same producer. The micro-batch must
+    // apply a total delta of two and consume the producer exactly once.
+    init_slot(producer, CHIP_TASK_COMPLETED, 0, 2);
+    for (ChipTaskSlotState &consumer : consumers) {
+        init_slot(consumer, CHIP_TASK_COMPLETED, 1, 1);
+        consumer.payload->fanin_actual_count = 1;
+        consumer.payload->fanin_inline_edges[0].set(&producer, DEP_WAIT | DEP_RETAIN);
+        consumer.payload->fanin_spill_pool = &spill_pool;
+    }
+
+    ChipTaskSlotState *deferred[] = {&consumers[0], &consumers[1]};
+    int32_t deferred_count = 2;
+    EXPECT_EQ(sched.release_deferred_batch(deferred, deferred_count, /*max_batch=*/16, /*thread_idx=*/0), 2);
+
+    EXPECT_EQ(deferred_count, 0);
+    EXPECT_EQ(producer.fanout_refcount.load(std::memory_order_acquire), 2U);
+    EXPECT_EQ(producer.task_state.load(std::memory_order_acquire), CHIP_TASK_CONSUMED);
 }
 
 // =============================================================================
@@ -717,20 +749,20 @@ TEST_F(WiringTest, DrainPublicationRequestsPublishesWithheldProgress) {
     rss.sync_to_sm();
     ASSERT_EQ(ring->fc.last_task_alive.load(), 113);
 
-    sched.publication_request_mask.store(ring_mask_bit(0), std::memory_order_release);
-    EXPECT_TRUE(sched.drain_publication_requests());
+    sched.publication_request_mask_for_ring(0)->store(ring_mask_bit(0), std::memory_order_release);
+    EXPECT_TRUE(sched.drain_publication_requests(TaskReadyDomain::GLOBAL, false));
 
     EXPECT_EQ(ring->fc.last_task_alive.load(), 128);
     EXPECT_EQ(rss.last_published_to_sm, 128);
-    EXPECT_EQ(sched.publication_ack_mask.load() & ring_mask_bit(0), ring_mask_bit(0));
-    EXPECT_EQ(sched.publication_request_mask.load() & ring_mask_bit(0), 0u);
+    EXPECT_EQ(sched.publication_ack_mask_for_ring(0)->load() & ring_mask_bit(0), ring_mask_bit(0));
+    EXPECT_EQ(sched.publication_request_mask_for_ring(0)->load() & ring_mask_bit(0), 0u);
 
     // The return value reports whether the watermark moved, not whether the
     // request was serviced: a request with nothing withheld is still acked.
-    sched.publication_request_mask.store(ring_mask_bit(0), std::memory_order_release);
-    EXPECT_FALSE(sched.drain_publication_requests());
-    EXPECT_EQ(sched.publication_ack_mask.load() & ring_mask_bit(0), ring_mask_bit(0));
-    EXPECT_EQ(sched.publication_request_mask.load() & ring_mask_bit(0), 0u);
+    sched.publication_request_mask_for_ring(0)->store(ring_mask_bit(0), std::memory_order_release);
+    EXPECT_FALSE(sched.drain_publication_requests(TaskReadyDomain::GLOBAL, false));
+    EXPECT_EQ(sched.publication_ack_mask_for_ring(0)->load() & ring_mask_bit(0), ring_mask_bit(0));
+    EXPECT_EQ(sched.publication_request_mask_for_ring(0)->load() & ring_mask_bit(0), 0u);
 }
 
 TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
@@ -753,7 +785,9 @@ TEST_F(WiringTest, TaskWindowOpensOnceWithheldProgressIsPublished) {
         ring->task_descriptors, 4, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
         orch_err, ring->slot_states, 3, 0
     );
-    allocator.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask);
+    allocator.set_reclaim_publication_request(
+        sched.publication_request_mask_for_ring(0), sched.publication_ack_mask_for_ring(0)
+    );
 
     // A window of 4 admits task 3 only once the watermark retires task 0, and
     // the watermark the allocator can see still says every task is alive.
@@ -783,7 +817,9 @@ TEST_F(WiringTest, HeapReclaimsOnceWithheldProgressIsPublished) {
         ring->task_descriptors, 8, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
         orch_err, ring->slot_states, 0, 0
     );
-    allocator.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask);
+    allocator.set_reclaim_publication_request(
+        sched.publication_request_mask_for_ring(0), sched.publication_ack_mask_for_ring(0)
+    );
 
     auto full_heap = allocator.alloc(sizeof(heap));
     ASSERT_FALSE(full_heap.failed());
@@ -859,7 +895,9 @@ TEST_F(WiringTest, FaninPoolReclaimsOnceWithheldProgressIsPublished) {
     FaninPool pool{};
     auto *orch_err = sm_layout::orch_error_code_addr(sm_handle->sm_base);
     pool.init(entries, 4, orch_err);
-    pool.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask, 0);
+    pool.set_reclaim_publication_request(
+        sched.publication_request_mask_for_ring(0), sched.publication_ack_mask_for_ring(0), 0
+    );
     for (int i = 0; i < 4; i++) {
         ASSERT_NE(pool.alloc(), nullptr);
     }
@@ -1005,7 +1043,10 @@ TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
     // release routes every block through the ordinary ready queue.
     EXPECT_TRUE(sched.route_ready_once(consumer));
     EXPECT_EQ(consumer.payload->early_dispatch_state.load(), EARLY_DISPATCH_DISPATCHED);
-    EXPECT_EQ(sched.ready_queues[static_cast<int32_t>(shape)].pop(), &consumer);
+    EXPECT_EQ(
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][static_cast<int32_t>(shape)].pop(),
+        &consumer
+    );
 }
 
 TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue) {
