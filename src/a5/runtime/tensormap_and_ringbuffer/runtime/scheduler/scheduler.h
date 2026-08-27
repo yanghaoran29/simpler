@@ -673,48 +673,6 @@ struct SchedulerState {
         return advanced;
     }
 
-    // Commit ring advances collected by one scheduler release micro-batch. A
-    // consumed slot only contributes a bit to a thread-local mask while the
-    // batch is being processed. At the commit point each touched ring is
-    // scanned at most once. A failed ring lock is published once through that
-    // ring domain's pending mask.
-    bool flush_local_ring_advances(uint32_t local_masks[TASK_RING_DOMAIN_COUNT], uint64_t *atomic_count = nullptr) {
-        bool advanced = false;
-        for (int32_t domain_index = 0; domain_index < TASK_RING_DOMAIN_COUNT; domain_index++) {
-            uint32_t bits = local_masks[domain_index];
-            if (bits == 0) continue;
-
-            auto &pending_mask = advance_pending_masks[domain_index].bits;
-            uint32_t retry_bits = 0;
-            for (int32_t ring_id = 0; ring_id < CHIP_MAX_RING_DEPTH; ring_id++) {
-                uint32_t bit = ring_advance_pending_bit(ring_id);
-                if ((bits & bit) == 0) continue;
-
-                auto &ring_sched = ring_sched_states[ring_id];
-                int32_t expected_lock = 0;
-                if (!ring_sched.advance_lock.compare_exchange_strong(
-                        expected_lock, 1, std::memory_order_acquire, std::memory_order_relaxed
-                    )) {
-                    if (atomic_count != nullptr) *atomic_count += 1;
-                    retry_bits |= bit;
-                    continue;
-                }
-                if (atomic_count != nullptr) *atomic_count += 1;
-
-                int32_t before = ring_sched.last_task_alive;
-                ring_sched.advance_ring_pointers();
-                advanced = advanced || ring_sched.last_task_alive != before;
-                ring_sched.advance_lock.store(0, std::memory_order_release);
-                if (atomic_count != nullptr) *atomic_count += 1;
-            }
-            if (retry_bits != 0) {
-                pending_mask.fetch_or(retry_bits, std::memory_order_release);
-                if (atomic_count != nullptr) *atomic_count += 1;
-            }
-        }
-        return advanced;
-    }
-
     bool drain_publication_requests_for_domain(TaskReadyDomain domain) {
         int32_t mask_index = request_mask_index(domain);
         auto &request_mask = publication_request_masks[mask_index].bits;
@@ -769,9 +727,7 @@ struct SchedulerState {
         }
     }
 
-    void check_and_handle_consumed(
-        ChipTaskSlotState &slot_state, bool defer_ring_advance = false, uint32_t *local_ring_masks = nullptr
-    ) {
+    void check_and_handle_consumed(ChipTaskSlotState &slot_state, bool defer_ring_advance = false) {
         // Read fanout_refcount/fanout_count and flip COMPLETED->CONSUMED under
         // fanout_lock. The orchestrator claims producers (fanout_count++) under the
         // same lock, so the consume decision is serialized against a concurrent
@@ -796,10 +752,6 @@ struct SchedulerState {
 #endif
 
         int32_t ring_id = slot_state.ring_id;
-        if (local_ring_masks != nullptr) {
-            local_ring_masks[request_mask_index_for_ring(ring_id)] |= ring_advance_pending_bit(ring_id);
-            return;
-        }
         if (defer_ring_advance) {
             mark_ring_advance_pending(ring_id);
             return;
@@ -817,10 +769,8 @@ struct SchedulerState {
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
-    void check_and_handle_consumed(
-        ChipTaskSlotState &slot_state, uint64_t &atomic_count, bool defer_ring_advance = false,
-        uint32_t *local_ring_masks = nullptr
-    ) {
+    void
+    check_and_handle_consumed(ChipTaskSlotState &slot_state, uint64_t &atomic_count, bool defer_ring_advance = false) {
         // See the non-profiling overload for why the read + COMPLETED->CONSUMED
         // flip is serialized against the orchestrator's claim under fanout_lock.
         bool became_consumed = false;
@@ -845,10 +795,6 @@ struct SchedulerState {
 #endif
 
         int32_t ring_id = slot_state.ring_id;
-        if (local_ring_masks != nullptr) {
-            local_ring_masks[request_mask_index_for_ring(ring_id)] |= ring_advance_pending_bit(ring_id);
-            return;
-        }
         if (defer_ring_advance) {
             mark_ring_advance_pending(ring_id);
             atomic_count += 1;  // pending mark
@@ -869,14 +815,9 @@ struct SchedulerState {
     }
 #endif
 
-    void release_producer(ChipTaskSlotState &slot_state, uint32_t *local_ring_masks = nullptr) {
+    void release_producer(ChipTaskSlotState &slot_state) {
         slot_state.fanout_refcount.fetch_add(1, std::memory_order_acq_rel);
-        check_and_handle_consumed(slot_state, false, local_ring_masks);
-    }
-
-    void release_producer_delta(ChipTaskSlotState &slot_state, uint32_t delta, uint32_t *local_ring_masks) {
-        slot_state.fanout_refcount.fetch_add(delta, std::memory_order_acq_rel);
-        check_and_handle_consumed(slot_state, false, local_ring_masks);
+        check_and_handle_consumed(slot_state);
     }
 
     // Scope-end release: sets bit31 (FANOUT_SCOPE_BIT) instead of bumping a
@@ -892,18 +833,10 @@ struct SchedulerState {
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
-    void release_producer(ChipTaskSlotState &slot_state, uint64_t &atomic_count, uint32_t *local_ring_masks = nullptr) {
+    void release_producer(ChipTaskSlotState &slot_state, uint64_t &atomic_count) {
         slot_state.fanout_refcount.fetch_add(1, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
-        check_and_handle_consumed(slot_state, atomic_count, false, local_ring_masks);
-    }
-
-    void release_producer_delta(
-        ChipTaskSlotState &slot_state, uint32_t delta, uint64_t &atomic_count, uint32_t *local_ring_masks
-    ) {
-        slot_state.fanout_refcount.fetch_add(delta, std::memory_order_acq_rel);
-        atomic_count += 1;  // fanout_refcount.fetch_add
-        check_and_handle_consumed(slot_state, atomic_count, false, local_ring_masks);
+        check_and_handle_consumed(slot_state, atomic_count);
     }
 
     void release_producer_scope(ChipTaskSlotState &slot_state, uint64_t &atomic_count) {
@@ -1432,7 +1365,7 @@ struct SchedulerState {
      */
 
 #if SIMPLER_SCHED_PROFILING
-    int32_t on_task_release(ChipTaskSlotState &slot_state, int32_t thread_idx, uint32_t *local_ring_masks = nullptr) {
+    int32_t on_task_release(ChipTaskSlotState &slot_state, int32_t thread_idx) {
         SCHED_CYCLE_START();
         extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
         extern uint64_t g_sched_self_atomic_count[];
@@ -1440,7 +1373,7 @@ struct SchedulerState {
         extern uint64_t g_sched_complete_count[];
         uint64_t fanin_atomics = 0;
 #else
-    int32_t on_task_release(ChipTaskSlotState &slot_state, uint32_t *local_ring_masks = nullptr) {
+    int32_t on_task_release(ChipTaskSlotState &slot_state) {
 #endif
         TaskPayload *payload = slot_state.payload;
         int32_t released = 0;
@@ -1454,9 +1387,9 @@ struct SchedulerState {
             }
             released++;
 #if SIMPLER_SCHED_PROFILING
-            release_producer(*producer_slot_state, fanin_atomics, local_ring_masks);
+            release_producer(*producer_slot_state, fanin_atomics);
 #else
-            release_producer(*producer_slot_state, local_ring_masks);
+            release_producer(*producer_slot_state);
 #endif
         });
 #if SIMPLER_SCHED_PROFILING
@@ -1467,114 +1400,14 @@ struct SchedulerState {
         // Self consumed check
 #if SIMPLER_SCHED_PROFILING
         uint64_t self_atomics = 0;
-        check_and_handle_consumed(slot_state, self_atomics, false, local_ring_masks);
+        check_and_handle_consumed(slot_state, self_atomics);
         g_sched_self_atomic_count[thread_idx] += self_atomics;
         SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
         g_sched_complete_count[thread_idx]++;
 #else
-        check_and_handle_consumed(slot_state, false, local_ring_masks);
+        check_and_handle_consumed(slot_state);
 #endif
         return released;
-    }
-
-    // Release at most max_batch entries from the deferred stack. Retained edges
-    // targeting the same producer are combined into one fetch_add(delta) and
-    // one consumed check. Per-slot lifecycle transitions remain serialized;
-    // ring reclamation is held in a thread-local mask and committed once after
-    // the micro-batch.
-    int32_t release_deferred_batch(
-        ChipTaskSlotState **slot_states, int32_t &slot_count, int32_t max_batch, int32_t thread_idx
-    ) {
-        static constexpr int32_t PRODUCER_TABLE_CAP = 64;
-        struct ProducerRelease {
-            ChipTaskSlotState *slot;
-            uint32_t delta;
-        };
-
-        uint32_t local_ring_masks[TASK_RING_DOMAIN_COUNT]{};
-        int32_t bounded_batch = max_batch < 16 ? max_batch : 16;
-        int32_t batch_count = slot_count < bounded_batch ? slot_count : bounded_batch;
-        ChipTaskSlotState *batch_slots[16];
-        ProducerRelease producers[PRODUCER_TABLE_CAP]{};
-
-#if SIMPLER_SCHED_PROFILING
-        extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
-        extern uint64_t g_sched_self_atomic_count[], g_sched_self_consumed_cycle[];
-        extern uint64_t g_sched_complete_count[];
-        uint64_t fanin_atomics = 0;
-        SCHED_CYCLE_START();
-#else
-        (void)thread_idx;
-#endif
-
-        for (int32_t i = 0; i < batch_count; i++) {
-            ChipTaskSlotState *slot_state = slot_states[--slot_count];
-            batch_slots[i] = slot_state;
-            for_each_fanin_slot_state(
-                *slot_state->payload, [&](ChipTaskSlotState *producer_slot_state, DepFlags flags) {
-                    if (!dep_has_retain(flags)) return;
-
-                    uintptr_t key = reinterpret_cast<uintptr_t>(producer_slot_state) >> 6;
-                    bool inserted = false;
-                    for (int32_t probe = 0; probe < PRODUCER_TABLE_CAP; probe++) {
-                        ProducerRelease &entry =
-                            producers[(key + static_cast<uintptr_t>(probe)) & (PRODUCER_TABLE_CAP - 1)];
-                        if (entry.slot == producer_slot_state) {
-                            entry.delta++;
-                            inserted = true;
-                            break;
-                        }
-                        if (entry.slot == nullptr) {
-                            entry.slot = producer_slot_state;
-                            entry.delta = 1;
-                            inserted = true;
-                            break;
-                        }
-                    }
-                    if (inserted) return;
-
-                // A task with unusually wide fanin can fill the fixed local
-                // table. Preserve correctness without allocation by falling
-                // back to the original per-edge release for overflow entries.
-#if SIMPLER_SCHED_PROFILING
-                    release_producer(*producer_slot_state, fanin_atomics, local_ring_masks);
-#else
-                    release_producer(*producer_slot_state, local_ring_masks);
-#endif
-                }
-            );
-        }
-
-        for (ProducerRelease &entry : producers) {
-            if (entry.slot == nullptr) continue;
-#if SIMPLER_SCHED_PROFILING
-            release_producer_delta(*entry.slot, entry.delta, fanin_atomics, local_ring_masks);
-#else
-            release_producer_delta(*entry.slot, entry.delta, local_ring_masks);
-#endif
-        }
-
-#if SIMPLER_SCHED_PROFILING
-        g_sched_fanin_atomic_count[thread_idx] += fanin_atomics;
-        SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
-        uint64_t self_atomics = 0;
-#endif
-        for (int32_t i = 0; i < batch_count; i++) {
-#if SIMPLER_SCHED_PROFILING
-            check_and_handle_consumed(*batch_slots[i], self_atomics, false, local_ring_masks);
-            g_sched_complete_count[thread_idx]++;
-#else
-            check_and_handle_consumed(*batch_slots[i], false, local_ring_masks);
-#endif
-        }
-#if SIMPLER_SCHED_PROFILING
-        flush_local_ring_advances(local_ring_masks, &self_atomics);
-        g_sched_self_atomic_count[thread_idx] += self_atomics;
-        SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
-#else
-        flush_local_ring_advances(local_ring_masks);
-#endif
-        return batch_count;
     }
 
     // === Cold-path API (defined in pto_scheduler.cpp) ===
@@ -1617,9 +1450,15 @@ inline bool
 AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &sink, ChipTaskSlotState &slot_state) {
     sink.sched->on_task_complete(slot_state, sink.thread_idx, sink.ready_domain);
     if (*sink.deferred_release_count >= sink.deferred_release_capacity) {
-        sink.sched->release_deferred_batch(
-            sink.deferred_release_slot_states, *sink.deferred_release_count, 16, sink.thread_idx
-        );
+        while (*sink.deferred_release_count > 0) {
+#if SIMPLER_SCHED_PROFILING
+            (void)sink.sched->on_task_release(
+                *sink.deferred_release_slot_states[--(*sink.deferred_release_count)], sink.thread_idx
+            );
+#else
+            sink.sched->on_task_release(*sink.deferred_release_slot_states[--(*sink.deferred_release_count)]);
+#endif
+        }
     }
     sink.deferred_release_slot_states[(*sink.deferred_release_count)++] = &slot_state;
     sink.inline_completed++;
@@ -1673,7 +1512,13 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
         if (entry.normal_done && entry.waiting_completion_count <= 0) {
             sched->on_task_complete(*entry.slot_state, thread_idx, ready_domain);
             if (deferred_release_count >= deferred_release_capacity) {
-                sched->release_deferred_batch(deferred_release_slot_states, deferred_release_count, 16, thread_idx);
+                while (deferred_release_count > 0) {
+#if SIMPLER_SCHED_PROFILING
+                    (void)sched->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
+#else
+                    sched->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+#endif
+                }
             }
             deferred_release_slot_states[deferred_release_count++] = entry.slot_state;
             result.completed++;

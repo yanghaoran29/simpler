@@ -496,33 +496,6 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
     EXPECT_EQ(producers[1].task_state.load(), CHIP_TASK_CONSUMED);
 }
 
-TEST_F(WiringTest, DeferredReleaseBatchCombinesSharedProducerReferences) {
-    alignas(64) ChipTaskSlotState producer;
-    alignas(64) ChipTaskSlotState consumers[2];
-    FaninPool spill_pool{};
-    FaninSpillEntry spill_entries[4];
-    std::atomic<int32_t> spill_error{SIMPLER_ERROR_NONE};
-    spill_pool.init(spill_entries, 4, &spill_error);
-
-    // Both completed consumers retain the same producer. The micro-batch must
-    // apply a total delta of two and consume the producer exactly once.
-    init_slot(producer, CHIP_TASK_COMPLETED, 0, 2);
-    for (ChipTaskSlotState &consumer : consumers) {
-        init_slot(consumer, CHIP_TASK_COMPLETED, 1, 1);
-        consumer.payload->fanin_actual_count = 1;
-        consumer.payload->fanin_inline_edges[0].set(&producer, DEP_WAIT | DEP_RETAIN);
-        consumer.payload->fanin_spill_pool = &spill_pool;
-    }
-
-    ChipTaskSlotState *deferred[] = {&consumers[0], &consumers[1]};
-    int32_t deferred_count = 2;
-    EXPECT_EQ(sched.release_deferred_batch(deferred, deferred_count, /*max_batch=*/16, /*thread_idx=*/0), 2);
-
-    EXPECT_EQ(deferred_count, 0);
-    EXPECT_EQ(producer.fanout_refcount.load(std::memory_order_acquire), 2U);
-    EXPECT_EQ(producer.task_state.load(std::memory_order_acquire), CHIP_TASK_CONSUMED);
-}
-
 // =============================================================================
 // WAIT/RETAIN split (issue #1375): an ordering-only (DEP_WAIT) producer drops
 // its submit->wire pin at wiring; a retention (DEP_WAIT|DEP_RETAIN) producer

@@ -39,7 +39,6 @@
 
 namespace {
 inline constexpr int32_t DEFERRED_RELEASE_CAP = 256;
-inline constexpr int32_t DEFERRED_RELEASE_BATCH = 16;
 }  // namespace
 
 // AICore materializes args[] from src_payload on the gated path using these
@@ -1249,9 +1248,15 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 // reach CONSUMED once all consumers drain.
                 deferred_release_slot_states[deferred_release_count++] = &dummy_slot;
                 if (deferred_release_count >= DEFERRED_RELEASE_CAP) {
-                    sched_->release_deferred_batch(
-                        deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_BATCH, thread_idx
-                    );
+                    while (deferred_release_count > 0) {
+#if SIMPLER_SCHED_PROFILING
+                        (void)sched_->on_task_release(
+                            *deferred_release_slot_states[--deferred_release_count], thread_idx
+                        );
+#else
+                        sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+#endif
+                    }
                 }
                 int32_t prev = completed_tasks_.fetch_add(1, std::memory_order_relaxed);
                 last_progress_count = prev + 1;
@@ -1363,14 +1368,14 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES && deferred_release_count > 0) ?
                     get_sys_cnt_aicpu() :
                     0;
-            uint32_t released_count = static_cast<uint32_t>(
-                deferred_release_count < DEFERRED_RELEASE_BATCH ? deferred_release_count : DEFERRED_RELEASE_BATCH
-            );
+            uint32_t released_count = static_cast<uint32_t>(deferred_release_count);
 #endif
-            if (deferred_release_count > 0) {
-                sched_->release_deferred_batch(
-                    deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_BATCH, thread_idx
-                );
+            while (deferred_release_count > 0) {
+#if SIMPLER_SCHED_PROFILING
+                (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
+#else
+                sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+#endif
             }
 #if SIMPLER_DFX
             if (release_t0 != 0) {
@@ -1458,9 +1463,11 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     // here so every consumed producer slot completes its on_task_release
     // regardless of which loop-exit path fired.
     while (deferred_release_count > 0) {
-        sched_->release_deferred_batch(
-            deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_BATCH, thread_idx
-        );
+#if SIMPLER_SCHED_PROFILING
+        (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
+#else
+        sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+#endif
     }
 
 #if SIMPLER_DFX
