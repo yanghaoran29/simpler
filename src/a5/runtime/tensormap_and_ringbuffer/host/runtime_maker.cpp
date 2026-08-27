@@ -57,7 +57,9 @@
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
-static_assert(RUNTIME_ENV_RING_COUNT == CHIP_MAX_RING_DEPTH, "RuntimeEnv ring count must match the runtime ring depth");
+static_assert(
+    RUNTIME_ENV_RING_COUNT == TASK_RING_SCOPE_DEPTH, "RuntimeEnv ring count must match the task-ring scope depth"
+);
 
 // This file returns both kinds of negative status — a latched device code
 // negated, and PTO_RUNTIME_ERR_* for a host-side failure — so a caller can
@@ -104,10 +106,10 @@ static int64_t _now_ms() {
 
 static bool is_power_of_2_u64(uint64_t value) { return value != 0 && (value & (value - 1)) == 0; }
 
-template <typename T>
-static std::string format_ring_array(const T (&values)[CHIP_MAX_RING_DEPTH]) {
+template <typename T, size_t N>
+static std::string format_ring_array(const T (&values)[N]) {
     std::string out = "[";
-    for (int r = 0; r < CHIP_MAX_RING_DEPTH; ++r) {
+    for (size_t r = 0; r < N; ++r) {
         if (r != 0) {
             out += ", ";
         }
@@ -146,39 +148,44 @@ static uint64_t read_ring_override(const uint64_t *base, int idx) {
     return value;
 }
 
-// Each of ring_task_window / ring_heap / ring_dep_pool is a per-ring array of
-// CHIP_MAX_RING_DEPTH entries (0 = unset). A per-ring entry wins over the
-// compile-time default, and there is nothing between them: sizing is per task.
-// A "size all rings the same" request arrives already broadcast to every entry
-// by the caller.
+// RuntimeEnv provides one configuration entry per scope depth. Every task-domain
+// lane at the same depth uses that entry, preserving the public four-value ABI.
 static bool resolve_ring_config(
     const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool,
     uint64_t eff_task_window_sizes[CHIP_MAX_RING_DEPTH], uint64_t eff_heap_sizes[CHIP_MAX_RING_DEPTH],
     int32_t eff_dep_pool_capacities[CHIP_MAX_RING_DEPTH]
 ) {
-    uint64_t dep_pool_values[CHIP_MAX_RING_DEPTH];
-    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        eff_task_window_sizes[r] = CHIP_TASK_WINDOW_SIZE;
-        eff_heap_sizes[r] = CHIP_HEAP_SIZE;
-        dep_pool_values[r] = CHIP_DEP_LIST_POOL_SIZE;
+    uint64_t task_window_by_depth[RUNTIME_ENV_RING_COUNT];
+    uint64_t heap_by_depth[RUNTIME_ENV_RING_COUNT];
+    uint64_t dep_pool_by_depth[RUNTIME_ENV_RING_COUNT];
+    for (int depth = 0; depth < RUNTIME_ENV_RING_COUNT; depth++) {
+        task_window_by_depth[depth] = CHIP_TASK_WINDOW_SIZE;
+        heap_by_depth[depth] = CHIP_HEAP_SIZE;
+        dep_pool_by_depth[depth] = CHIP_DEP_LIST_POOL_SIZE;
     }
 
     warn_on_retired_ring_env();
 
-    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
-        const uint64_t task_window_override = read_ring_override(ring_task_window, r);
-        const uint64_t heap_override = read_ring_override(ring_heap, r);
-        const uint64_t dep_pool_override = read_ring_override(ring_dep_pool, r);
+    for (int depth = 0; depth < RUNTIME_ENV_RING_COUNT; depth++) {
+        const uint64_t task_window_override = read_ring_override(ring_task_window, depth);
+        const uint64_t heap_override = read_ring_override(ring_heap, depth);
+        const uint64_t dep_pool_override = read_ring_override(ring_dep_pool, depth);
         if (task_window_override != 0) {
-            eff_task_window_sizes[r] = task_window_override;
+            task_window_by_depth[depth] = task_window_override;
         }
         if (heap_override != 0) {
-            eff_heap_sizes[r] = heap_override;
+            heap_by_depth[depth] = heap_override;
         }
         if (dep_pool_override != 0) {
-            dep_pool_values[r] = dep_pool_override;
+            dep_pool_by_depth[depth] = dep_pool_override;
         }
+    }
 
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
+        const int32_t depth = task_ring_scope_depth(r);
+        eff_task_window_sizes[r] = task_window_by_depth[depth];
+        eff_heap_sizes[r] = heap_by_depth[depth];
+        const uint64_t dep_pool_value = dep_pool_by_depth[depth];
         if (eff_task_window_sizes[r] < 4 || eff_task_window_sizes[r] > static_cast<uint64_t>(INT32_MAX) ||
             !is_power_of_2_u64(eff_task_window_sizes[r])) {
             LOG_ERROR(
@@ -190,11 +197,11 @@ static bool resolve_ring_config(
             LOG_ERROR("ring_heap[%d]=%" PRIu64 " must be >= 1024", r, eff_heap_sizes[r]);
             return false;
         }
-        if (dep_pool_values[r] < 4 || dep_pool_values[r] > static_cast<uint64_t>(INT32_MAX)) {
-            LOG_ERROR("ring_dep_pool[%d]=%" PRIu64 " must be in [4, INT32_MAX]", r, dep_pool_values[r]);
+        if (dep_pool_value < 4 || dep_pool_value > static_cast<uint64_t>(INT32_MAX)) {
+            LOG_ERROR("ring_dep_pool[%d]=%" PRIu64 " must be in [4, INT32_MAX]", r, dep_pool_value);
             return false;
         }
-        eff_dep_pool_capacities[r] = static_cast<int32_t>(dep_pool_values[r]);
+        eff_dep_pool_capacities[r] = static_cast<int32_t>(dep_pool_value);
     }
 
     return true;

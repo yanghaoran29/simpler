@@ -157,6 +157,10 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
 
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
             CYCLE_COUNT_LAP(prof_scope_and_loop);
+            // One scope is one independent batch chain. Its placement is an
+            // explicit contract rather than a runtime-selected affine hint.
+            uint64_t chain_idx = b_idx * q_loop + q_idx;
+            TaskDomain chain_domain = (chain_idx & 1U) == 0 ? TaskDomain::DIE0 : TaskDomain::DIE1;
             SIMPLER_SCOPE(ScopeMode::MANUAL) {
                 uint64_t cur_offset = b_idx * q_head_num + q_idx * q_tile;
 
@@ -200,6 +204,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
 #endif
 
                     params_qk.reset();
+                    params_qk.set_task_domain(chain_domain);
                     params_qk.add_input(qi);
                     params_qk.add_input(key_cache);
                     params_qk.add_input(block_table);
@@ -224,6 +229,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
 #endif
 
                     params_sf.reset();
+                    params_sf.set_task_domain(chain_domain);
                     params_sf.add_input(sij_buf);
                     params_sf.add_output(pij_buf_ci);
                     params_sf.add_output(scalar_ci);
@@ -244,6 +250,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
 #endif
 
                     params_pv.reset();
+                    params_pv.set_task_domain(chain_domain);
                     params_pv.add_input(pij_buf);
                     params_pv.add_input(value_cache);
                     params_pv.add_input(block_table);
@@ -264,6 +271,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     uint64_t is_last = (bn + n_blocks >= bn_this_batch) ? 1 : 0;
 
                     params_up.reset();
+                    params_up.set_task_domain(chain_domain);
                     params_up.add_input(mi);
                     params_up.add_input(li);
                     params_up.add_input(oi_new);

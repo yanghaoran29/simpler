@@ -22,6 +22,42 @@
 
 extern "C" {
 
+// Assign the two halves of a split SPMD launch to opposite Dies.  Adjacent
+// layers swap the physical Dies to remove a persistent first-half bias.
+static inline TaskDomain spmd_half_domain(int64_t layer_idx, int32_t half_idx) {
+    return ((layer_idx + half_idx) & 1) == 0 ? TaskDomain::DIE0 : TaskDomain::DIE1;
+}
+
+// Keep one MLP intermediate shard on the same Die through Gate/Up -> SiLU ->
+// Down.  Shards 0..2 are the first half of the six-block SPMD launches and
+// shards 3..5 are the second half; the direct shards preserve a 9:8 balance.
+static inline TaskDomain mlp_shard_domain(int64_t layer_idx, int64_t shard_idx) {
+    int32_t half_idx = (shard_idx < 3 || (shard_idx >= 6 && shard_idx < 12)) ? 0 : 1;
+    return spmd_half_domain(layer_idx, half_idx);
+}
+
+// Submit one three-block half of a six-block MLP SPMD kernel.  The block
+// offset keeps the kernel's logical block index unchanged after splitting.
+static inline TaskId submit_mlp_spmd_half(
+    int32_t func_id, int64_t layer_idx, int32_t half_idx, const simpler::tmr::Tensor &normed,
+    const simpler::tmr::Tensor &weight, const simpler::tmr::Tensor &accumulator, int64_t k_base, int64_t hidden_base,
+    TaskId dependency
+) {
+    CoreTaskArgs params;
+    params.set_task_domain(spmd_half_domain(layer_idx, half_idx));
+    params.add_input(normed);
+    params.add_input(weight);
+    params.add_inout(accumulator);
+    params.add_scalar(k_base);
+    params.add_scalar(hidden_base);
+    params.add_scalar(half_idx * 3);
+    params.launch_spec.set_core_num(3);
+    if (dependency.is_valid()) {
+        params.set_dependencies(&dependency, 1);
+    }
+    return rt_submit_aic_task(func_id, params).task_id();
+}
+
 __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return OrchestrationConfig{
@@ -119,19 +155,25 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             _submit_deps_buf[0] = t__tmp_v3;
 
             // Spmd x_gamma0_spmd: x_gamma0
-            CoreTaskArgs params_t2;
-            params_t2.add_output(normed);
-            params_t2.add_input(cur);
-            params_t2.add_input(ext_input_rms_weight);
-            params_t2.launch_spec.set_core_num(5);
-            params_t2.set_allow_early_resolve(true);
             TaskId params_t2_deps[1];
             uint32_t params_t2_deps_count = 0;
             if (_submit_deps_buf[0].is_valid()) params_t2_deps[params_t2_deps_count++] = _submit_deps_buf[0];
-            params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);
-            TaskOutputTensors task_2_outs = rt_submit_aiv_task(2, params_t2);
-            TaskId xgamma_tid = task_2_outs.task_id();
-            prev_normed_tid[0] = xgamma_tid;
+            TaskId xgamma_half_tids[2];
+            for (int32_t half = 0; half < 2; ++half) {
+                CoreTaskArgs params_t2;
+                params_t2.set_task_domain(spmd_half_domain(0, half));
+                params_t2.add_output(normed);
+                params_t2.add_input(cur);
+                params_t2.add_input(ext_input_rms_weight);
+                params_t2.add_scalar(half == 0 ? 0 : 3);
+                params_t2.launch_spec.set_core_num(half == 0 ? 3 : 2);
+                params_t2.set_allow_early_resolve(true);
+                params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);
+                xgamma_half_tids[half] = rt_submit_aiv_task(2, params_t2).task_id();
+            }
+            CoreTaskArgs params_xgamma_join;
+            params_xgamma_join.set_dependencies(xgamma_half_tids, 2);
+            prev_normed_tid[0] = rt_submit_dummy_task(params_xgamma_join).task_id();
         }
         simpler::tmr::Tensor cur__rv_v7 = cur;
         simpler::tmr::Tensor normed__rv_v5 = normed;
@@ -290,22 +332,26 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline182[1] = t__tmp_v19;
 
                     // Spmd q_proj_spmd: q_proj
-                    CoreTaskArgs params_t6;
-                    params_t6.add_inout(q_proj_inline139);
-                    params_t6.add_input(normed__rv_v5);
-                    params_t6.add_input(ext_wq);
-                    params_t6.add_scalar(layer_hidden_base_inline151);
-                    params_t6.launch_spec.set_core_num(50);
-                    params_t6.set_allow_early_resolve(true);
                     TaskId params_t6_deps[2];
                     uint32_t params_t6_deps_count = 0;
                     if (_submit_deps_buf_inline182[0].is_valid())
                         params_t6_deps[params_t6_deps_count++] = _submit_deps_buf_inline182[0];
                     if (_submit_deps_buf_inline182[1].is_valid())
                         params_t6_deps[params_t6_deps_count++] = _submit_deps_buf_inline182[1];
-                    params_t6.set_dependencies(params_t6_deps, params_t6_deps_count);
-                    TaskOutputTensors task_6_outs = rt_submit_aic_task(6, params_t6);
-                    TaskId q_proj_tid_inline183 = task_6_outs.task_id();
+                    TaskId q_proj_tids_inline183[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        CoreTaskArgs params_t6;
+                        params_t6.set_task_domain(spmd_half_domain(i, half));
+                        params_t6.add_inout(q_proj_inline139);
+                        params_t6.add_input(normed__rv_v5);
+                        params_t6.add_input(ext_wq);
+                        params_t6.add_scalar(layer_hidden_base_inline151);
+                        params_t6.add_scalar(half * 25);
+                        params_t6.launch_spec.set_core_num(25);
+                        params_t6.set_allow_early_resolve(true);
+                        params_t6.set_dependencies(params_t6_deps, params_t6_deps_count);
+                        q_proj_tids_inline183[half] = rt_submit_aic_task(6, params_t6).task_id();
+                    }
                     TaskId _submit_deps_buf_inline261[2];
                     for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
                         _submit_deps_buf_inline261[__init_i] = TaskId::invalid();
@@ -353,34 +399,42 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId mlp_out_seed_tid_inline206 = task_8_outs.task_id();
 
                     // Spmd k_proj_spmd: k_proj
-                    CoreTaskArgs params_t9;
-                    params_t9.add_inout(k_proj_inline135);
-                    params_t9.add_input(normed__rv_v5);
-                    params_t9.add_input(ext_wk);
-                    params_t9.add_scalar(layer_hidden_base_inline151);
-                    params_t9.launch_spec.set_core_num(10);
-                    params_t9.set_allow_early_resolve(true);
                     TaskId params_t9_deps[1];
                     uint32_t params_t9_deps_count = 0;
                     params_t9_deps[params_t9_deps_count++] = kv_seed_tid_inline238;
-                    params_t9.set_dependencies(params_t9_deps, params_t9_deps_count);
-                    TaskOutputTensors task_9_outs = rt_submit_aic_task(9, params_t9);
-                    TaskId k_proj_tid_inline136 = task_9_outs.task_id();
+                    TaskId k_proj_tids_inline136[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        CoreTaskArgs params_t9;
+                        params_t9.set_task_domain(spmd_half_domain(i, half));
+                        params_t9.add_inout(k_proj_inline135);
+                        params_t9.add_input(normed__rv_v5);
+                        params_t9.add_input(ext_wk);
+                        params_t9.add_scalar(layer_hidden_base_inline151);
+                        params_t9.add_scalar(half * 5);
+                        params_t9.launch_spec.set_core_num(5);
+                        params_t9.set_allow_early_resolve(true);
+                        params_t9.set_dependencies(params_t9_deps, params_t9_deps_count);
+                        k_proj_tids_inline136[half] = rt_submit_aic_task(9, params_t9).task_id();
+                    }
 
                     // Spmd v_proj_spmd: v_proj
-                    CoreTaskArgs params_t10;
-                    params_t10.add_inout(v_proj_inline255);
-                    params_t10.add_input(normed__rv_v5);
-                    params_t10.add_input(ext_wv);
-                    params_t10.add_scalar(layer_hidden_base_inline151);
-                    params_t10.launch_spec.set_core_num(10);
-                    params_t10.set_allow_early_resolve(true);
                     TaskId params_t10_deps[1];
                     uint32_t params_t10_deps_count = 0;
                     params_t10_deps[params_t10_deps_count++] = kv_seed_tid_inline238;
-                    params_t10.set_dependencies(params_t10_deps, params_t10_deps_count);
-                    TaskOutputTensors task_10_outs = rt_submit_aic_task(10, params_t10);
-                    TaskId v_proj_tid_inline63 = task_10_outs.task_id();
+                    TaskId v_proj_tids_inline63[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        CoreTaskArgs params_t10;
+                        params_t10.set_task_domain(spmd_half_domain(i, half));
+                        params_t10.add_inout(v_proj_inline255);
+                        params_t10.add_input(normed__rv_v5);
+                        params_t10.add_input(ext_wv);
+                        params_t10.add_scalar(layer_hidden_base_inline151);
+                        params_t10.add_scalar(half * 5);
+                        params_t10.launch_spec.set_core_num(5);
+                        params_t10.set_allow_early_resolve(true);
+                        params_t10.set_dependencies(params_t10_deps, params_t10_deps_count);
+                        v_proj_tids_inline63[half] = rt_submit_aic_task(10, params_t10).task_id();
+                    }
                     uint32_t q_tnd_inline191_shapes[3] = {16, 40, 128};
                     simpler::tmr::Tensor q_tnd_inline191 = q_tnd_flat_inline127.reshape(q_tnd_inline191_shapes, 3);
                     uint32_t attn_out_tnd_inline79_shapes[3] = {16, 40, 128};
@@ -412,11 +466,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t11.launch_spec.set_core_num(attention_core_num_inline188);
                     params_t11.launch_spec.set_require_sync_start(true);
                     params_t11.set_allow_early_resolve(true);
-                    TaskId params_t11_deps[7];
+                    TaskId params_t11_deps[10];
                     uint32_t params_t11_deps_count = 0;
-                    params_t11_deps[params_t11_deps_count++] = q_proj_tid_inline183;
-                    params_t11_deps[params_t11_deps_count++] = k_proj_tid_inline136;
-                    params_t11_deps[params_t11_deps_count++] = v_proj_tid_inline63;
+                    params_t11_deps[params_t11_deps_count++] = q_proj_tids_inline183[0];
+                    params_t11_deps[params_t11_deps_count++] = q_proj_tids_inline183[1];
+                    params_t11_deps[params_t11_deps_count++] = k_proj_tids_inline136[0];
+                    params_t11_deps[params_t11_deps_count++] = k_proj_tids_inline136[1];
+                    params_t11_deps[params_t11_deps_count++] = v_proj_tids_inline63[0];
+                    params_t11_deps[params_t11_deps_count++] = v_proj_tids_inline63[1];
                     params_t11_deps[params_t11_deps_count++] = rms_tid_inline148;
                     params_t11_deps[params_t11_deps_count++] = tiling_tid_inline0;
                     params_t11_deps[params_t11_deps_count++] = attn_out_seed_tid_inline116;
@@ -492,43 +549,25 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     }
 
                     // Spmd out_proj_spmd: out_proj_0
-                    CoreTaskArgs params_t13;
-                    params_t13.add_input(attn_out_inline282__ssa_v4);
-                    params_t13.add_input(ext_wo);
-                    params_t13.add_inout(attn_proj_fp32_inline220);
-                    params_t13.add_scalar(N_OUT_DIRECT_inline61);
-                    params_t13.add_scalar(layer_hidden_base_inline151);
-                    params_t13.launch_spec.set_core_num(24);
                     TaskId params_t13_deps[1];
                     uint32_t params_t13_deps_count = 0;
                     params_t13_deps[params_t13_deps_count++] = attn_done_tid_inline78;
-                    params_t13.set_dependencies(params_t13_deps, params_t13_deps_count);
-                    TaskOutputTensors task_13_outs = rt_submit_aic_task(14, params_t13);
-                    TaskId out_proj_direct_tid_inline70 = task_13_outs.task_id();
-                    out_tids_inline271[N_OUT_DIRECT_inline61] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 1)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 2)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 3)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 4)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 5)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 6)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 7)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 8)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 9)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 10)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 11)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 12)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 13)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 14)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 15)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 16)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 17)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 18)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 19)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 20)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 21)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 22)] = out_proj_direct_tid_inline70;
-                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 23)] = out_proj_direct_tid_inline70;
+                    for (int32_t half = 0; half < 2; ++half) {
+                        CoreTaskArgs params_t13;
+                        params_t13.set_task_domain(spmd_half_domain(i, half));
+                        params_t13.add_input(attn_out_inline282__ssa_v4);
+                        params_t13.add_input(ext_wo);
+                        params_t13.add_inout(attn_proj_fp32_inline220);
+                        params_t13.add_scalar(N_OUT_DIRECT_inline61);
+                        params_t13.add_scalar(layer_hidden_base_inline151);
+                        params_t13.add_scalar(half * 12);
+                        params_t13.launch_spec.set_core_num(12);
+                        params_t13.set_dependencies(params_t13_deps, params_t13_deps_count);
+                        TaskId half_tid = rt_submit_aic_task(14, params_t13).task_id();
+                        for (int32_t block = 0; block < 12; ++block) {
+                            out_tids_inline271[N_OUT_DIRECT_inline61 + half * 12 + block] = half_tid;
+                        }
+                    }
                     int64_t k_base_inline111 = 0;
                     int64_t n_split_base_inline163 = 0;
                     TaskId _submit_deps_buf_inline165[10];
@@ -1003,54 +1042,40 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId t__tmp_v109 = cast_tids_inline88[0];
                     _submit_deps_buf_inline237[0] = t__tmp_v109;
 
-                    // Spmd gate_proj_spmd: gate_proj
-                    CoreTaskArgs params_t20;
-                    params_t20.add_input(mlp_norm_in_inline71);
-                    params_t20.add_input(ext_w_gate);
-                    params_t20.add_inout(gate_acc_all_inline203);
-                    params_t20.add_scalar(gu_k0_inline131);
-                    params_t20.add_scalar(layer_hidden_base_inline151);
-                    params_t20.launch_spec.set_core_num(6);
-                    TaskId params_t20_deps[1];
-                    uint32_t params_t20_deps_count = 0;
-                    if (_submit_deps_buf_inline237[0].is_valid())
-                        params_t20_deps[params_t20_deps_count++] = _submit_deps_buf_inline237[0];
-                    params_t20.set_dependencies(params_t20_deps, params_t20_deps_count);
-                    TaskOutputTensors task_20_outs = rt_submit_aic_task(21, params_t20);
-                    TaskId gate_spmd_tid_inline245 = task_20_outs.task_id();
-                    gate_tids_inline56[0] = gate_spmd_tid_inline245;
-                    gate_tids_inline56[5] = gate_spmd_tid_inline245;
-                    gate_tids_inline56[10] = gate_spmd_tid_inline245;
-                    gate_tids_inline56[15] = gate_spmd_tid_inline245;
-                    gate_tids_inline56[20] = gate_spmd_tid_inline245;
-                    gate_tids_inline56[25] = gate_spmd_tid_inline245;
+                    // Split the six-block gate SPMD launch evenly across both Dies.
+                    TaskId gate_spmd_tids_inline245[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        gate_spmd_tids_inline245[half] = submit_mlp_spmd_half(
+                            21, i, half, mlp_norm_in_inline71, ext_w_gate, gate_acc_all_inline203, gu_k0_inline131,
+                            layer_hidden_base_inline151, _submit_deps_buf_inline237[0]
+                        );
+                    }
+                    gate_tids_inline56[0] = gate_spmd_tids_inline245[0];
+                    gate_tids_inline56[5] = gate_spmd_tids_inline245[0];
+                    gate_tids_inline56[10] = gate_spmd_tids_inline245[0];
+                    gate_tids_inline56[15] = gate_spmd_tids_inline245[1];
+                    gate_tids_inline56[20] = gate_spmd_tids_inline245[1];
+                    gate_tids_inline56[25] = gate_spmd_tids_inline245[1];
                     TaskId _submit_deps_buf_inline260[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
                         _submit_deps_buf_inline260[__init_i] = TaskId::invalid();
                     TaskId t__tmp_v110 = cast_tids_inline88[0];
                     _submit_deps_buf_inline260[0] = t__tmp_v110;
 
-                    // Spmd up_proj_spmd: up_proj
-                    CoreTaskArgs params_t21;
-                    params_t21.add_input(mlp_norm_in_inline71);
-                    params_t21.add_input(ext_w_up);
-                    params_t21.add_inout(up_acc_all_inline303);
-                    params_t21.add_scalar(gu_k0_inline131);
-                    params_t21.add_scalar(layer_hidden_base_inline151);
-                    params_t21.launch_spec.set_core_num(6);
-                    TaskId params_t21_deps[1];
-                    uint32_t params_t21_deps_count = 0;
-                    if (_submit_deps_buf_inline260[0].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline260[0];
-                    params_t21.set_dependencies(params_t21_deps, params_t21_deps_count);
-                    TaskOutputTensors task_21_outs = rt_submit_aic_task(22, params_t21);
-                    TaskId up_spmd_tid_inline264 = task_21_outs.task_id();
-                    up_tids_inline310[0] = up_spmd_tid_inline264;
-                    up_tids_inline310[5] = up_spmd_tid_inline264;
-                    up_tids_inline310[10] = up_spmd_tid_inline264;
-                    up_tids_inline310[15] = up_spmd_tid_inline264;
-                    up_tids_inline310[20] = up_spmd_tid_inline264;
-                    up_tids_inline310[25] = up_spmd_tid_inline264;
+                    // Split the six-block up SPMD launch evenly across both Dies.
+                    TaskId up_spmd_tids_inline264[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        up_spmd_tids_inline264[half] = submit_mlp_spmd_half(
+                            22, i, half, mlp_norm_in_inline71, ext_w_up, up_acc_all_inline303, gu_k0_inline131,
+                            layer_hidden_base_inline151, _submit_deps_buf_inline260[0]
+                        );
+                    }
+                    up_tids_inline310[0] = up_spmd_tids_inline264[0];
+                    up_tids_inline310[5] = up_spmd_tids_inline264[0];
+                    up_tids_inline310[10] = up_spmd_tids_inline264[0];
+                    up_tids_inline310[15] = up_spmd_tids_inline264[1];
+                    up_tids_inline310[20] = up_spmd_tids_inline264[1];
+                    up_tids_inline310[25] = up_spmd_tids_inline264[1];
                     int64_t gu_k0_inline131__ssa_v1 = 1024;
                     TaskId _submit_deps_buf_inline236__ssa_v1[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
@@ -1104,54 +1129,38 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId t__tmp_v115 = cast_tids_inline88[1];
                     _submit_deps_buf_inline237__ssa_v1[0] = t__tmp_v115;
 
-                    // Spmd gate_proj_spmd_0: gate_proj_0
-                    CoreTaskArgs params_t22;
-                    params_t22.add_input(mlp_norm_in_inline71);
-                    params_t22.add_input(ext_w_gate);
-                    params_t22.add_inout(gate_acc_all_inline203);
-                    params_t22.add_scalar(gu_k0_inline131__ssa_v1);
-                    params_t22.add_scalar(layer_hidden_base_inline151);
-                    params_t22.launch_spec.set_core_num(6);
-                    TaskId params_t22_deps[1];
-                    uint32_t params_t22_deps_count = 0;
-                    if (_submit_deps_buf_inline237__ssa_v1[0].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline237__ssa_v1[0];
-                    params_t22.set_dependencies(params_t22_deps, params_t22_deps_count);
-                    TaskOutputTensors task_22_outs = rt_submit_aic_task(23, params_t22);
-                    TaskId gate_spmd_tid_inline245__ssa_v1 = task_22_outs.task_id();
-                    gate_tids_inline56[1] = gate_spmd_tid_inline245__ssa_v1;
-                    gate_tids_inline56[6] = gate_spmd_tid_inline245__ssa_v1;
-                    gate_tids_inline56[11] = gate_spmd_tid_inline245__ssa_v1;
-                    gate_tids_inline56[16] = gate_spmd_tid_inline245__ssa_v1;
-                    gate_tids_inline56[21] = gate_spmd_tid_inline245__ssa_v1;
-                    gate_tids_inline56[26] = gate_spmd_tid_inline245__ssa_v1;
+                    TaskId gate_spmd_tids_inline245__ssa_v1[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        gate_spmd_tids_inline245__ssa_v1[half] = submit_mlp_spmd_half(
+                            23, i, half, mlp_norm_in_inline71, ext_w_gate, gate_acc_all_inline203,
+                            gu_k0_inline131__ssa_v1, layer_hidden_base_inline151, _submit_deps_buf_inline237__ssa_v1[0]
+                        );
+                    }
+                    gate_tids_inline56[1] = gate_spmd_tids_inline245__ssa_v1[0];
+                    gate_tids_inline56[6] = gate_spmd_tids_inline245__ssa_v1[0];
+                    gate_tids_inline56[11] = gate_spmd_tids_inline245__ssa_v1[0];
+                    gate_tids_inline56[16] = gate_spmd_tids_inline245__ssa_v1[1];
+                    gate_tids_inline56[21] = gate_spmd_tids_inline245__ssa_v1[1];
+                    gate_tids_inline56[26] = gate_spmd_tids_inline245__ssa_v1[1];
                     TaskId _submit_deps_buf_inline260__ssa_v1[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
                         _submit_deps_buf_inline260__ssa_v1[__init_i] = TaskId::invalid();
                     TaskId t__tmp_v116 = cast_tids_inline88[1];
                     _submit_deps_buf_inline260__ssa_v1[0] = t__tmp_v116;
 
-                    // Spmd up_proj_spmd_0: up_proj_0
-                    CoreTaskArgs params_t23;
-                    params_t23.add_input(mlp_norm_in_inline71);
-                    params_t23.add_input(ext_w_up);
-                    params_t23.add_inout(up_acc_all_inline303);
-                    params_t23.add_scalar(gu_k0_inline131__ssa_v1);
-                    params_t23.add_scalar(layer_hidden_base_inline151);
-                    params_t23.launch_spec.set_core_num(6);
-                    TaskId params_t23_deps[1];
-                    uint32_t params_t23_deps_count = 0;
-                    if (_submit_deps_buf_inline260__ssa_v1[0].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline260__ssa_v1[0];
-                    params_t23.set_dependencies(params_t23_deps, params_t23_deps_count);
-                    TaskOutputTensors task_23_outs = rt_submit_aic_task(24, params_t23);
-                    TaskId up_spmd_tid_inline264__ssa_v1 = task_23_outs.task_id();
-                    up_tids_inline310[1] = up_spmd_tid_inline264__ssa_v1;
-                    up_tids_inline310[6] = up_spmd_tid_inline264__ssa_v1;
-                    up_tids_inline310[11] = up_spmd_tid_inline264__ssa_v1;
-                    up_tids_inline310[16] = up_spmd_tid_inline264__ssa_v1;
-                    up_tids_inline310[21] = up_spmd_tid_inline264__ssa_v1;
-                    up_tids_inline310[26] = up_spmd_tid_inline264__ssa_v1;
+                    TaskId up_spmd_tids_inline264__ssa_v1[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        up_spmd_tids_inline264__ssa_v1[half] = submit_mlp_spmd_half(
+                            24, i, half, mlp_norm_in_inline71, ext_w_up, up_acc_all_inline303, gu_k0_inline131__ssa_v1,
+                            layer_hidden_base_inline151, _submit_deps_buf_inline260__ssa_v1[0]
+                        );
+                    }
+                    up_tids_inline310[1] = up_spmd_tids_inline264__ssa_v1[0];
+                    up_tids_inline310[6] = up_spmd_tids_inline264__ssa_v1[0];
+                    up_tids_inline310[11] = up_spmd_tids_inline264__ssa_v1[0];
+                    up_tids_inline310[16] = up_spmd_tids_inline264__ssa_v1[1];
+                    up_tids_inline310[21] = up_spmd_tids_inline264__ssa_v1[1];
+                    up_tids_inline310[26] = up_spmd_tids_inline264__ssa_v1[1];
                     int64_t gu_k0_inline131__ssa_v2 = 2048;
                     TaskId _submit_deps_buf_inline236__ssa_v2[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
@@ -1205,54 +1214,38 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId t__tmp_v121 = cast_tids_inline88[2];
                     _submit_deps_buf_inline237__ssa_v2[0] = t__tmp_v121;
 
-                    // Spmd gate_proj_spmd_1: gate_proj_1
-                    CoreTaskArgs params_t24;
-                    params_t24.add_input(mlp_norm_in_inline71);
-                    params_t24.add_input(ext_w_gate);
-                    params_t24.add_inout(gate_acc_all_inline203);
-                    params_t24.add_scalar(gu_k0_inline131__ssa_v2);
-                    params_t24.add_scalar(layer_hidden_base_inline151);
-                    params_t24.launch_spec.set_core_num(6);
-                    TaskId params_t24_deps[1];
-                    uint32_t params_t24_deps_count = 0;
-                    if (_submit_deps_buf_inline237__ssa_v2[0].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline237__ssa_v2[0];
-                    params_t24.set_dependencies(params_t24_deps, params_t24_deps_count);
-                    TaskOutputTensors task_24_outs = rt_submit_aic_task(25, params_t24);
-                    TaskId gate_spmd_tid_inline245__ssa_v2 = task_24_outs.task_id();
-                    gate_tids_inline56[2] = gate_spmd_tid_inline245__ssa_v2;
-                    gate_tids_inline56[7] = gate_spmd_tid_inline245__ssa_v2;
-                    gate_tids_inline56[12] = gate_spmd_tid_inline245__ssa_v2;
-                    gate_tids_inline56[17] = gate_spmd_tid_inline245__ssa_v2;
-                    gate_tids_inline56[22] = gate_spmd_tid_inline245__ssa_v2;
-                    gate_tids_inline56[27] = gate_spmd_tid_inline245__ssa_v2;
+                    TaskId gate_spmd_tids_inline245__ssa_v2[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        gate_spmd_tids_inline245__ssa_v2[half] = submit_mlp_spmd_half(
+                            25, i, half, mlp_norm_in_inline71, ext_w_gate, gate_acc_all_inline203,
+                            gu_k0_inline131__ssa_v2, layer_hidden_base_inline151, _submit_deps_buf_inline237__ssa_v2[0]
+                        );
+                    }
+                    gate_tids_inline56[2] = gate_spmd_tids_inline245__ssa_v2[0];
+                    gate_tids_inline56[7] = gate_spmd_tids_inline245__ssa_v2[0];
+                    gate_tids_inline56[12] = gate_spmd_tids_inline245__ssa_v2[0];
+                    gate_tids_inline56[17] = gate_spmd_tids_inline245__ssa_v2[1];
+                    gate_tids_inline56[22] = gate_spmd_tids_inline245__ssa_v2[1];
+                    gate_tids_inline56[27] = gate_spmd_tids_inline245__ssa_v2[1];
                     TaskId _submit_deps_buf_inline260__ssa_v2[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
                         _submit_deps_buf_inline260__ssa_v2[__init_i] = TaskId::invalid();
                     TaskId t__tmp_v122 = cast_tids_inline88[2];
                     _submit_deps_buf_inline260__ssa_v2[0] = t__tmp_v122;
 
-                    // Spmd up_proj_spmd_1: up_proj_1
-                    CoreTaskArgs params_t25;
-                    params_t25.add_input(mlp_norm_in_inline71);
-                    params_t25.add_input(ext_w_up);
-                    params_t25.add_inout(up_acc_all_inline303);
-                    params_t25.add_scalar(gu_k0_inline131__ssa_v2);
-                    params_t25.add_scalar(layer_hidden_base_inline151);
-                    params_t25.launch_spec.set_core_num(6);
-                    TaskId params_t25_deps[1];
-                    uint32_t params_t25_deps_count = 0;
-                    if (_submit_deps_buf_inline260__ssa_v2[0].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline260__ssa_v2[0];
-                    params_t25.set_dependencies(params_t25_deps, params_t25_deps_count);
-                    TaskOutputTensors task_25_outs = rt_submit_aic_task(26, params_t25);
-                    TaskId up_spmd_tid_inline264__ssa_v2 = task_25_outs.task_id();
-                    up_tids_inline310[2] = up_spmd_tid_inline264__ssa_v2;
-                    up_tids_inline310[7] = up_spmd_tid_inline264__ssa_v2;
-                    up_tids_inline310[12] = up_spmd_tid_inline264__ssa_v2;
-                    up_tids_inline310[17] = up_spmd_tid_inline264__ssa_v2;
-                    up_tids_inline310[22] = up_spmd_tid_inline264__ssa_v2;
-                    up_tids_inline310[27] = up_spmd_tid_inline264__ssa_v2;
+                    TaskId up_spmd_tids_inline264__ssa_v2[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        up_spmd_tids_inline264__ssa_v2[half] = submit_mlp_spmd_half(
+                            26, i, half, mlp_norm_in_inline71, ext_w_up, up_acc_all_inline303, gu_k0_inline131__ssa_v2,
+                            layer_hidden_base_inline151, _submit_deps_buf_inline260__ssa_v2[0]
+                        );
+                    }
+                    up_tids_inline310[2] = up_spmd_tids_inline264__ssa_v2[0];
+                    up_tids_inline310[7] = up_spmd_tids_inline264__ssa_v2[0];
+                    up_tids_inline310[12] = up_spmd_tids_inline264__ssa_v2[0];
+                    up_tids_inline310[17] = up_spmd_tids_inline264__ssa_v2[1];
+                    up_tids_inline310[22] = up_spmd_tids_inline264__ssa_v2[1];
+                    up_tids_inline310[27] = up_spmd_tids_inline264__ssa_v2[1];
                     int64_t gu_k0_inline131__ssa_v3 = 3072;
                     TaskId _submit_deps_buf_inline236__ssa_v3[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
@@ -1306,54 +1299,38 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId t__tmp_v127 = cast_tids_inline88[3];
                     _submit_deps_buf_inline237__ssa_v3[0] = t__tmp_v127;
 
-                    // Spmd gate_proj_spmd_2: gate_proj_2
-                    CoreTaskArgs params_t26;
-                    params_t26.add_input(mlp_norm_in_inline71);
-                    params_t26.add_input(ext_w_gate);
-                    params_t26.add_inout(gate_acc_all_inline203);
-                    params_t26.add_scalar(gu_k0_inline131__ssa_v3);
-                    params_t26.add_scalar(layer_hidden_base_inline151);
-                    params_t26.launch_spec.set_core_num(6);
-                    TaskId params_t26_deps[1];
-                    uint32_t params_t26_deps_count = 0;
-                    if (_submit_deps_buf_inline237__ssa_v3[0].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = _submit_deps_buf_inline237__ssa_v3[0];
-                    params_t26.set_dependencies(params_t26_deps, params_t26_deps_count);
-                    TaskOutputTensors task_26_outs = rt_submit_aic_task(27, params_t26);
-                    TaskId gate_spmd_tid_inline245__ssa_v3 = task_26_outs.task_id();
-                    gate_tids_inline56[3] = gate_spmd_tid_inline245__ssa_v3;
-                    gate_tids_inline56[8] = gate_spmd_tid_inline245__ssa_v3;
-                    gate_tids_inline56[13] = gate_spmd_tid_inline245__ssa_v3;
-                    gate_tids_inline56[18] = gate_spmd_tid_inline245__ssa_v3;
-                    gate_tids_inline56[23] = gate_spmd_tid_inline245__ssa_v3;
-                    gate_tids_inline56[28] = gate_spmd_tid_inline245__ssa_v3;
+                    TaskId gate_spmd_tids_inline245__ssa_v3[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        gate_spmd_tids_inline245__ssa_v3[half] = submit_mlp_spmd_half(
+                            27, i, half, mlp_norm_in_inline71, ext_w_gate, gate_acc_all_inline203,
+                            gu_k0_inline131__ssa_v3, layer_hidden_base_inline151, _submit_deps_buf_inline237__ssa_v3[0]
+                        );
+                    }
+                    gate_tids_inline56[3] = gate_spmd_tids_inline245__ssa_v3[0];
+                    gate_tids_inline56[8] = gate_spmd_tids_inline245__ssa_v3[0];
+                    gate_tids_inline56[13] = gate_spmd_tids_inline245__ssa_v3[0];
+                    gate_tids_inline56[18] = gate_spmd_tids_inline245__ssa_v3[1];
+                    gate_tids_inline56[23] = gate_spmd_tids_inline245__ssa_v3[1];
+                    gate_tids_inline56[28] = gate_spmd_tids_inline245__ssa_v3[1];
                     TaskId _submit_deps_buf_inline260__ssa_v3[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
                         _submit_deps_buf_inline260__ssa_v3[__init_i] = TaskId::invalid();
                     TaskId t__tmp_v128 = cast_tids_inline88[3];
                     _submit_deps_buf_inline260__ssa_v3[0] = t__tmp_v128;
 
-                    // Spmd up_proj_spmd_2: up_proj_2
-                    CoreTaskArgs params_t27;
-                    params_t27.add_input(mlp_norm_in_inline71);
-                    params_t27.add_input(ext_w_up);
-                    params_t27.add_inout(up_acc_all_inline303);
-                    params_t27.add_scalar(gu_k0_inline131__ssa_v3);
-                    params_t27.add_scalar(layer_hidden_base_inline151);
-                    params_t27.launch_spec.set_core_num(6);
-                    TaskId params_t27_deps[1];
-                    uint32_t params_t27_deps_count = 0;
-                    if (_submit_deps_buf_inline260__ssa_v3[0].is_valid())
-                        params_t27_deps[params_t27_deps_count++] = _submit_deps_buf_inline260__ssa_v3[0];
-                    params_t27.set_dependencies(params_t27_deps, params_t27_deps_count);
-                    TaskOutputTensors task_27_outs = rt_submit_aic_task(28, params_t27);
-                    TaskId up_spmd_tid_inline264__ssa_v3 = task_27_outs.task_id();
-                    up_tids_inline310[3] = up_spmd_tid_inline264__ssa_v3;
-                    up_tids_inline310[8] = up_spmd_tid_inline264__ssa_v3;
-                    up_tids_inline310[13] = up_spmd_tid_inline264__ssa_v3;
-                    up_tids_inline310[18] = up_spmd_tid_inline264__ssa_v3;
-                    up_tids_inline310[23] = up_spmd_tid_inline264__ssa_v3;
-                    up_tids_inline310[28] = up_spmd_tid_inline264__ssa_v3;
+                    TaskId up_spmd_tids_inline264__ssa_v3[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        up_spmd_tids_inline264__ssa_v3[half] = submit_mlp_spmd_half(
+                            28, i, half, mlp_norm_in_inline71, ext_w_up, up_acc_all_inline303, gu_k0_inline131__ssa_v3,
+                            layer_hidden_base_inline151, _submit_deps_buf_inline260__ssa_v3[0]
+                        );
+                    }
+                    up_tids_inline310[3] = up_spmd_tids_inline264__ssa_v3[0];
+                    up_tids_inline310[8] = up_spmd_tids_inline264__ssa_v3[0];
+                    up_tids_inline310[13] = up_spmd_tids_inline264__ssa_v3[0];
+                    up_tids_inline310[18] = up_spmd_tids_inline264__ssa_v3[1];
+                    up_tids_inline310[23] = up_spmd_tids_inline264__ssa_v3[1];
+                    up_tids_inline310[28] = up_spmd_tids_inline264__ssa_v3[1];
                     int64_t gu_k0_inline131__ssa_v4 = 4096;
                     TaskId _submit_deps_buf_inline236__ssa_v4[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
@@ -1407,54 +1384,38 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId t__tmp_v133 = cast_tids_inline88[4];
                     _submit_deps_buf_inline237__ssa_v4[0] = t__tmp_v133;
 
-                    // Spmd gate_proj_spmd_3: gate_proj_3
-                    CoreTaskArgs params_t28;
-                    params_t28.add_input(mlp_norm_in_inline71);
-                    params_t28.add_input(ext_w_gate);
-                    params_t28.add_inout(gate_acc_all_inline203);
-                    params_t28.add_scalar(gu_k0_inline131__ssa_v4);
-                    params_t28.add_scalar(layer_hidden_base_inline151);
-                    params_t28.launch_spec.set_core_num(6);
-                    TaskId params_t28_deps[1];
-                    uint32_t params_t28_deps_count = 0;
-                    if (_submit_deps_buf_inline237__ssa_v4[0].is_valid())
-                        params_t28_deps[params_t28_deps_count++] = _submit_deps_buf_inline237__ssa_v4[0];
-                    params_t28.set_dependencies(params_t28_deps, params_t28_deps_count);
-                    TaskOutputTensors task_28_outs = rt_submit_aic_task(29, params_t28);
-                    TaskId gate_spmd_tid_inline245__ssa_v4 = task_28_outs.task_id();
-                    gate_tids_inline56[4] = gate_spmd_tid_inline245__ssa_v4;
-                    gate_tids_inline56[9] = gate_spmd_tid_inline245__ssa_v4;
-                    gate_tids_inline56[14] = gate_spmd_tid_inline245__ssa_v4;
-                    gate_tids_inline56[19] = gate_spmd_tid_inline245__ssa_v4;
-                    gate_tids_inline56[24] = gate_spmd_tid_inline245__ssa_v4;
-                    gate_tids_inline56[29] = gate_spmd_tid_inline245__ssa_v4;
+                    TaskId gate_spmd_tids_inline245__ssa_v4[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        gate_spmd_tids_inline245__ssa_v4[half] = submit_mlp_spmd_half(
+                            29, i, half, mlp_norm_in_inline71, ext_w_gate, gate_acc_all_inline203,
+                            gu_k0_inline131__ssa_v4, layer_hidden_base_inline151, _submit_deps_buf_inline237__ssa_v4[0]
+                        );
+                    }
+                    gate_tids_inline56[4] = gate_spmd_tids_inline245__ssa_v4[0];
+                    gate_tids_inline56[9] = gate_spmd_tids_inline245__ssa_v4[0];
+                    gate_tids_inline56[14] = gate_spmd_tids_inline245__ssa_v4[0];
+                    gate_tids_inline56[19] = gate_spmd_tids_inline245__ssa_v4[1];
+                    gate_tids_inline56[24] = gate_spmd_tids_inline245__ssa_v4[1];
+                    gate_tids_inline56[29] = gate_spmd_tids_inline245__ssa_v4[1];
                     TaskId _submit_deps_buf_inline260__ssa_v4[1];
                     for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
                         _submit_deps_buf_inline260__ssa_v4[__init_i] = TaskId::invalid();
                     TaskId t__tmp_v134 = cast_tids_inline88[4];
                     _submit_deps_buf_inline260__ssa_v4[0] = t__tmp_v134;
 
-                    // Spmd up_proj_spmd_3: up_proj_3
-                    CoreTaskArgs params_t29;
-                    params_t29.add_input(mlp_norm_in_inline71);
-                    params_t29.add_input(ext_w_up);
-                    params_t29.add_inout(up_acc_all_inline303);
-                    params_t29.add_scalar(gu_k0_inline131__ssa_v4);
-                    params_t29.add_scalar(layer_hidden_base_inline151);
-                    params_t29.launch_spec.set_core_num(6);
-                    TaskId params_t29_deps[1];
-                    uint32_t params_t29_deps_count = 0;
-                    if (_submit_deps_buf_inline260__ssa_v4[0].is_valid())
-                        params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline260__ssa_v4[0];
-                    params_t29.set_dependencies(params_t29_deps, params_t29_deps_count);
-                    TaskOutputTensors task_29_outs = rt_submit_aic_task(30, params_t29);
-                    TaskId up_spmd_tid_inline264__ssa_v4 = task_29_outs.task_id();
-                    up_tids_inline310[4] = up_spmd_tid_inline264__ssa_v4;
-                    up_tids_inline310[9] = up_spmd_tid_inline264__ssa_v4;
-                    up_tids_inline310[14] = up_spmd_tid_inline264__ssa_v4;
-                    up_tids_inline310[19] = up_spmd_tid_inline264__ssa_v4;
-                    up_tids_inline310[24] = up_spmd_tid_inline264__ssa_v4;
-                    up_tids_inline310[29] = up_spmd_tid_inline264__ssa_v4;
+                    TaskId up_spmd_tids_inline264__ssa_v4[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        up_spmd_tids_inline264__ssa_v4[half] = submit_mlp_spmd_half(
+                            30, i, half, mlp_norm_in_inline71, ext_w_up, up_acc_all_inline303, gu_k0_inline131__ssa_v4,
+                            layer_hidden_base_inline151, _submit_deps_buf_inline260__ssa_v4[0]
+                        );
+                    }
+                    up_tids_inline310[4] = up_spmd_tids_inline264__ssa_v4[0];
+                    up_tids_inline310[9] = up_spmd_tids_inline264__ssa_v4[0];
+                    up_tids_inline310[14] = up_spmd_tids_inline264__ssa_v4[0];
+                    up_tids_inline310[19] = up_spmd_tids_inline264__ssa_v4[1];
+                    up_tids_inline310[24] = up_spmd_tids_inline264__ssa_v4[1];
+                    up_tids_inline310[29] = up_spmd_tids_inline264__ssa_v4[1];
                     for (int64_t n_out_inline275 = 6; n_out_inline275 < 17; n_out_inline275 += 1) {
                         int64_t n0_inline122 = (n_out_inline275 * 1024);
                         for (int64_t k_split_inline276 = 0; k_split_inline276 < 5; k_split_inline276 += 1) {
@@ -1467,6 +1428,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                             // Task 30: gate_proj_4
                             CoreTaskArgs params_t30;
+                            params_t30.set_task_domain(mlp_shard_domain(i, n_out_inline275));
                             params_t30.add_input(mlp_norm_in_inline71);
                             params_t30.add_input(ext_w_gate);
                             params_t30.add_inout(gate_acc_all_inline203);
@@ -1489,6 +1451,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                             // Task 31: up_proj_4
                             CoreTaskArgs params_t31;
+                            params_t31.set_task_domain(mlp_shard_domain(i, n_out_inline275));
                             params_t31.add_input(mlp_norm_in_inline71);
                             params_t31.add_input(ext_w_up);
                             params_t31.add_inout(up_acc_all_inline303);
@@ -1534,6 +1497,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                         // Task 32: silu
                         CoreTaskArgs params_t32;
+                        params_t32.set_task_domain(mlp_shard_domain(i, n_out_inline292));
                         params_t32.add_input(inv_rms_tile_inline126);
                         params_t32.add_inout(mlp_tile_inline149);
                         params_t32.add_input(gate_acc_all_inline203);
@@ -1580,6 +1544,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                             // Task 33: down_proj
                             CoreTaskArgs params_t33;
+                            // Follow the input SiLU shard rather than the output
+                            // accumulator shard, preserving the local continuation.
+                            params_t33.set_task_domain(mlp_shard_domain(i, k_split_inline302));
                             params_t33.add_input(mlp_tile_inline149);
                             params_t33.add_input(ext_w_down);
                             params_t33.add_inout(down_acc_all_inline168);
@@ -1772,16 +1739,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 TaskId t__tmp_v237 = down_tids_inline156[84];
                 _submit_deps_buf_inline123[84] = t__tmp_v237;
 
-                // Spmd dcr_xgamma_spmd: dcr_xgamma
-                CoreTaskArgs params_t34;
-                params_t34.add_input(down_acc_all_inline168);
-                params_t34.add_input(post_norm_partial_inline118);
-                params_t34.add_inout(next_hidden);
-                params_t34.add_input(ext_input_rms_weight);
-                params_t34.add_inout(next_normed);
-                params_t34.add_scalar(next_gamma_idx);
-                params_t34.launch_spec.set_core_num(5);
-                params_t34.set_allow_early_resolve(true);
+                // Both halves of dcr_xgamma consume the same full MLP fan-in.
                 TaskId params_t34_deps[85];
                 uint32_t params_t34_deps_count = 0;
                 if (_submit_deps_buf_inline123[0].is_valid())
@@ -1954,11 +1912,21 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[83];
                 if (_submit_deps_buf_inline123[84].is_valid())
                     params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[84];
+                // Keep dcr_xgamma as one five-core task.  Splitting it would
+                // duplicate the full 85-edge fan-in and require a join task.
+                CoreTaskArgs params_t34;
+                params_t34.add_input(down_acc_all_inline168);
+                params_t34.add_input(post_norm_partial_inline118);
+                params_t34.add_inout(next_hidden);
+                params_t34.add_input(ext_input_rms_weight);
+                params_t34.add_inout(next_normed);
+                params_t34.add_scalar(next_gamma_idx);
+                params_t34.launch_spec.set_core_num(5);
+                params_t34.set_allow_early_resolve(true);
                 params_t34.set_dependencies(params_t34_deps, params_t34_deps_count);
-                TaskOutputTensors task_34_outs = rt_submit_aiv_task(35, params_t34);
-                TaskId dcr_tid_inline58 = task_34_outs.task_id();
-                prev_out_tid[0] = dcr_tid_inline58;
-                prev_normed_tid[0] = dcr_tid_inline58;
+                TaskId dcr_tid = rt_submit_aiv_task(35, params_t34).task_id();
+                prev_out_tid[0] = dcr_tid;
+                prev_normed_tid[0] = dcr_tid;
                 simpler::tmr::Tensor cur__ssa_v8 = next_hidden;
                 simpler::tmr::Tensor normed__ssa_v6 = next_normed;
                 cur__rv_v7 = cur__ssa_v8;
