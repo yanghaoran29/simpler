@@ -28,6 +28,12 @@ static inline TaskDomain spmd_half_domain(int64_t layer_idx, int32_t half_idx) {
     return ((layer_idx + half_idx) & 1) == 0 ? TaskDomain::DIE0 : TaskDomain::DIE1;
 }
 
+// Keep every ten-block OutProj hidden shard and its residual/RMS consumer on
+// one Die.  The five shards use a 3:2 split and swap Dies between layers.
+static inline TaskDomain out_proj_shard_domain(int64_t layer_idx, int32_t shard_idx) {
+    return spmd_half_domain(layer_idx, shard_idx & 1);
+}
+
 // Keep one MLP intermediate shard on the same Die through Gate/Up -> SiLU ->
 // Down.  Shards 0..2 are the first half of the six-block SPMD launches and
 // shards 3..5 are the second half; the direct shards preserve a 9:8 balance.
@@ -532,6 +538,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                         // Task 12: out_proj
                         CoreTaskArgs params_t12;
+                        params_t12.set_task_domain(out_proj_shard_domain(i, out_idx_inline74 / 10));
                         params_t12.add_input(attn_out_inline282__ssa_v4);
                         params_t12.add_input(ext_wo);
                         params_t12.add_inout(attn_proj_fp32_inline220);
@@ -552,20 +559,27 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId params_t13_deps[1];
                     uint32_t params_t13_deps_count = 0;
                     params_t13_deps[params_t13_deps_count++] = attn_done_tid_inline78;
-                    for (int32_t half = 0; half < 2; ++half) {
+                    // Blocks 26..49 cross three ten-block hidden shards.  Split
+                    // launches at shard boundaries so every block inherits the
+                    // domain of its residual/RMS consumer.
+                    constexpr int32_t out_proj_spmd_starts[] = {26, 30, 40};
+                    constexpr int32_t out_proj_spmd_counts[] = {4, 10, 10};
+                    for (int32_t chunk = 0; chunk < 3; ++chunk) {
+                        int32_t block_start = out_proj_spmd_starts[chunk];
+                        int32_t block_count = out_proj_spmd_counts[chunk];
                         CoreTaskArgs params_t13;
-                        params_t13.set_task_domain(spmd_half_domain(i, half));
+                        params_t13.set_task_domain(out_proj_shard_domain(i, block_start / 10));
                         params_t13.add_input(attn_out_inline282__ssa_v4);
                         params_t13.add_input(ext_wo);
                         params_t13.add_inout(attn_proj_fp32_inline220);
-                        params_t13.add_scalar(N_OUT_DIRECT_inline61);
+                        params_t13.add_scalar(block_start);
                         params_t13.add_scalar(layer_hidden_base_inline151);
-                        params_t13.add_scalar(half * 12);
-                        params_t13.launch_spec.set_core_num(12);
+                        params_t13.add_scalar(0);
+                        params_t13.launch_spec.set_core_num(block_count);
                         params_t13.set_dependencies(params_t13_deps, params_t13_deps_count);
-                        TaskId half_tid = rt_submit_aic_task(14, params_t13).task_id();
-                        for (int32_t block = 0; block < 12; ++block) {
-                            out_tids_inline271[N_OUT_DIRECT_inline61 + half * 12 + block] = half_tid;
+                        TaskId chunk_tid = rt_submit_aic_task(14, params_t13).task_id();
+                        for (int32_t block = 0; block < block_count; ++block) {
+                            out_tids_inline271[block_start + block] = chunk_tid;
                         }
                     }
                     int64_t k_base_inline111 = 0;
@@ -596,6 +610,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 14: residual_rms_cast
                     CoreTaskArgs params_t14;
+                    params_t14.set_task_domain(out_proj_shard_domain(i, 0));
                     params_t14.add_inout(mlp_norm_in_inline71);
                     params_t14.add_inout(post_norm_partial_inline118);
                     params_t14.add_input(attn_proj_fp32_inline220);
@@ -658,6 +673,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 15: residual_rms_cast_0
                     CoreTaskArgs params_t15;
+                    params_t15.set_task_domain(out_proj_shard_domain(i, 1));
                     params_t15.add_inout(mlp_norm_in_inline71);
                     params_t15.add_inout(post_norm_partial_inline118);
                     params_t15.add_input(attn_proj_fp32_inline220);
@@ -720,6 +736,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 16: residual_rms_cast_1
                     CoreTaskArgs params_t16;
+                    params_t16.set_task_domain(out_proj_shard_domain(i, 2));
                     params_t16.add_inout(mlp_norm_in_inline71);
                     params_t16.add_inout(post_norm_partial_inline118);
                     params_t16.add_input(attn_proj_fp32_inline220);
@@ -782,6 +799,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 17: residual_rms_cast_2
                     CoreTaskArgs params_t17;
+                    params_t17.set_task_domain(out_proj_shard_domain(i, 3));
                     params_t17.add_inout(mlp_norm_in_inline71);
                     params_t17.add_inout(post_norm_partial_inline118);
                     params_t17.add_input(attn_proj_fp32_inline220);
@@ -844,6 +862,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 18: residual_rms_cast_3
                     CoreTaskArgs params_t18;
+                    params_t18.set_task_domain(out_proj_shard_domain(i, 4));
                     params_t18.add_inout(mlp_norm_in_inline71);
                     params_t18.add_inout(post_norm_partial_inline118);
                     params_t18.add_input(attn_proj_fp32_inline220);
