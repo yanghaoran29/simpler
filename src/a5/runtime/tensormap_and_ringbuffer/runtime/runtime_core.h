@@ -156,6 +156,7 @@ struct RuntimeContext {
     // Ops table (first field — used by orchestration .so via function pointers)
     const RuntimeOps *ops;
     ScopeMode pending_scope_mode;
+    TaskDomain pending_scope_domain;
 
     // Components
     SharedMemoryHandle *sm_handle;

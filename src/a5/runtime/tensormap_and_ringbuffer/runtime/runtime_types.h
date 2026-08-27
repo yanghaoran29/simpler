@@ -64,12 +64,13 @@
 // The slot is local_id masked by the window size, which is why the window is a power of two.
 #define CHIP_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
 
-// Multi-ring: number of independent ring layers (HeapRing + TaskRing + DepPool per layer)
-// Scope depth maps to ring index via: min(scope_depth, CHIP_MAX_RING_DEPTH - 1)
-#define CHIP_MAX_RING_DEPTH 4
+// Each task domain owns one independent ring lane across the supported scope depths.
+#define TASK_RING_SCOPE_DEPTH 4
+#define TASK_RING_DOMAIN_COUNT 3
+#define CHIP_MAX_RING_DEPTH (TASK_RING_SCOPE_DEPTH * TASK_RING_DOMAIN_COUNT)
 
 // Memory pools (per-ring defaults; total = value × CHIP_MAX_RING_DEPTH)
-#define CHIP_HEAP_SIZE (256 * 1024 * 1024)  // 256MB per ring (1GB total)
+#define CHIP_HEAP_SIZE (256 * 1024 * 1024)  // 256MB per physical ring (3GB total)
 #define CHIP_DEP_LIST_POOL_SIZE 16384       // Per-ring dependency list pool entries
 #define CHIP_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
 #define CHIP_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
@@ -85,6 +86,13 @@
 
 // Ready queue
 #define CHIP_READY_QUEUE_SIZE 65536  // Per-shape queue size
+
+// Per-Scheduler continuation queue. A completing fixed-Die task can hand a
+// newly-ready same-Die consumer back to the same Scheduler without touching
+// the Die-shared MPMC queue. The queue is only a locality cache: overflow
+// falls back to the ordinary domain queue, so this capacity does not limit
+// graph width or forward progress.
+#define CHIP_LOCAL_CONTINUATION_QUEUE_SIZE 256
 
 // Cross-thread early-dispatch candidate queue (power of two). A single wide
 // producer can publish more candidates than there are physical cores, so the
@@ -470,6 +478,24 @@ enum TaskLifecycleFlag : uint8_t {
 
 static_assert((DISPATCH_PROPAGATED & (READY_CLAIMED | COMPLETION_DONE | SUBTASK_DEFERRED)) == 0);
 
+using TaskReadyDomain = TaskDomain;
+
+static_assert(static_cast<uint8_t>(TaskReadyDomain::GLOBAL) == 0);
+static_assert(static_cast<uint8_t>(TaskReadyDomain::DIE0) == 1);
+static_assert(static_cast<uint8_t>(TaskReadyDomain::DIE1) == 2);
+
+inline constexpr uint8_t task_ring_id(TaskReadyDomain domain, int32_t scope_depth) {
+    int32_t depth = scope_depth < 0 ? 0 : scope_depth;
+    if (depth >= TASK_RING_SCOPE_DEPTH) depth = TASK_RING_SCOPE_DEPTH - 1;
+    return static_cast<uint8_t>(static_cast<uint8_t>(domain) * TASK_RING_SCOPE_DEPTH + depth);
+}
+
+inline constexpr TaskReadyDomain task_ring_domain(int32_t ring_id) {
+    return static_cast<TaskReadyDomain>(ring_id / TASK_RING_SCOPE_DEPTH);
+}
+
+inline constexpr int32_t task_ring_scope_depth(int32_t ring_id) { return ring_id % TASK_RING_SCOPE_DEPTH; }
+
 struct alignas(64) ChipTaskSlotState {
     // Fanout lock + list (accessed together under lock in on_task_complete)
     std::atomic<int32_t> fanout_lock;  // Per-task spinlock (0=unlocked, 1=locked)
@@ -559,6 +585,11 @@ struct alignas(64) ChipTaskSlotState {
     bool has_dispatch_propagated() const {
         return (lifecycle_flags.load(std::memory_order_acquire) & DISPATCH_PROPAGATED) != 0;
     }
+
+    // The physical task ring already encodes GLOBAL/DIE0/DIE1. Deriving the
+    // placement from the immutable ring id avoids publishing the same state a
+    // second time through the concurrently-mutated lifecycle_flags byte.
+    TaskReadyDomain ready_domain() const { return task_ring_domain(ring_id); }
 
     // The propagation owner holds fanout_lock through its fanout snapshot, so
     // wiring can classify late edges exactly once.

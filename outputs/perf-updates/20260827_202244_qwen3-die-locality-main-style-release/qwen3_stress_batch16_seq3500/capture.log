@@ -1,0 +1,24 @@
+[mono_ns=187307487091992][T0x77f12e5e4740][TIMING] clock_anchor: [CLOCK_ANCHOR] v=1 pid=678036 mono_ns=187307487091271 wall_ns=1787833689131235195
+
+=== Runtime: tensormap_and_ringbuffer  Level: 2 ===
+  TestQwen314BDecode::StressBatch16Seq3500 ...
+[mono_ns=187321794063172][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=2 name=chip.run.bind.args ts=187318761193088 dur=3032853098
+[mono_ns=187321963538621][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=2 name=chip.run.bind.prebuilt ts=187321794121930 dur=169402129
+[mono_ns=187321963577689][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=1 name=chip.run.bind ts=187318302623813 dur=3660952544
+[mono_ns=187321972503446][T0x77f12e5e4740][WARN] query_cpu_topo: [aicpu_topology_probe.cpp:125] aicpu_topology_probe: halGetDeviceInfoByBuff(CPU_TOPO) rc=65534 total=0
+[mono_ns=187321974780884][T0x77f12e5e4740][WARN] query_cpu_topo: [aicpu_topology_probe.cpp:137] aicpu_topology_probe: dsmi_get_device_info(CPU_TOPO) rc=65534 total=0
+[mono_ns=187321974885582][T0x77f12e5e4740][WARN] prepare_execution: [device_runner.cpp:343] AICPU CPU_TOPO unavailable; using json_fallback: soc=Ascend950PR_9579 occupy=0x3e stable_reachable=5 requested=0 effective=5 affinity=[1, 2, 3, 4, 5(orch)]
+[mono_ns=187322383144866][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=1 name=chip.run.runner_run ts=187322211240311 dur=171898756
+[mono_ns=187323359389370][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=1 name=chip.run.validate ts=187322383159458 dur=976214869
+[mono_ns=187323359443301][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=2 name=chip.run.runner_run.device_wall ts=0 dur=37273880 clk=dev
+[mono_ns=187323359446295][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.preamble ts=0 dur=564839 clk=dev
+[mono_ns=187323359448118][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.graph_build ts=270700 dur=36987034 clk=dev
+[mono_ns=187323359449600][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.config_validate ts=276919 dur=4023 clk=dev
+[mono_ns=187323359451223][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.arena_wire ts=280977 dur=20962 clk=dev
+[mono_ns=187323359454418][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.sm_reset ts=301979 dur=39891 clk=dev
+[mono_ns=187323359457202][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.post_orch ts=37257846 dur=10258 clk=dev
+[mono_ns=187323359459035][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.orch ts=345208 dur=11466260 clk=dev
+[mono_ns=187323359460307][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=3 name=chip.run.runner_run.device_wall.sched ts=567402 dur=36590854 clk=dev
+[mono_ns=187323359463631][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=1 name=chip.run.claim_release ts=187323359462259 dur=701
+[mono_ns=187323359466756][T0x77f12e5e4740][TIMING] emit_host_span: [STRACE] v=1 pid=678036 tid=678036 inv=1 hid=9efa9522aa4343cc depth=0 name=chip.run ts=187318302571374 dur=5056894461 run_id=0 dispatch_id=0 slot_id=0 generation=1 run_epoch=1
+  TestQwen314BDecode::StressBatch16Seq3500 PASSED

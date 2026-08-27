@@ -24,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <set>
 #include <vector>
@@ -85,7 +86,8 @@ protected:
     DeviceArena arena;
 
     void SetUp() override {
-        int32_t window_sizes[CHIP_MAX_RING_DEPTH] = {WINDOW_SIZE, WINDOW_SIZE, WINDOW_SIZE, WINDOW_SIZE};
+        int32_t window_sizes[CHIP_MAX_RING_DEPTH];
+        std::fill_n(window_sizes, CHIP_MAX_RING_DEPTH, WINDOW_SIZE);
         auto layout = ChipTensorMap::reserve_layout(arena, NUM_BUCKETS, POOL_SIZE, window_sizes);
         ASSERT_NE(arena.commit(), nullptr);
         ASSERT_TRUE(tmap.init_data_from_layout(layout, arena));
@@ -117,7 +119,8 @@ TEST_F(TensorMapTest, InitWithPowerOfTwoBucketsSucceeds) {
     // may compile out. Cover only the accepted (power-of-2) shape.
     ChipTensorMap ok{};
     DeviceArena ok_arena;
-    int32_t ws[CHIP_MAX_RING_DEPTH] = {8, 8, 8, 8};
+    int32_t ws[CHIP_MAX_RING_DEPTH];
+    std::fill_n(ws, CHIP_MAX_RING_DEPTH, 8);
     auto layout = ChipTensorMap::reserve_layout(ok_arena, 8, 64, ws);
     ASSERT_NE(ok_arena.commit(), nullptr);
     EXPECT_TRUE(ok.init_data_from_layout(layout, ok_arena));

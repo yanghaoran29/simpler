@@ -578,7 +578,7 @@ q_proj(__gm__ float *v1, __gm__ bfloat16_t *v2, __gm__ bfloat16_t *v3, int64_t v
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Read logical SPMD block identity from runtime dispatch payload
-    int32_t __pypto_spmd_block_idx = get_block_idx(args);
+    int32_t __pypto_spmd_block_idx = get_block_idx(args) + static_cast<int32_t>(args[4]);
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: q_proj_inline139__rv_v2

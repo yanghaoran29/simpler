@@ -136,6 +136,38 @@ TEST_F(TaskStateTest, MultiFaninPartialNotReady) {
     EXPECT_TRUE(sched.release_fanin_and_check_ready(slot));
 }
 
+TEST_F(TaskStateTest, FinalFaninReleasePreservesExplicitReadyDie) {
+    alignas(64) ChipTaskSlotState slot;
+    init_slot(slot, CHIP_TASK_PENDING, 2, 1);
+    slot.bind_ring(task_ring_id(TaskReadyDomain::DIE0, 0));
+
+    EXPECT_FALSE(sched.release_fanin_and_check_ready(slot, TaskReadyDomain::DIE0));
+    EXPECT_EQ(slot.ready_domain(), TaskReadyDomain::DIE0);
+    EXPECT_TRUE(sched.release_fanin_and_check_ready(slot, TaskReadyDomain::DIE1));
+    EXPECT_EQ(slot.ready_domain(), TaskReadyDomain::DIE0);
+
+    EXPECT_EQ(
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE0)][static_cast<int32_t>(ResourceShape::AIC)]
+            .pop(),
+        &slot
+    );
+    EXPECT_EQ(
+        sched.domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::DIE1)][static_cast<int32_t>(ResourceShape::AIC)]
+            .pop(),
+        nullptr
+    );
+}
+
+TEST_F(TaskStateTest, ReadyDomainPersistsAcrossSlotReuseBecauseRingIsInvariant) {
+    alignas(64) ChipTaskSlotState slot;
+    init_slot(slot, CHIP_TASK_PENDING, 1, 1);
+    slot.bind_ring(task_ring_id(TaskReadyDomain::DIE0, 0));
+
+    slot.reset_for_reuse();
+
+    EXPECT_EQ(slot.ready_domain(), TaskReadyDomain::DIE0);
+}
+
 // =============================================================================
 // Concurrent fanin: exactly one thread detects ready (via src API)
 // =============================================================================

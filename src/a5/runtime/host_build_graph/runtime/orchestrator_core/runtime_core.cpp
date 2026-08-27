@@ -137,6 +137,7 @@ static void graph_commit_impl(RuntimeContext *rt) {
 void rt_scope_begin(RuntimeContext *rt) {
     ScopeMode mode = rt->pending_scope_mode;
     rt->pending_scope_mode = ScopeMode::AUTO;
+    rt->pending_scope_domain = TaskDomain::GLOBAL;
     rt->orchestrator->begin_scope(mode);
 }
 

@@ -86,10 +86,20 @@ struct OrchestratorState {
     uint64_t scope_stack_capacity;    // Max nesting depth (CHIP_MAX_SCOPE_DEPTH)
     int32_t manual_begin_depth{CHIP_MAX_SCOPE_DEPTH};
 
+    // O(1) allocator/dep-pool backstop lookup. The pointer for a ring is set
+    // only when the first task on that ring enters the open scope stack. A
+    // child scope never replaces an ancestor's pointer, so ending the scope
+    // that owns a bit can clear it without searching or restoring a pointer.
+    ChipTaskSlotState *oldest_open_tasks_by_ring[CHIP_MAX_RING_DEPTH]{};
+    uint16_t scope_oldest_ring_masks[CHIP_MAX_SCOPE_DEPTH]{};
+
     // === SCHEDULER STATE ACCESS ===
     // Same runtime-arena scheduler object; Orch-side wiring mutates dep_pool
     // and publishes ready tasks through it before scheduler workers dispatch.
     SchedulerState *scheduler;
+    // Orchestrator-private monotonic latch: publish the scheduler's Die-routing
+    // gate once per run, not once per explicitly placed task.
+    bool die_routing_enabled{false};
 
     // Total core counts set once at executor init; used for submit-time deadlock detection.
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
@@ -121,17 +131,10 @@ struct OrchestratorState {
     int64_t bytes_allocated;
 #endif
 
-    /**
-     * Get current ring index from scope depth.
-     * Maps scope depth to ring_id: min(scope_depth, CHIP_MAX_RING_DEPTH - 1)
-     */
-    uint8_t current_ring_id() const {
-        int32_t depth = scope_stack_top;
-        if (depth < 0) depth = 0;
-        return depth < CHIP_MAX_RING_DEPTH ? static_cast<uint8_t>(depth) : CHIP_MAX_RING_DEPTH - 1;
-    }
-
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
+    // Scope statistics are bookkeeping-only and use the legacy GLOBAL ring
+    // for the current nesting depth. Task placement is always per-task.
+    uint8_t current_ring_id() const { return task_ring_id(TaskReadyDomain::GLOBAL, scope_stack_top); }
 
     // === Cold-path API (defined in orchestrator.cpp) ===
 
