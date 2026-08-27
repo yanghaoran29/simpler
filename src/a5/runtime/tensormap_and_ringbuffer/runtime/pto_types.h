@@ -71,6 +71,15 @@ enum class PTO2ScopeMode : uint8_t {
     MANUAL = 1,
 };
 
+// Explicit per-task placement contract. GLOBAL is deliberately the default:
+// the runtime never infers a Die from predecessors, completion order, or the
+// Scheduler that happens to release the final fanin.
+enum class PTO2TaskDomain : uint8_t {
+    GLOBAL = 0,
+    DIE0 = 1,
+    DIE1 = 2,
+};
+
 /**
  * Orthogonal dependency-edge semantics, stored per fanin edge.
  *
@@ -283,6 +292,14 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
     const char *error_msg{nullptr};
     PTO2LaunchSpec launch_spec;  // SPMD launch parameters (block_num, etc.)
 
+    // Per-task placement contract. GLOBAL keeps the task eligible for either
+    // Die; DIE0/DIE1 pin both its ready-queue routing and physical task ring to
+    // the selected Die. This is intentionally a task property rather than a
+    // scope property so one scope may contain independent work for both Dies.
+    PTO2TaskDomain task_domain_{PTO2TaskDomain::GLOBAL};
+    void set_task_domain(PTO2TaskDomain domain) { task_domain_ = domain; }
+    PTO2TaskDomain task_domain() const { return task_domain_; }
+
     // Early-dispatch hint (codegen-author set, off by default). When
     // true, the scheduler may stage this task on an idle core before its producer
     // finishes, gating execution on the DATA_MAIN_BASE doorbell — only safe when
@@ -327,6 +344,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         allow_early_resolve_ = false;
         predicate_ = CoreTaskPredicate{};
         task_timing_slot_ = TASK_TIMING_SLOT_NONE;
+        task_domain_ = PTO2TaskDomain::GLOBAL;
     }
 
     void reset() {

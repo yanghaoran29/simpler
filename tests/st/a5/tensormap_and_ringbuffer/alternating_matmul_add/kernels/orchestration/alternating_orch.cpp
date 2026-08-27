@@ -77,9 +77,15 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     int total_add = 0;
 
     int max_groups = num_matmul_groups > num_add_groups ? num_matmul_groups : num_add_groups;
+    int die0_group_count = (max_groups + 1) / 2;
 
     // Interleaved submit: matmul and add groups alternate
     for (int group_idx = 0; group_idx < max_groups; group_idx++) {
+        // Keep both independent tasks in a group on the same Die and split the
+        // groups evenly. Case1 has 500 groups, so each Die receives 250 AIC
+        // tasks and 250 AIV tasks.
+        PTO2TaskDomain task_domain =
+            group_idx < die0_group_count ? PTO2TaskDomain::DIE0 : PTO2TaskDomain::DIE1;
         if (group_idx < num_matmul_groups) {
             int start_task_idx = group_idx * matmul_batch;
             uint64_t offset = static_cast<uint64_t>(start_task_idx) * MATMUL_ELEMS;
@@ -96,6 +102,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_matmul.add_input(A_view);
             params_matmul.add_input(B_view);
             params_matmul.add_output(C_view);
+            params_matmul.set_task_domain(task_domain);
             rt_submit_aic_task(FUNC_MATMUL, params_matmul);
             total_matmul++;
         }
@@ -116,6 +123,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             params_add.add_input(X_view);
             params_add.add_input(Y_view);
             params_add.add_output(Z_view);
+            params_add.set_task_domain(task_domain);
             rt_submit_aiv_task(FUNC_ADD, params_add);
             total_add++;
         }

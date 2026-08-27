@@ -157,6 +157,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         uint64_t bn_this_batch = (cur_seq + block_size - 1) / block_size;
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
             CYCLE_COUNT_LAP(prof_scope_and_loop);
+            // Explicitly split independent batch/head chains across Dies while
+            // preserving automatic TensorMap dependency discovery.
+            uint64_t chain_idx = b_idx * q_loop + q_idx;
+            PTO2TaskDomain chain_domain =
+                (chain_idx & 1U) == 0 ? PTO2TaskDomain::DIE0 : PTO2TaskDomain::DIE1;
             PTO2_SCOPE() {
                 uint64_t cur_offset = b_idx * q_head_num + q_idx * q_tile;
 
@@ -203,6 +208,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 #endif
 
                     params_qk.reset();
+                    params_qk.set_task_domain(chain_domain);
                     params_qk.add_input(qi, key_cache, block_table);
                     params_qk.add_output(sij_buf_ci);
                     params_qk.add_scalar(n_blocks, b_idx * block_num + bn);
@@ -225,6 +231,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 #endif
 
                     params_sf.reset();
+                    params_sf.set_task_domain(chain_domain);
                     params_sf.add_input(sij_buf);
                     params_sf.add_output(pij_buf_ci, scalar_ci, scalar_ci);
                     params_sf.add_scalar(scale_value, n_blocks, valid_len_last);
@@ -240,6 +247,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // === Task 3: SplitK PV matmul (accumulated P @ V) ===
                     params_pv.reset();
+                    params_pv.set_task_domain(chain_domain);
                     params_pv.add_input(pij_buf, value_cache, block_table);
                     params_pv.add_output(tile2d_ci);
                     params_pv.add_scalar(n_blocks, b_idx * block_num + bn);
@@ -256,6 +264,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     uint64_t is_last = (bn + n_blocks >= bn_this_batch) ? 1 : 0;
 
                     params_up.reset();
+                    params_up.set_task_domain(chain_domain);
                     params_up.add_input(mi, li, oi_new);
                     params_up.add_inout(mi_update, li_update, oi, out_view);
                     params_up.add_scalar(is_first, is_last);

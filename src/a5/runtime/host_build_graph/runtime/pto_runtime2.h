@@ -158,6 +158,7 @@ struct PTO2Runtime {
     // Ops table (first field — used by orchestration .so via function pointers)
     const PTO2RuntimeOps *ops;
     PTO2ScopeMode pending_scope_mode;
+    PTO2TaskDomain pending_scope_domain;
 
     // Components
     PTO2SharedMemoryHandle *sm_handle;

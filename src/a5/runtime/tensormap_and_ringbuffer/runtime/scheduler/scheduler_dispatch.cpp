@@ -39,6 +39,7 @@
 
 namespace {
 inline constexpr int32_t PTO2_DEFERRED_RELEASE_CAP = 256;
+inline constexpr int32_t PTO2_DEFERRED_RELEASE_BATCH = 16;
 }
 
 // AICore materializes args[] from src_payload on the gated path using these
@@ -73,8 +74,17 @@ bool SchedulerContext::has_idle_in_other_threads(int32_t self_thread_idx, PTO2Re
     // Drain-mode cross-thread writes are serialized by handle_drain_mode's ack
     // barrier (all peers spin out of the dispatch path before any tracker
     // mutation), so this routine is never racing the drain worker.
+    PTO2ReadyQueue *continuation = continuation_ready_queues(self_thread_idx);
+    if (continuation != nullptr && continuation[static_cast<int32_t>(shape)].size() > 0) {
+        // Continuations are intentionally private to this Scheduler. Prefer its
+        // pending slot over waiting for a peer that cannot consume this queue.
+        return false;
+    }
+    PTO2ReadyQueue *local = local_ready_queues(self_thread_idx);
+    bool local_work_waiting = local != nullptr && local[static_cast<int32_t>(shape)].size() > 0;
     for (int32_t t = 0; t < active_sched_threads_; t++) {
         if (t == self_thread_idx) continue;
+        if (local_work_waiting && thread_ready_domain(t) != thread_ready_domain(self_thread_idx)) continue;
         if (core_trackers_[t].get_idle_core_offset_states(shape).has_value()) {
             return true;
         }
@@ -520,9 +530,15 @@ void SchedulerContext::run_staging_order(
 void SchedulerContext::dispatch_ready_tasks(
     int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
 ) {
+    // Cache the monotonic run-level gate once per dispatch pass. GLOBAL-only
+    // graphs then execute the original Main queue path without touching any
+    // Die-local queue cache lines.
+    die_routing_active_cache_[thread_idx] = sched_->is_die_routing_active();
     // Normal ready dispatch (is_ready): dispatch_shape places each block on pickup and
     // signals a stop by setting entered_drain when it enters a sync_start drain.
     bool entered_drain = false;
+    PTO2ReadyQueue *global_queues =
+        sched_->domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)];
 
     // Tier 0: ready sync_start cohorts take cores before any regular ready task
     // (sync_start > MIX > C/V within the normal source). Same order and machinery,
@@ -543,16 +559,66 @@ void SchedulerContext::dispatch_ready_tasks(
     if (entered_drain) return;
 
     // Tier 1: regular ready work.
+    if (!die_routing_active_cache_[thread_idx]) {
+        run_staging_order(
+            thread_idx, pmu_active,
+            [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+                dispatch_shape(
+                    thread_idx, global_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
+                );
+                return entered_drain;
+            },
+            [&] {
+                return global_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
+            }
+        );
+        return;
+    }
+
+    // Same-Die successors released by this Scheduler stay on its private
+    // continuation queue. Drain this tier before returning to shared roots so
+    // QK->SF->PV->UP chains retain Scheduler/cache locality after first pickup.
+    if (sched_->continuation_routing_active[thread_idx]) {
+        PTO2ReadyQueue *continuation_queues = continuation_ready_queues(thread_idx);
+        run_staging_order(
+            thread_idx, pmu_active,
+            [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+                dispatch_shape(
+                    thread_idx, continuation_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
+                );
+                return entered_drain;
+            },
+            [&] {
+                return continuation_queues[static_cast<int32_t>(PTO2ResourceShape::MIX)].size() > 0;
+            }
+        );
+        if (entered_drain) return;
+        if (!has_continuation_work(thread_idx)) {
+            sched_->continuation_routing_active[thread_idx] = false;
+        }
+    }
+
+    PTO2ReadyQueue *local_queues = local_ready_queues(thread_idx);
     run_staging_order(
         thread_idx, pmu_active,
         [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
-            dispatch_shape(
-                thread_idx, sched_->ready_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
-            );
+            int32_t shape_idx = static_cast<int32_t>(shape);
+            bool has_local = local_queues != nullptr && local_queues[shape_idx].size() > 0;
+            bool has_global = global_queues[shape_idx].size() > 0;
+            bool global_first = has_local && has_global && regular_queue_global_first_[thread_idx];
+            PTO2ReadyQueue *first = global_first || !has_local ? global_queues : local_queues;
+            PTO2ReadyQueue *second = first == global_queues ? local_queues : global_queues;
+            dispatch_shape(thread_idx, first, shape, phase, tracker, entered_drain, made_progress, try_pushed);
+            if (!entered_drain && second != nullptr) {
+                dispatch_shape(thread_idx, second, shape, phase, tracker, entered_drain, made_progress, try_pushed);
+            }
+            if (has_local && has_global) {
+                regular_queue_global_first_[thread_idx] = !regular_queue_global_first_[thread_idx];
+            }
             return entered_drain;
         },
         [&] {
-            return has_residual_mix();
+            return has_residual_mix(thread_idx);
         }
     );
 }
@@ -771,7 +837,12 @@ int32_t SchedulerContext::try_early_dispatch(
     //     to delay only when every normal queue is drained.
     if (pmu_active || !tracker.has_any_free_slot()) return 0;
     for (int s = 0; s < PTO2_NUM_RESOURCE_SHAPES; s++) {
-        if (sched_->ready_sync_queues[s].size() > 0 || sched_->ready_queues[s].size() > 0) return 0;
+        PTO2ReadyQueue *local = local_ready_queues(thread_idx);
+        if (sched_->ready_sync_queues[s].size() > 0 ||
+            sched_->domain_ready_queues[static_cast<int32_t>(TaskReadyDomain::GLOBAL)][s].size() > 0 ||
+            (local != nullptr && local[s].size() > 0)) {
+            return 0;
+        }
     }
 
     int32_t total_staged = 0;
@@ -916,7 +987,10 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             // and silently corrupt the snapshot.
             constexpr size_t kMax = static_cast<size_t>(std::numeric_limits<int16_t>::max());
             for (int s = 0; s < CHIP_SWIMLANE_NUM_QUEUE_SHAPES; s++) {
-                const size_t qsize = sched_->ready_queues[s].size() + sched_->ready_sync_queues[s].size();
+                size_t qsize = sched_->ready_sync_queues[s].size();
+                for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+                    qsize += sched_->domain_ready_queues[domain][s].size();
+                }
                 iter_shared_snapshot[s] = static_cast<int16_t>(std::min(qsize, kMax));
             }
             iter_shared_sampled = true;
@@ -1046,11 +1120,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
                 rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count,
-                PTO2_DEFERRED_RELEASE_CAP
-#if SIMPLER_SCHED_PROFILING
-                ,
-                thread_idx
-#endif
+                PTO2_DEFERRED_RELEASE_CAP, thread_idx, thread_ready_domain(thread_idx)
             );
             if (poll_result.error_code != PTO2_ERROR_NONE) {
                 int32_t expected = PTO2_ERROR_NONE;
@@ -1147,9 +1217,10 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 #endif
 #if SIMPLER_SCHED_PROFILING
                 [[maybe_unused]] uint32_t consumers_resolved =
-                    sched_->on_task_complete(dummy_slot, thread_idx).fanout_edges;
+                    sched_->on_task_complete(dummy_slot, thread_idx, thread_ready_domain(thread_idx)).fanout_edges;
 #else
-                [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(dummy_slot);
+                [[maybe_unused]] uint32_t consumers_resolved =
+                    sched_->on_task_complete(dummy_slot, thread_idx, thread_ready_domain(thread_idx));
 #endif
 #if SIMPLER_DFX
                 if (dummy_resolve_t0 != 0) {
@@ -1179,15 +1250,10 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 // reach CONSUMED once all consumers drain.
                 deferred_release_slot_states[deferred_release_count++] = &dummy_slot;
                 if (deferred_release_count >= PTO2_DEFERRED_RELEASE_CAP) {
-                    while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                        (void)sched_->on_task_release(
-                            *deferred_release_slot_states[--deferred_release_count], thread_idx
-                        );
-#else
-                        sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-                    }
+                    sched_->release_deferred_batch(
+                        deferred_release_slot_states, deferred_release_count, PTO2_DEFERRED_RELEASE_BATCH,
+                        thread_idx
+                    );
                 }
                 int32_t prev = completed_tasks_.fetch_add(1, std::memory_order_relaxed);
                 last_progress_count = prev + 1;
@@ -1281,10 +1347,12 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         (void)try_pushed;
 #endif
 
-        // One servicer is sufficient because request bits stay latched until
-        // acknowledged. Drain mode can delay thread 0, but its completion
-        // depends on worker-core release rather than orchestrator reclamation.
-        if (thread_idx == 0 && made_progress && sched_->drain_publication_requests()) {
+        // Each scheduler services only its fixed-Die publication lane. Thread 0
+        // additionally owns the GLOBAL lane because those tasks are not tied to
+        // either Die.
+        TaskReadyDomain worker_domain = thread_ready_domain(thread_idx);
+        bool include_global_rings = thread_idx == 0;
+        if (made_progress && sched_->drain_publication_requests(worker_domain, include_global_rings)) {
             last_progress_ts = get_sys_cnt_aicpu();
         }
 
@@ -1297,14 +1365,16 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES && deferred_release_count > 0) ?
                     get_sys_cnt_aicpu() :
                     0;
-            uint32_t released_count = static_cast<uint32_t>(deferred_release_count);
+            uint32_t released_count = static_cast<uint32_t>(
+                deferred_release_count < PTO2_DEFERRED_RELEASE_BATCH ? deferred_release_count :
+                                                                       PTO2_DEFERRED_RELEASE_BATCH
+            );
 #endif
-            while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
+            if (deferred_release_count > 0) {
+                sched_->release_deferred_batch(
+                    deferred_release_slot_states, deferred_release_count, PTO2_DEFERRED_RELEASE_BATCH,
+                    thread_idx
+                );
             }
 #if SIMPLER_DFX
             if (release_t0 != 0) {
@@ -1319,8 +1389,9 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             // still set means no retry has acquired advance_lock and cleared
             // the request yet. If the bit clears and the watermark remains
             // pinned, the stall is outside this deferred-advance path.
-            bool advanced_reclaim = thread_idx == 0 && sched_->drain_publication_requests();
-            advanced_reclaim = sched_->drain_pending_ring_advances() || advanced_reclaim;
+            bool advanced_reclaim = sched_->drain_publication_requests(worker_domain, include_global_rings);
+            advanced_reclaim =
+                sched_->drain_pending_ring_advances(worker_domain, include_global_rings) || advanced_reclaim;
             if (advanced_reclaim) {
                 idle_iterations = 0;
                 last_progress_ts = get_sys_cnt_aicpu();
@@ -1391,11 +1462,9 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     // here so every consumed producer slot completes its on_task_release
     // regardless of which loop-exit path fired.
     while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-        (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-        sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
+        sched_->release_deferred_batch(
+            deferred_release_slot_states, deferred_release_count, PTO2_DEFERRED_RELEASE_BATCH, thread_idx
+        );
     }
 
 #if SIMPLER_DFX

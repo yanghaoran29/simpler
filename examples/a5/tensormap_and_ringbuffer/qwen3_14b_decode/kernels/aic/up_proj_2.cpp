@@ -575,7 +575,7 @@ static __aicore__ void up_proj_2(
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Read logical SPMD block identity from runtime dispatch payload
-    int32_t __pypto_spmd_block_idx = get_block_idx(args);
+    int32_t __pypto_spmd_block_idx = get_block_idx(args) + static_cast<int32_t>(args[5]);
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: mlp_norm_in_inline71__rv_v14

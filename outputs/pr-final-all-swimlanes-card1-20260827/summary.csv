@@ -1,0 +1,9 @@
+case,main_device_us,current_device_us,device_change_pct,main_baseline,current_samples
+alternating_matmul_add_Case1,1441.850,1314.125,-8.858,3b578e30,100
+benchmark_bgemm_Case0,1458.300,1398.427,-4.106,3b578e30,100
+paged_attention_unroll_Case1,1558.700,1540.087,-1.194,3b578e30,100
+paged_attention_unroll_Case2,901.100,881.411,-2.185,3b578e30,100
+paged_attention_unroll_manual_scope_Case1,1629.500,1496.358,-8.171,3b578e30,100
+paged_attention_unroll_manual_scope_Case2,925.550,876.091,-5.344,3b578e30,100
+batch_paged_attention_Case1,7434.600,5444.691,-26.766,3b578e30,100
+qwen3_14b_decode_StressBatch16Seq3500,36083.248,35081.800,-2.775,3b578e30,3_of_5_middle

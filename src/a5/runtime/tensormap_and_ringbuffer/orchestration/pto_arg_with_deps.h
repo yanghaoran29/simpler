@@ -57,7 +57,9 @@ public:
     using CoreTaskArgs::allow_early_resolve;  // early-dispatch hint (getter)
     using CoreTaskArgs::copy_scalars_from;
     using CoreTaskArgs::set_allow_early_resolve;  // early-dispatch hint (setter)
+    using CoreTaskArgs::set_task_domain;          // per-task Die placement (setter)
     using CoreTaskArgs::set_task_timing_slot;     // selective task-timing slot (setter)
+    using CoreTaskArgs::task_domain;              // per-task Die placement (getter)
     using CoreTaskArgs::task_timing_slot;         // selective task-timing slot (getter)
 
     // Error / status — forward to Arg

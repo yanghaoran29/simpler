@@ -118,6 +118,7 @@ static void graph_commit_impl(PTO2Runtime *rt) {
 void rt_scope_begin(PTO2Runtime *rt) {
     PTO2ScopeMode mode = rt->pending_scope_mode;
     rt->pending_scope_mode = PTO2ScopeMode::AUTO;
+    rt->pending_scope_domain = PTO2TaskDomain::GLOBAL;
     rt->orchestrator.begin_scope(mode);
 }
 

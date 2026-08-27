@@ -126,6 +126,7 @@ typedef struct PTO2RuntimeOps {
 struct PTO2Runtime {
     const PTO2RuntimeOps *ops;
     PTO2ScopeMode pending_scope_mode;
+    PTO2TaskDomain pending_scope_domain;
 };
 
 class GraphOwnedArgs {
@@ -511,12 +512,15 @@ static inline void rt_graph_commit() {
     if (!rt->ops->is_fatal(rt) && rt->ops->graph_commit != nullptr) rt->ops->graph_commit(rt);
 }
 
-static inline void rt_scope_begin(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) {
+static inline void rt_scope_begin(
+    PTO2ScopeMode mode = PTO2ScopeMode::AUTO, PTO2TaskDomain domain = PTO2TaskDomain::GLOBAL
+) {
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return;
     }
     rt->pending_scope_mode = mode;
+    rt->pending_scope_domain = domain;
     rt->ops->scope_begin(rt);
 }
 
@@ -628,11 +632,13 @@ static inline void set_tensor_data(const ChipTensor &tensor, uint32_t ndims, con
 class PTO2ScopeGuard {
 public:
     explicit PTO2ScopeGuard(
-        PTO2ScopeMode mode = PTO2ScopeMode::AUTO, const char *file = __builtin_FILE(), int line = __builtin_LINE()
+        PTO2ScopeMode mode = PTO2ScopeMode::AUTO, PTO2TaskDomain domain = PTO2TaskDomain::GLOBAL,
+        const char *file = __builtin_FILE(), int line = __builtin_LINE()
     ) :
         rt_(current_runtime()) {
         if (!rt_->ops->is_fatal(rt_)) {
             rt_->pending_scope_mode = mode;
+            rt_->pending_scope_domain = domain;
             if (rt_->ops->scope_set_site) rt_->ops->scope_set_site(file, line);
             rt_->ops->scope_begin(rt_);
         }

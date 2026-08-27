@@ -165,13 +165,13 @@ struct alignas(PTO2_ALIGN_SIZE) PTO2SharedMemoryHeader {
     std::atomic<int32_t> sched_stall_core;         // S1: stuck core id (-1 if N/A)
 };
 
-static_assert(sizeof(PTO2SharedMemoryHeader) == 896, "PTO2SharedMemoryHeader layout drift");
-static_assert(offsetof(PTO2SharedMemoryHeader, total_size) == 776, "PTO2SharedMemoryHeader total_size layout drift");
+static_assert(sizeof(PTO2SharedMemoryHeader) == 2432, "PTO2SharedMemoryHeader layout drift");
+static_assert(offsetof(PTO2SharedMemoryHeader, total_size) == 2312, "PTO2SharedMemoryHeader total_size layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryHeader, orch_error_code) == 784, "PTO2SharedMemoryHeader orch_error_code layout drift"
+    offsetof(PTO2SharedMemoryHeader, orch_error_code) == 2320, "PTO2SharedMemoryHeader orch_error_code layout drift"
 );
 static_assert(
-    offsetof(PTO2SharedMemoryHeader, sched_stall_task_id) == 832,
+    offsetof(PTO2SharedMemoryHeader, sched_stall_task_id) == 2368,
     "PTO2SharedMemoryHeader sched_stall_task_id layout drift"
 );
 

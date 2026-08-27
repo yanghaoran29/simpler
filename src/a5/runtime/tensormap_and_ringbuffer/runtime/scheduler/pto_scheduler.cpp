@@ -99,9 +99,15 @@ void PTO2SchedulerState::print_queues() {
     LOG_DEBUG("=== Ready Queues ===");
 
     const char *shape_names[] = {"AIC", "AIV", "MIX"};
+    const char *domain_names[] = {"global", "die0", "die1"};
 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        LOG_DEBUG("  %s: count=%" PRIu64, shape_names[i], sched->ready_queues[i].size());
+        for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+            LOG_DEBUG(
+                "  %s %s: count=%" PRIu64, shape_names[i], domain_names[domain],
+                sched->domain_ready_queues[domain][i].size()
+            );
+        }
     }
     LOG_DEBUG("  DUMMY: count=%" PRIu64, sched->dummy_ready_queue.size());
 

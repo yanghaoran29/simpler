@@ -425,7 +425,8 @@ struct CompletionStats {
  * capacities used at layout time (init_data_from_layout reuses them).
  */
 struct PTO2SchedulerLayout {
-    size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_domain_ready_queue_slots[TASK_RING_DOMAIN_COUNT][PTO2_NUM_RESOURCE_SHAPES];
+    size_t off_continuation_ready_queue_slots[PLATFORM_MAX_AICPU_THREADS - 1][PTO2_NUM_RESOURCE_SHAPES];
     size_t off_ready_sync_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
     size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
@@ -445,6 +446,14 @@ struct PTO2SchedulerLayout {
 struct PTO2SchedulerState {
     // Shared memory access
     PTO2SharedMemoryHeader *sm_header;
+
+    // Monotonic per-run gate. GLOBAL-only graphs use the original single-queue
+    // dispatch path and never probe Die-local queues. The first explicitly
+    // placed task enables the general three-queue path for the rest of the run.
+    alignas(64) std::atomic<bool> die_routing_active{false};
+
+    void enable_die_routing() { die_routing_active.store(true, std::memory_order_release); }
+    bool is_die_routing_active() const { return die_routing_active.load(std::memory_order_acquire); }
 
     // Per-ring state
     struct alignas(64) RingSchedState {
@@ -523,12 +532,28 @@ struct PTO2SchedulerState {
         }
     } ring_sched_states[PTO2_MAX_RING_DEPTH];
 
-    alignas(64) std::atomic<uint32_t> advance_pending_mask;
-    alignas(64) std::atomic<uint32_t> publication_request_mask;
-    std::atomic<uint32_t> publication_ack_mask;
+    struct alignas(64) RingRequestMask {
+        std::atomic<uint32_t> bits;
+    };
 
-    // Ready queues remain global (scheduling is ring-agnostic)
-    PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
+    // Each domain lane owns an independent reclaim-control cache line. Fixed-Die
+    // rings therefore never invalidate the other Die's pending/publication state.
+    RingRequestMask advance_pending_masks[TASK_RING_DOMAIN_COUNT];
+    RingRequestMask publication_request_masks[TASK_RING_DOMAIN_COUNT];
+    RingRequestMask publication_ack_masks[TASK_RING_DOMAIN_COUNT];
+
+    // Ordinary ready queues indexed directly by TaskReadyDomain, then shape:
+    // GLOBAL=0, DIE0=1, DIE1=2. This keeps publication branch-free while the
+    // consumers can still prefer their own Die before the GLOBAL fallback.
+    PTO2ReadyQueue domain_ready_queues[TASK_RING_DOMAIN_COUNT][PTO2_NUM_RESOURCE_SHAPES];
+
+    // Scheduler-private continuation queues. Roots still enter the domain
+    // queues above; only completion-side, same-Die successors are eligible.
+    // Each row has one producer/consumer Scheduler in the normal path, while
+    // retaining the bounded MPMC implementation makes overflow/reuse behavior
+    // identical to the existing queues.
+    PTO2ReadyQueue continuation_ready_queues[PLATFORM_MAX_AICPU_THREADS - 1][PTO2_NUM_RESOURCE_SHAPES];
+    bool continuation_routing_active[PLATFORM_MAX_AICPU_THREADS - 1]{};
 
     // Ready sync_start queues, one per shape. A ready sync_start cohort parks here
     // instead of ready_queues[] so the dispatch loop can drain it as a strict Tier-0
@@ -557,7 +582,7 @@ struct PTO2SchedulerState {
     // dummy_ready_queue and are retired inline; a ready sync_start cohort goes to
     // the per-shape ready_sync_queues[] (drained as Tier-0); everything else to
     // ready_queues[].
-    void push_ready_routed(PTO2TaskSlotState *slot_state) {
+    void push_ready_routed(PTO2TaskSlotState *slot_state, TaskReadyDomain domain) {
         PTO2ResourceShape shape = slot_state->active_mask.to_shape();
         if (shape == PTO2ResourceShape::DUMMY ||
             (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
@@ -565,11 +590,40 @@ struct PTO2SchedulerState {
         } else if (slot_state->task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
         } else {
-            ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+            domain_ready_queues[static_cast<int32_t>(domain)][static_cast<int32_t>(shape)].push(slot_state);
         }
     }
 
+    // Completion-side callers recover placement from the immutable physical
+    // ring id. The orchestrator already knows the Arg domain and uses the
+    // overload above to avoid even this small derivation after publication.
+    void push_ready_routed(PTO2TaskSlotState *slot_state) {
+        push_ready_routed(slot_state, slot_state->ready_domain());
+    }
+
     static uint32_t ring_advance_pending_bit(int32_t ring_id) { return ring_mask_bit(ring_id); }
+
+    static int32_t request_mask_index(TaskReadyDomain domain) { return static_cast<int32_t>(domain); }
+
+    static int32_t request_mask_index_for_ring(int32_t ring_id) {
+        return request_mask_index(task_ring_domain(ring_id));
+    }
+
+    std::atomic<uint32_t> *publication_request_mask_for_ring(int32_t ring_id) {
+        return &publication_request_masks[request_mask_index_for_ring(ring_id)].bits;
+    }
+
+    std::atomic<uint32_t> *publication_ack_mask_for_ring(int32_t ring_id) {
+        return &publication_ack_masks[request_mask_index_for_ring(ring_id)].bits;
+    }
+
+    const std::atomic<uint32_t> *publication_request_mask_for_ring(int32_t ring_id) const {
+        return &publication_request_masks[request_mask_index_for_ring(ring_id)].bits;
+    }
+
+    const std::atomic<uint32_t> *publication_ack_mask_for_ring(int32_t ring_id) const {
+        return &publication_ack_masks[request_mask_index_for_ring(ring_id)].bits;
+    }
 
     void set_publication_batching_enabled(bool enabled) {
         for (auto &ring_sched : ring_sched_states) {
@@ -579,15 +633,20 @@ struct PTO2SchedulerState {
 
     // Failed consumed-head advances remain deferred until a no-progress drain.
     void mark_ring_advance_pending(int32_t ring_id) {
-        advance_pending_mask.fetch_or(ring_advance_pending_bit(ring_id), std::memory_order_release);
+        advance_pending_masks[request_mask_index_for_ring(ring_id)].bits.fetch_or(
+            ring_advance_pending_bit(ring_id), std::memory_order_release
+        );
     }
 
-    bool drain_pending_ring_advances() {
-        uint32_t pending = advance_pending_mask.load(std::memory_order_acquire);
+    bool drain_pending_ring_advances_for_domain(TaskReadyDomain domain) {
+        int32_t mask_index = request_mask_index(domain);
+        auto &pending_mask = advance_pending_masks[mask_index].bits;
+        uint32_t pending = pending_mask.load(std::memory_order_acquire);
         if (pending == 0) return false;
 
         bool advanced = false;
         for (int32_t ring_id = 0; ring_id < PTO2_MAX_RING_DEPTH; ring_id++) {
+            if (task_ring_domain(ring_id) != domain) continue;
             uint32_t bit = ring_advance_pending_bit(ring_id);
             if ((pending & bit) == 0) continue;
 
@@ -599,7 +658,7 @@ struct PTO2SchedulerState {
                 continue;
             }
 
-            advance_pending_mask.fetch_and(~bit, std::memory_order_acq_rel);
+            pending_mask.fetch_and(~bit, std::memory_order_acq_rel);
             int32_t before = ring_sched.last_task_alive;
             ring_sched.advance_ring_pointers(true);
             advanced = advanced || ring_sched.last_task_alive != before;
@@ -608,12 +667,68 @@ struct PTO2SchedulerState {
         return advanced;
     }
 
-    bool drain_publication_requests() {
-        uint32_t requests = publication_request_mask.load(std::memory_order_acquire);
+    bool drain_pending_ring_advances(TaskReadyDomain worker_domain, bool include_global) {
+        bool advanced = drain_pending_ring_advances_for_domain(worker_domain);
+        if (include_global && worker_domain != TaskReadyDomain::GLOBAL) {
+            advanced = drain_pending_ring_advances_for_domain(TaskReadyDomain::GLOBAL) || advanced;
+        }
+        return advanced;
+    }
+
+    // Commit ring advances collected by one scheduler release micro-batch. A
+    // consumed slot only contributes a bit to a thread-local mask while the
+    // batch is being processed. At the commit point each touched ring is
+    // scanned at most once. A failed ring lock is published once through that
+    // ring domain's pending mask.
+    bool flush_local_ring_advances(
+        uint32_t local_masks[TASK_RING_DOMAIN_COUNT], uint64_t *atomic_count = nullptr
+    ) {
+        bool advanced = false;
+        for (int32_t domain_index = 0; domain_index < TASK_RING_DOMAIN_COUNT; domain_index++) {
+            uint32_t bits = local_masks[domain_index];
+            if (bits == 0) continue;
+
+            auto &pending_mask = advance_pending_masks[domain_index].bits;
+            uint32_t retry_bits = 0;
+            for (int32_t ring_id = 0; ring_id < PTO2_MAX_RING_DEPTH; ring_id++) {
+                uint32_t bit = ring_advance_pending_bit(ring_id);
+                if ((bits & bit) == 0) continue;
+
+                auto &ring_sched = ring_sched_states[ring_id];
+                int32_t expected_lock = 0;
+                if (!ring_sched.advance_lock.compare_exchange_strong(
+                        expected_lock, 1, std::memory_order_acquire, std::memory_order_relaxed
+                    )) {
+                    if (atomic_count != nullptr) *atomic_count += 1;
+                    retry_bits |= bit;
+                    continue;
+                }
+                if (atomic_count != nullptr) *atomic_count += 1;
+
+                int32_t before = ring_sched.last_task_alive;
+                ring_sched.advance_ring_pointers();
+                advanced = advanced || ring_sched.last_task_alive != before;
+                ring_sched.advance_lock.store(0, std::memory_order_release);
+                if (atomic_count != nullptr) *atomic_count += 1;
+            }
+            if (retry_bits != 0) {
+                pending_mask.fetch_or(retry_bits, std::memory_order_release);
+                if (atomic_count != nullptr) *atomic_count += 1;
+            }
+        }
+        return advanced;
+    }
+
+    bool drain_publication_requests_for_domain(TaskReadyDomain domain) {
+        int32_t mask_index = request_mask_index(domain);
+        auto &request_mask = publication_request_masks[mask_index].bits;
+        auto &ack_mask = publication_ack_masks[mask_index].bits;
+        uint32_t requests = request_mask.load(std::memory_order_acquire);
         if (requests == 0) return false;
 
         bool advanced = false;
         for (int32_t ring_id = 0; ring_id < PTO2_MAX_RING_DEPTH; ring_id++) {
+            if (task_ring_domain(ring_id) != domain) continue;
             uint32_t bit = ring_advance_pending_bit(ring_id);
             if ((requests & bit) == 0) continue;
 
@@ -625,14 +740,22 @@ struct PTO2SchedulerState {
                 continue;
             }
 
-            publication_request_mask.fetch_and(~bit, std::memory_order_acq_rel);
+            request_mask.fetch_and(~bit, std::memory_order_acq_rel);
             int32_t before_alive = ring_sched.last_task_alive;
             int32_t before_published = ring_sched.last_published_to_sm;
             ring_sched.advance_ring_pointers(true);
-            publication_ack_mask.fetch_or(bit, std::memory_order_release);
+            ack_mask.fetch_or(bit, std::memory_order_release);
             advanced = advanced || ring_sched.last_task_alive != before_alive ||
                        ring_sched.last_published_to_sm != before_published;
             ring_sched.advance_lock.store(0, std::memory_order_release);
+        }
+        return advanced;
+    }
+
+    bool drain_publication_requests(TaskReadyDomain worker_domain, bool include_global) {
+        bool advanced = drain_publication_requests_for_domain(worker_domain);
+        if (include_global && worker_domain != TaskReadyDomain::GLOBAL) {
+            advanced = drain_publication_requests_for_domain(TaskReadyDomain::GLOBAL) || advanced;
         }
         return advanced;
     }
@@ -650,7 +773,10 @@ struct PTO2SchedulerState {
         }
     }
 
-    void check_and_handle_consumed(PTO2TaskSlotState &slot_state) {
+    void check_and_handle_consumed(
+        PTO2TaskSlotState &slot_state, bool defer_ring_advance = false,
+        uint32_t *local_ring_masks = nullptr
+    ) {
         // Read fanout_refcount/fanout_count and flip COMPLETED->CONSUMED under
         // fanout_lock. The orchestrator claims producers (fanout_count++) under the
         // same lock, so the consume decision is serialized against a concurrent
@@ -675,6 +801,14 @@ struct PTO2SchedulerState {
 #endif
 
         int32_t ring_id = slot_state.ring_id;
+        if (local_ring_masks != nullptr) {
+            local_ring_masks[request_mask_index_for_ring(ring_id)] |= ring_advance_pending_bit(ring_id);
+            return;
+        }
+        if (defer_ring_advance) {
+            mark_ring_advance_pending(ring_id);
+            return;
+        }
         // Runs outside fanout_lock: reset_for_reuse stores fanout_lock=0.
         int32_t expected_lock = 0;
         if (ring_sched_states[ring_id].advance_lock.compare_exchange_strong(
@@ -688,7 +822,10 @@ struct PTO2SchedulerState {
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
-    void check_and_handle_consumed(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
+    void check_and_handle_consumed(
+        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, bool defer_ring_advance = false,
+        uint32_t *local_ring_masks = nullptr
+    ) {
         // See the non-profiling overload for why the read + COMPLETED->CONSUMED
         // flip is serialized against the orchestrator's claim under fanout_lock.
         bool became_consumed = false;
@@ -713,6 +850,15 @@ struct PTO2SchedulerState {
 #endif
 
         int32_t ring_id = slot_state.ring_id;
+        if (local_ring_masks != nullptr) {
+            local_ring_masks[request_mask_index_for_ring(ring_id)] |= ring_advance_pending_bit(ring_id);
+            return;
+        }
+        if (defer_ring_advance) {
+            mark_ring_advance_pending(ring_id);
+            atomic_count += 1;  // pending mark
+            return;
+        }
         // Runs outside fanout_lock: reset_for_reuse stores fanout_lock=0.
         int32_t expected_lock = 0;
         if (ring_sched_states[ring_id].advance_lock.compare_exchange_strong(
@@ -728,9 +874,16 @@ struct PTO2SchedulerState {
     }
 #endif
 
-    void release_producer(PTO2TaskSlotState &slot_state) {
+    void release_producer(PTO2TaskSlotState &slot_state, uint32_t *local_ring_masks = nullptr) {
         slot_state.fanout_refcount.fetch_add(1, std::memory_order_acq_rel);
-        check_and_handle_consumed(slot_state);
+        check_and_handle_consumed(slot_state, false, local_ring_masks);
+    }
+
+    void release_producer_delta(
+        PTO2TaskSlotState &slot_state, uint32_t delta, uint32_t *local_ring_masks
+    ) {
+        slot_state.fanout_refcount.fetch_add(delta, std::memory_order_acq_rel);
+        check_and_handle_consumed(slot_state, false, local_ring_masks);
     }
 
     // Scope-end release: sets bit31 (PTO2_FANOUT_SCOPE_BIT) instead of bumping a
@@ -740,20 +893,32 @@ struct PTO2SchedulerState {
     // consumed".
     void release_producer_scope(PTO2TaskSlotState &slot_state) {
         slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
-        check_and_handle_consumed(slot_state);
+        // Scope-end runs on the orchestrator. It only marks the owning domain's
+        // ring pending; a scheduler assigned to that domain advances the ring.
+        check_and_handle_consumed(slot_state, true);
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
-    void release_producer(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
+    void release_producer(
+        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint32_t *local_ring_masks = nullptr
+    ) {
         slot_state.fanout_refcount.fetch_add(1, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
-        check_and_handle_consumed(slot_state, atomic_count);
+        check_and_handle_consumed(slot_state, atomic_count, false, local_ring_masks);
+    }
+
+    void release_producer_delta(
+        PTO2TaskSlotState &slot_state, uint32_t delta, uint64_t &atomic_count, uint32_t *local_ring_masks
+    ) {
+        slot_state.fanout_refcount.fetch_add(delta, std::memory_order_acq_rel);
+        atomic_count += 1;  // fanout_refcount.fetch_add
+        check_and_handle_consumed(slot_state, atomic_count, false, local_ring_masks);
     }
 
     void release_producer_scope(PTO2TaskSlotState &slot_state, uint64_t &atomic_count) {
         slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         atomic_count += 1;  // fanout_refcount.fetch_add
-        check_and_handle_consumed(slot_state, atomic_count);
+        check_and_handle_consumed(slot_state, atomic_count, true);
     }
 #endif
 
@@ -1017,7 +1182,10 @@ struct PTO2SchedulerState {
         return slot_state.next_block_idx.load(std::memory_order_seq_cst) >= slot_state.logical_block_num;
     }
 
-    bool route_ready_once(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+    bool route_ready_once(
+        PTO2TaskSlotState &slot_state, TaskReadyDomain producer_domain = TaskReadyDomain::GLOBAL,
+        int32_t continuation_thread_idx = -1, EarlyDispatchReleaseSink *sink = nullptr
+    ) {
         if (!try_claim_ready_once(slot_state)) return false;
 
         // Early-dispatch: pre-staged tasks are released by doorbell
@@ -1037,7 +1205,16 @@ struct PTO2SchedulerState {
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state);
         } else {
-            ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
+            TaskReadyDomain domain = slot_state.ready_domain();
+            bool continuation_eligible =
+                continuation_thread_idx >= 0 && continuation_thread_idx < PLATFORM_MAX_AICPU_THREADS - 1 &&
+                producer_domain != TaskReadyDomain::GLOBAL && producer_domain == domain;
+            if (continuation_eligible &&
+                continuation_ready_queues[continuation_thread_idx][static_cast<int32_t>(shape)].push(&slot_state)) {
+                continuation_routing_active[continuation_thread_idx] = true;
+            } else {
+                domain_ready_queues[static_cast<int32_t>(domain)][static_cast<int32_t>(shape)].push(&slot_state);
+            }
         }
         return true;
     }
@@ -1045,6 +1222,7 @@ struct PTO2SchedulerState {
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool route_ready_once(
         PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
+        TaskReadyDomain producer_domain = TaskReadyDomain::GLOBAL, int32_t continuation_thread_idx = -1,
         EarlyDispatchReleaseSink *sink = nullptr
     ) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
@@ -1074,20 +1252,40 @@ struct PTO2SchedulerState {
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
         } else {
-            ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+            TaskReadyDomain domain = slot_state.ready_domain();
+            bool continuation_eligible =
+                continuation_thread_idx >= 0 && continuation_thread_idx < PLATFORM_MAX_AICPU_THREADS - 1 &&
+                producer_domain != TaskReadyDomain::GLOBAL && producer_domain == domain;
+            if (continuation_eligible &&
+                continuation_ready_queues[continuation_thread_idx][static_cast<int32_t>(shape)].push(
+                    &slot_state, atomic_count, push_wait
+                )) {
+                continuation_routing_active[continuation_thread_idx] = true;
+            } else {
+                domain_ready_queues[static_cast<int32_t>(domain)][static_cast<int32_t>(shape)].push(
+                    &slot_state, atomic_count, push_wait
+                );
+            }
         }
         return true;
     }
 #endif
 
     bool release_fanin_and_check_ready(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+        return release_fanin_and_check_ready(slot_state, TaskReadyDomain::GLOBAL, -1, sink);
+    }
+
+    bool release_fanin_and_check_ready(
+        PTO2TaskSlotState &slot_state, TaskReadyDomain releasing_domain, int32_t continuation_thread_idx = -1,
+        EarlyDispatchReleaseSink *sink = nullptr
+    ) {
         // Atomically increment fanin_refcount and check if all producers are done
         // ACQ_REL on fanin_refcount already synchronizes with the orchestrator's
         // init release, making fanin_count visible — plain load suffices.
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
 
         if (new_refcount == slot_state.fanin_count) {
-            return route_ready_once(slot_state, sink);
+            return route_ready_once(slot_state, releasing_domain, continuation_thread_idx, sink);
         }
         return false;
     }
@@ -1097,11 +1295,22 @@ struct PTO2SchedulerState {
         PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
         EarlyDispatchReleaseSink *sink = nullptr
     ) {
+        return release_fanin_and_check_ready(
+            slot_state, atomic_count, push_wait, TaskReadyDomain::GLOBAL, -1, sink
+        );
+    }
+
+    bool release_fanin_and_check_ready(
+        PTO2TaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait, TaskReadyDomain releasing_domain,
+        int32_t continuation_thread_idx = -1, EarlyDispatchReleaseSink *sink = nullptr
+    ) {
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
 
         if (new_refcount == slot_state.fanin_count) {
-            return route_ready_once(slot_state, atomic_count, push_wait, sink);
+            return route_ready_once(
+                slot_state, atomic_count, push_wait, releasing_domain, continuation_thread_idx, sink
+            );
         }
         return false;
     }
@@ -1162,11 +1371,7 @@ struct PTO2SchedulerState {
     uint32_t
 #endif
     on_task_complete(
-        PTO2TaskSlotState &slot_state
-#if SIMPLER_SCHED_PROFILING
-        ,
-        int thread_idx
-#endif
+        PTO2TaskSlotState &slot_state, int thread_idx = -1, TaskReadyDomain releasing_domain = TaskReadyDomain::GLOBAL
     ) {
 #if SIMPLER_SCHED_PROFILING
         CompletionStats stats = {0, 0, 0, true};
@@ -1202,16 +1407,21 @@ struct PTO2SchedulerState {
         uint64_t fanout_atomics = 0, push_wait = 0;
 #endif
         EarlyDispatchReleaseSink rel_sink;
+        TaskReadyDomain producer_domain = slot_state.ready_domain();
+        TaskReadyDomain continuation_domain =
+            producer_domain == releasing_domain ? producer_domain : TaskReadyDomain::GLOBAL;
         while (current != nullptr) {
             PTO2TaskSlotState &consumer_slot = *current->slot_state;
 #if SIMPLER_SCHED_PROFILING
             stats.fanout_edges++;
-            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, &rel_sink)) {
+            if (release_fanin_and_check_ready(
+                    consumer_slot, fanout_atomics, push_wait, continuation_domain, thread_idx, &rel_sink
+                )) {
                 stats.tasks_enqueued++;
             }
 #else
             consumer_walk_count++;
-            release_fanin_and_check_ready(consumer_slot, &rel_sink);
+            release_fanin_and_check_ready(consumer_slot, continuation_domain, thread_idx, &rel_sink);
 #endif
             current = current->next;
         }
@@ -1236,7 +1446,9 @@ struct PTO2SchedulerState {
      */
 
 #if SIMPLER_SCHED_PROFILING
-    int32_t on_task_release(PTO2TaskSlotState &slot_state, int32_t thread_idx) {
+    int32_t on_task_release(
+        PTO2TaskSlotState &slot_state, int32_t thread_idx, uint32_t *local_ring_masks = nullptr
+    ) {
         PTO2_SCHED_CYCLE_START();
         extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
         extern uint64_t g_sched_self_atomic_count[];
@@ -1244,7 +1456,7 @@ struct PTO2SchedulerState {
         extern uint64_t g_sched_complete_count[];
         uint64_t fanin_atomics = 0;
 #else
-    int32_t on_task_release(PTO2TaskSlotState &slot_state) {
+    int32_t on_task_release(PTO2TaskSlotState &slot_state, uint32_t *local_ring_masks = nullptr) {
 #endif
         PTO2TaskPayload *payload = slot_state.payload;
         int32_t released = 0;
@@ -1258,9 +1470,9 @@ struct PTO2SchedulerState {
             }
             released++;
 #if SIMPLER_SCHED_PROFILING
-            release_producer(*producer_slot_state, fanin_atomics);
+            release_producer(*producer_slot_state, fanin_atomics, local_ring_masks);
 #else
-            release_producer(*producer_slot_state);
+            release_producer(*producer_slot_state, local_ring_masks);
 #endif
         });
 #if SIMPLER_SCHED_PROFILING
@@ -1271,14 +1483,114 @@ struct PTO2SchedulerState {
         // Self consumed check
 #if SIMPLER_SCHED_PROFILING
         uint64_t self_atomics = 0;
-        check_and_handle_consumed(slot_state, self_atomics);
+        check_and_handle_consumed(slot_state, self_atomics, false, local_ring_masks);
         g_sched_self_atomic_count[thread_idx] += self_atomics;
         PTO2_SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
         g_sched_complete_count[thread_idx]++;
 #else
-        check_and_handle_consumed(slot_state);
+        check_and_handle_consumed(slot_state, false, local_ring_masks);
 #endif
         return released;
+    }
+
+    // Release at most max_batch entries from the deferred stack. Retained edges
+    // targeting the same producer are combined into one fetch_add(delta) and
+    // one consumed check. Per-slot lifecycle transitions remain serialized;
+    // ring reclamation is held in a thread-local mask and committed once after
+    // the micro-batch.
+    int32_t release_deferred_batch(
+        PTO2TaskSlotState **slot_states, int32_t &slot_count, int32_t max_batch, int32_t thread_idx
+    ) {
+        static constexpr int32_t PRODUCER_TABLE_CAP = 64;
+        struct ProducerRelease {
+            PTO2TaskSlotState *slot;
+            uint32_t delta;
+        };
+
+        uint32_t local_ring_masks[TASK_RING_DOMAIN_COUNT]{};
+        int32_t bounded_batch = max_batch < 16 ? max_batch : 16;
+        int32_t batch_count = slot_count < bounded_batch ? slot_count : bounded_batch;
+        PTO2TaskSlotState *batch_slots[16];
+        ProducerRelease producers[PRODUCER_TABLE_CAP]{};
+
+#if SIMPLER_SCHED_PROFILING
+        extern uint64_t g_sched_fanin_cycle[], g_sched_fanin_atomic_count[];
+        extern uint64_t g_sched_self_atomic_count[], g_sched_self_consumed_cycle[];
+        extern uint64_t g_sched_complete_count[];
+        uint64_t fanin_atomics = 0;
+        PTO2_SCHED_CYCLE_START();
+#else
+        (void)thread_idx;
+#endif
+
+        for (int32_t i = 0; i < batch_count; i++) {
+            PTO2TaskSlotState *slot_state = slot_states[--slot_count];
+            batch_slots[i] = slot_state;
+            for_each_fanin_slot_state(
+                *slot_state->payload, [&](PTO2TaskSlotState *producer_slot_state, DepFlags flags) {
+                    if (!dep_has_retain(flags)) return;
+
+                    uintptr_t key = reinterpret_cast<uintptr_t>(producer_slot_state) >> 6;
+                    bool inserted = false;
+                    for (int32_t probe = 0; probe < PRODUCER_TABLE_CAP; probe++) {
+                        ProducerRelease &entry = producers[(key + static_cast<uintptr_t>(probe)) &
+                                                           (PRODUCER_TABLE_CAP - 1)];
+                        if (entry.slot == producer_slot_state) {
+                            entry.delta++;
+                            inserted = true;
+                            break;
+                        }
+                        if (entry.slot == nullptr) {
+                            entry.slot = producer_slot_state;
+                            entry.delta = 1;
+                            inserted = true;
+                            break;
+                        }
+                    }
+                    if (inserted) return;
+
+                    // A task with unusually wide fanin can fill the fixed local
+                    // table. Preserve correctness without allocation by falling
+                    // back to the original per-edge release for overflow entries.
+#if SIMPLER_SCHED_PROFILING
+                    release_producer(*producer_slot_state, fanin_atomics, local_ring_masks);
+#else
+                    release_producer(*producer_slot_state, local_ring_masks);
+#endif
+                }
+            );
+        }
+
+        for (ProducerRelease &entry : producers) {
+            if (entry.slot == nullptr) continue;
+#if SIMPLER_SCHED_PROFILING
+            release_producer_delta(*entry.slot, entry.delta, fanin_atomics, local_ring_masks);
+#else
+            release_producer_delta(*entry.slot, entry.delta, local_ring_masks);
+#endif
+        }
+
+#if SIMPLER_SCHED_PROFILING
+        g_sched_fanin_atomic_count[thread_idx] += fanin_atomics;
+        PTO2_SCHED_CYCLE_LAP(g_sched_fanin_cycle[thread_idx]);
+        uint64_t self_atomics = 0;
+#endif
+        for (int32_t i = 0; i < batch_count; i++) {
+#if SIMPLER_SCHED_PROFILING
+            check_and_handle_consumed(*batch_slots[i], self_atomics, false, local_ring_masks);
+            g_sched_complete_count[thread_idx]++;
+#else
+            check_and_handle_consumed(*batch_slots[i], false, local_ring_masks);
+#endif
+        }
+#if SIMPLER_SCHED_PROFILING
+        flush_local_ring_advances(local_ring_masks, &self_atomics);
+        g_sched_self_atomic_count[thread_idx] += self_atomics;
+        PTO2_SCHED_CYCLE_LAP(g_sched_self_consumed_cycle[thread_idx]);
+#else
+        flush_local_ring_advances(local_ring_masks);
+#endif
+        return batch_count;
     }
 
     // === Cold-path API (defined in pto_scheduler.cpp) ===
@@ -1320,21 +1632,11 @@ struct PTO2SchedulerState {
 // entries[]. Mirrors the a2a3 impl; see that mirror for the rationale.
 inline bool
 AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &sink, PTO2TaskSlotState &slot_state) {
-#if SIMPLER_SCHED_PROFILING
-    sink.sched->on_task_complete(slot_state, sink.thread_idx);
-#else
-    sink.sched->on_task_complete(slot_state);
-#endif
+    sink.sched->on_task_complete(slot_state, sink.thread_idx, sink.ready_domain);
     if (*sink.deferred_release_count >= sink.deferred_release_capacity) {
-        while (*sink.deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-            (void)sink.sched->on_task_release(
-                *sink.deferred_release_slot_states[--(*sink.deferred_release_count)], sink.thread_idx
-            );
-#else
-            sink.sched->on_task_release(*sink.deferred_release_slot_states[--(*sink.deferred_release_count)]);
-#endif
-        }
+        sink.sched->release_deferred_batch(
+            sink.deferred_release_slot_states, *sink.deferred_release_count, 16, sink.thread_idx
+        );
     }
     sink.deferred_release_slot_states[(*sink.deferred_release_count)++] = &slot_state;
     sink.inline_completed++;
@@ -1344,11 +1646,8 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
     AICoreCompletionMailbox *aicore_mailbox, PTO2SchedulerState *sched,
-    PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count, int32_t deferred_release_capacity
-#if SIMPLER_SCHED_PROFILING
-    ,
-    int thread_idx
-#endif
+    PTO2TaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
+    int32_t deferred_release_capacity, int32_t thread_idx, TaskReadyDomain ready_domain
 ) {
     AsyncPollResult result;
     if (!try_lock()) return result;
@@ -1358,9 +1657,8 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
     sink.deferred_release_slot_states = deferred_release_slot_states;
     sink.deferred_release_count = &deferred_release_count;
     sink.deferred_release_capacity = deferred_release_capacity;
-#if SIMPLER_SCHED_PROFILING
     sink.thread_idx = thread_idx;
-#endif
+    sink.ready_domain = ready_domain;
 
     int32_t drain_err = PTO2_ERROR_NONE;
     drain_aicore_completion_mailbox_locked(aicore_mailbox, sink, drain_err);
@@ -1391,19 +1689,11 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
         }
 
         if (entry.normal_done && entry.waiting_completion_count <= 0) {
-#if SIMPLER_SCHED_PROFILING
-            sched->on_task_complete(*entry.slot_state, thread_idx);
-#else
-            sched->on_task_complete(*entry.slot_state);
-#endif
+            sched->on_task_complete(*entry.slot_state, thread_idx, ready_domain);
             if (deferred_release_count >= deferred_release_capacity) {
-                while (deferred_release_count > 0) {
-#if SIMPLER_SCHED_PROFILING
-                    (void)sched->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
-#else
-                    sched->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
-#endif
-                }
+                sched->release_deferred_batch(
+                    deferred_release_slot_states, deferred_release_count, 16, thread_idx
+                );
             }
             deferred_release_slot_states[deferred_release_count++] = entry.slot_state;
             result.completed++;

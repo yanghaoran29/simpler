@@ -501,12 +501,9 @@ void PTO2OrchestratorState::wire_fanin_task(PTO2TaskSlotState &slot_state, int32
     }
 }
 
-static PTO2TaskSlotState *oldest_open_task_on_current_ring(const PTO2OrchestratorState *orch) {
-    // Scope depth maps directly to a ring until the deepest ring, where all
-    // further nested scopes share that ring. Its shallowest open scope begin
-    // therefore marks the oldest task pinned by any open scope on this ring.
-    int32_t begin = orch->scope_begins[orch->current_ring_id()];
-    return begin < orch->scope_tasks_size ? orch->scope_tasks[begin] : nullptr;
+static PTO2TaskSlotState *oldest_open_task_on_ring(const PTO2OrchestratorState *orch, uint8_t ring_id) {
+    always_assert(ring_id < PTO2_MAX_RING_DEPTH);
+    return orch->oldest_open_tasks_by_ring[ring_id];
 }
 
 static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, PTO2TaskSlotState &slot_state, int32_t wfanin) {
@@ -518,7 +515,7 @@ static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, PTO2TaskSlotS
     // uses the same acknowledged-head structural check and wall-clock backstop
     // as the heap/task-window allocator. A false return also covers a fatal
     // already latched elsewhere.
-    if (!rss.dep_pool.ensure_space(*rss.ring, wfanin, oldest_open_task_on_current_ring(orch))) {
+    if (!rss.dep_pool.ensure_space(*rss.ring, wfanin, oldest_open_task_on_ring(orch, slot_state.ring_id))) {
         orch->fatal = true;
         return false;
     }
@@ -586,16 +583,15 @@ static bool check_scope_can_accept_task(PTO2OrchestratorState *orch, PTO2TaskAll
 
 static bool prepare_task(
     PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
-    TaskAttrs task_attrs, PTO2PreparedTask *out
+    TaskAttrs task_attrs, uint8_t ring_id, PTO2PreparedTask *out
 ) {
-    uint8_t ring_id = orch->current_ring_id();
     auto &allocator = orch->rings[ring_id].task_allocator;
 
     if (!check_scope_can_accept_task(orch, allocator, ring_id)) {
         return false;
     }
 
-    out->alloc_result = allocator.alloc(total_output_size, oldest_open_task_on_current_ring(orch));
+    out->alloc_result = allocator.alloc(total_output_size, oldest_open_task_on_ring(orch, ring_id));
     if (out->alloc_result.failed()) {
         orch_mark_fatal(orch, PTO2_ERROR_HEAP_RING_DEADLOCK);
         return false;
@@ -669,6 +665,15 @@ static void scope_tasks_push(PTO2OrchestratorState *orch, PTO2TaskSlotState *tas
         );
         return;
     }
+
+    always_assert(orch->scope_stack_top >= 0);
+    always_assert(task_slot_state != nullptr && task_slot_state->ring_id < PTO2_MAX_RING_DEPTH);
+    const uint8_t ring_id = task_slot_state->ring_id;
+    if (orch->oldest_open_tasks_by_ring[ring_id] == nullptr) {
+        static_assert(PTO2_MAX_RING_DEPTH <= 16, "scope oldest-ring mask is uint16_t");
+        orch->oldest_open_tasks_by_ring[ring_id] = task_slot_state;
+        orch->scope_oldest_ring_masks[orch->scope_stack_top] |= static_cast<uint16_t>(1U << ring_id);
+    }
     orch->scope_tasks[orch->scope_tasks_size++] = task_slot_state;
 }
 
@@ -682,10 +687,10 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
         report_fatal(PTO2_ERROR_INVALID_ARGS, __FUNCTION__, "auto scope nested inside manual scope is not supported");
         return;
     }
-
     bool already_in_manual_scope = orch->in_manual_scope();
     ++orch->scope_stack_top;
     orch->scope_begins[orch->scope_stack_top] = orch->scope_tasks_size;
+    orch->scope_oldest_ring_masks[orch->scope_stack_top] = 0;
     if (mode == PTO2ScopeMode::MANUAL && !already_in_manual_scope) {
         orch->manual_begin_depth = orch->scope_stack_top;
     }
@@ -741,16 +746,29 @@ void PTO2OrchestratorState::end_scope() {
     uint64_t _se0 = get_sys_cnt_aicpu();
 #endif
 
-    bool ending_manual_scope = orch->scope_stack_top == orch->manual_begin_depth;
-    int32_t begin = orch->scope_begins[orch->scope_stack_top--];
+    const int32_t ending_scope = orch->scope_stack_top;
+    bool ending_manual_scope = ending_scope == orch->manual_begin_depth;
+    int32_t begin = orch->scope_begins[ending_scope];
     int32_t count = orch->scope_tasks_size - begin;
     if (ending_manual_scope) {
         orch->manual_begin_depth = PTO2_MAX_SCOPE_DEPTH;
     }
+    --orch->scope_stack_top;
 
     if (orch->scheduler && count > 0) {
         orch->scheduler->on_scope_end(&orch->scope_tasks[begin], count);
     }
+
+    // Only the scope that installed a ring's oldest pointer owns its bit.
+    // Descendants cannot replace an ancestor pointer, so clearing owned rings
+    // on LIFO scope exit preserves all ancestor backstops without a scan.
+    uint16_t owned_rings = orch->scope_oldest_ring_masks[ending_scope];
+    while (owned_rings != 0) {
+        const uint32_t ring_id = static_cast<uint32_t>(__builtin_ctz(owned_rings));
+        orch->oldest_open_tasks_by_ring[ring_id] = nullptr;
+        owned_rings &= static_cast<uint16_t>(owned_rings - 1);
+    }
+    orch->scope_oldest_ring_masks[ending_scope] = 0;
 
     // Rewind the task buffer — these entries are no longer needed
     orch->scope_tasks_size = begin;
@@ -781,16 +799,20 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
         return true;
     }
 
-    uint32_t all_ring_bits = 0;
+    uint32_t domain_ring_bits[TASK_RING_DOMAIN_COUNT]{};
     for (int32_t r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        all_ring_bits |= PTO2SchedulerState::ring_advance_pending_bit(r);
+        int32_t domain = PTO2SchedulerState::request_mask_index_for_ring(r);
+        domain_ring_bits[domain] |= PTO2SchedulerState::ring_advance_pending_bit(r);
     }
     // No acknowledgment is consumed here because TensorMap reclamation has no
     // structural head classification; repeated watermark reads are sufficient.
     auto request_reclaim_publication = [&]() {
         if (orch->scheduler == nullptr) return;
-        orch->scheduler->publication_ack_mask.fetch_and(~all_ring_bits, std::memory_order_acq_rel);
-        orch->scheduler->publication_request_mask.fetch_or(all_ring_bits, std::memory_order_release);
+        for (int32_t domain = 0; domain < TASK_RING_DOMAIN_COUNT; domain++) {
+            uint32_t bits = domain_ring_bits[domain];
+            orch->scheduler->publication_ack_masks[domain].bits.fetch_and(~bits, std::memory_order_acq_rel);
+            orch->scheduler->publication_request_masks[domain].bits.fetch_or(bits, std::memory_order_release);
+        }
     };
     int32_t alive[PTO2_MAX_RING_DEPTH];
     auto read_alive = [&]() {
@@ -888,8 +910,13 @@ static TaskOutputTensors submit_task_common(
     CYCLE_COUNT_START();
     TaskOutputTensors result;
     PTO2OutputLayout layout = calculate_output_layout(args);
+    TaskReadyDomain requested_domain = args.task_domain();
+    if (active_mask.to_shape() == PTO2ResourceShape::DUMMY) {
+        requested_domain = TaskReadyDomain::GLOBAL;
+    }
+    uint8_t requested_ring_id = task_ring_id(requested_domain, orch->scope_stack_top);
     PTO2PreparedTask prepared;
-    if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, &prepared)) {
+    if (!prepare_task(orch, args, layout.total_output_size, active_mask, task_attrs, requested_ring_id, &prepared)) {
         return result;
     }
     uint8_t ring_id = prepared.task_id.ring();
@@ -1102,11 +1129,21 @@ static TaskOutputTensors submit_task_common(
     // Zero-fanin tasks and tasks whose claimed producers are already completed
     // do not need fanout links or dep_pool entries. Tasks with live producers
     // allocate fanout links here before any scheduler thread can dispatch them.
+    // Placement is a per-task orchestration contract. The selected physical
+    // task ring already encodes GLOBAL/DIE0/DIE1, so no duplicate slot-state
+    // publication is needed here.
+    if (requested_domain != TaskReadyDomain::GLOBAL) {
+        if (!orch->die_routing_enabled) {
+            sched->enable_die_routing();
+            orch->die_routing_enabled = true;
+        }
+    }
+
     if (fanin_builder.count == 0) {
         cur_slot_state.fanin_count = 1;
         cur_slot_state.fanin_refcount.store(1, std::memory_order_release);
         orch->mark_dep_pool_position(cur_slot_state);
-        sched->push_ready_routed(&cur_slot_state);
+        sched->push_ready_routed(&cur_slot_state, requested_domain);
     } else if (all_claimed_fanin_completed(fanin_builder)) {
         int32_t ready_seed = fanin_builder.wait_count + 1;
         cur_slot_state.fanin_count = ready_seed;
@@ -1123,7 +1160,7 @@ static TaskOutputTensors submit_task_common(
             }
         });
         orch->mark_dep_pool_position(cur_slot_state);
-        sched->push_ready_routed(&cur_slot_state);
+        sched->push_ready_routed(&cur_slot_state, requested_domain);
     } else {
         if (!orch_wire_live_fanin_task(orch, cur_slot_state, fanin_builder.wait_count)) {
             return result;
@@ -1292,7 +1329,8 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
     PTO2PreparedTask prepared;
     // Kernel-less alloc task: no active subtasks, no dispatch-time attributes. The
     // early-dispatch hint is force-set below (see the flag-the-creator note).
-    if (!prepare_task(orch, args, layout.total_output_size, ActiveMask{}, TaskAttrs{}, &prepared)) {
+    uint8_t ring_id = task_ring_id(TaskReadyDomain::GLOBAL, orch->scope_stack_top);
+    if (!prepare_task(orch, args, layout.total_output_size, ActiveMask{}, TaskAttrs{}, ring_id, &prepared)) {
         return TaskOutputTensors{};
     }
 

@@ -8,16 +8,20 @@ The single-ring design uses one `last_task_alive` watermark shared by HeapRing, 
 
 ## 2. Solution
 
-Split HeapRing, TaskRing, and DepPool into arrays of `PTO2_MAX_RING_DEPTH` (4) independent instances. Each scope depth maps to its own ring, with an independent `last_task_alive` watermark.
+Split HeapRing, TaskRing, and DepPool into 12 independent instances: four
+scope-depth rings for each of `GLOBAL`, `DIE0`, and `DIE1`. Every physical ring
+has an independent `last_task_alive` watermark.
 
 ```text
-Scope depth 0  ──►  rings[0] = { HeapRing, TaskRing, DepPool }
-Scope depth 1  ──►  rings[1] = { HeapRing, TaskRing, DepPool }
-Scope depth 2  ──►  rings[2] = { HeapRing, TaskRing, DepPool }
-Scope depth ≥3 ──►  rings[3] = { HeapRing, TaskRing, DepPool }  (clamped)
+             depth 0   depth 1   depth 2   depth >=3
+GLOBAL       ring 0    ring 1    ring 2    ring 3
+DIE0         ring 4    ring 5    ring 6    ring 7
+DIE1         ring 8    ring 9    ring 10   ring 11
 ```
 
-Inner-scope tasks can now be reclaimed independently without waiting for outer-scope tasks to complete.
+Inner-scope tasks can be reclaimed independently without waiting for outer
+scopes, and fixed-Die tasks do not share task-ring or watermark state with the
+opposite Die.
 
 ## 3. Task ID Encoding
 
@@ -70,7 +74,8 @@ PTO2DepListPool dep_pool;
 PTO2RingSet rings[PTO2_MAX_RING_DEPTH];
 ```
 
-Ring selection: `current_ring_id() = min(scope_stack_top, PTO2_MAX_RING_DEPTH - 1)`.
+Ring selection is
+`task_ring_id(scope_domain, min(scope_stack_top, TASK_RING_SCOPE_DEPTH - 1))`.
 
 ### 4.3 PTO2SharedMemoryHeader (modified)
 
@@ -167,7 +172,7 @@ bool entry_valid(const PTO2TensorMapEntry& e) {
 | --------- | ------ |
 | `PTO2DepListEntry` | Stores `PTO2TaskSlotState*` pointer — naturally crosses ring boundaries |
 | `PTO2TaskPayload` | `fanin_slot_states[]` are pointers — no ring coupling |
-| `PTO2ReadyQueue` | Global ready queues shared across all rings (tasks ready to dispatch regardless of origin ring) |
+| `PTO2ReadyQueue` | GLOBAL and per-Die ready queues; a task's ring and ready-queue domain use the same explicit scope domain |
 | `PTO2DispatchPayload` | Built per-dispatch, no ring state needed |
 
 ## 5. Reclamation
@@ -185,9 +190,15 @@ advance_ring_pointers(ring_id):  // protected by per-ring advance_lock
     sync_to_sm()  // release-store last_task_alive
 ```
 
-Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving heap_tail writes within the same ring. A scheduler thread that changes a ring head to `CONSUMED` but fails to acquire that ring's `advance_lock` records a coalesced request in `advance_pending_mask`. Scheduler no-progress iterations retry pending rings under the same lock; a busy lock leaves the bit set, and a successful retry clears the bit before rescanning.
+Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving heap_tail writes within the same ring. A scheduler thread that changes a ring head to `CONSUMED` but fails to acquire that ring's `advance_lock` records a coalesced request in the matching domain's `advance_pending_masks` cache line. Scheduler no-progress iterations retry only rings in the worker's domain; thread 0 additionally services GLOBAL rings. A busy lock leaves the bit set, and a successful retry clears the bit before rescanning.
 
-Orchestrator reclaim consumers that see no reclaim progress for 10 ms use the separate `publication_request_mask`. Scheduler thread 0 polls only this mask in productive and no-progress iterations, force-publishes the requested ring watermark, and sets `publication_ack_mask`. Scheduler lock-contention retries never acknowledge an orchestrator request. K=16 batching is enabled only after every reclaim consumer is wired to the current request/ack masks; otherwise each local advance is published.
+Orchestrator reclaim consumers that see no reclaim progress for 10 ms use the
+matching domain's publication request/ack cache lines. DIE0 schedulers service
+only DIE0 requests, DIE1 schedulers service only DIE1 requests, and thread 0
+also services GLOBAL. Scheduler lock-contention retries never acknowledge an
+orchestrator request. K=16 batching is enabled only after every reclaim
+consumer is wired to its ring's request/ack pair; otherwise each local advance
+is published.
 
 For ring-heap stall triage, a `CONSUMED` head whose ring bit remains set means the deferred request has not yet been cleared by a retry that acquired `advance_lock`. If the bit clears and `last_task_alive` is still pinned, the stall is not caused by this deferred advance path.
 
@@ -232,18 +243,19 @@ AICore uses `last_reg_val` to detect new dispatches — identical values cause s
 
 ### 7.1 Compile-Time Defaults (per ring)
 
-| Constant | Default | Total (×4 rings) |
+| Constant | Default | Total (×12 physical rings) |
 | -------- | ------- | ---------------- |
-| `PTO2_TASK_WINDOW_SIZE` | 16384 | 65536 |
-| `PTO2_HEAP_SIZE` | 256 MB | 1 GB |
-| `PTO2_DEP_LIST_POOL_SIZE` | 16384 | 65536 |
+| `PTO2_TASK_WINDOW_SIZE` | 16384 | 196608 |
+| `PTO2_HEAP_SIZE` | 256 MB | 3 GB |
+| `PTO2_DEP_LIST_POOL_SIZE` | 16384 | 196608 |
 
 ### 7.2 Runtime Overrides
 
 Each ring resource (`ring_task_window` / `ring_heap` / `ring_dep_pool`) is a
-single `CallConfig.runtime_env` field that accepts **either** a scalar (broadcast
-to every ring) **or** a list of four per-ring values. Precedence is resolved
-independently for each resource and ring:
+single `CallConfig.runtime_env` field that accepts **either** a scalar or a list
+of four per-scope-depth values. The public four-entry ABI is unchanged; each
+depth value is broadcast to the GLOBAL, DIE0, and DIE1 physical ring for that
+depth. Precedence is resolved independently for each resource and depth:
 
 ```text
 per-ring CallConfig entry (a scalar is broadcast to every entry)
@@ -252,13 +264,10 @@ per-ring CallConfig entry (a scalar is broadcast to every entry)
   > compile-time default
 ```
 
-`ring_id` is the scope-depth ring selected by the runtime:
+The physical ring is selected by domain and scope depth:
 
 ```text
-scope depth 0 -> ring 0
-scope depth 1 -> ring 1
-scope depth 2 -> ring 2
-scope depth >=3 -> ring 3
+ring_id = domain_index * 4 + min(scope_depth, 3)
 ```
 
 Per-task via `CallConfig.runtime_env` — different L2 tasks in one launch can
