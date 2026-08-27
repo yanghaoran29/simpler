@@ -49,72 +49,46 @@ static __aicore__ inline void ptoas_auto_sync_tail(PTOAutoSyncTailMode mode = PT
     }
 }
 
-static __aicore__ void q_seed(__gm__ float *v1) {
-    const float v2 = 0.0f;
-    const int64_t v3 = 512;
-    const int64_t v4 = 2;
-    const int64_t v5 = 10;
-    const int64_t v6 = 1;
-    const int64_t v7 = 5120;
-    const int64_t v8 = 16;
-    const int64_t v9 = 32768;
-    const int64_t v10 = 0;
+static __aicore__ void q_seed(__gm__ float *v1, int32_t half_idx) {
+    const float zero = 0.0f;
+    const int64_t tile_width = 512;
+    const int64_t row_stride = 5120;
+    const int64_t rows = 16;
+    const int64_t first_tile = static_cast<int64_t>(half_idx) * 5;
+    const int64_t end_tile = first_tile + 5;
     using T = float;
 
 #if defined(__DAV_VEC__)
     set_mask_norm();
     set_vector_mask(-1, -1);
     set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-    for (size_t v11 = (size_t)v10; v11 < ((size_t)v5); v11 += (size_t)v4) {
+    for (int64_t tile_idx = first_tile; tile_idx < end_tile; ++tile_idx) {
         Tile<
             TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
             CompactMode::Null>
-            v12 = Tile<
+            zero_tile = Tile<
                 TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
-                CompactMode::Null>(v8, v3);
-        uint64_t v13 = (uint64_t)v10;
-        TASSIGN(v12, v13);
+                CompactMode::Null>(rows, tile_width);
+        uint64_t ub_offset = 0;
+        TASSIGN(zero_tile, ub_offset);
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-        TEXPANDS(v12, v2);
+        TEXPANDS(zero_tile, zero);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        int64_t v14 = (int64_t)((uint64_t)((int64_t)v11) * (uint64_t)v3);
-        pto::Shape<1, 1, 1, 16, 512> v15 = pto::Shape<1, 1, 1, 16, 512>();
-        pto::Stride<81920, 81920, 81920, 5120, 1> v16 = pto::Stride<81920, 81920, 81920, 5120, 1>();
+        int64_t column_offset = tile_idx * tile_width;
+        pto::Shape<1, 1, 1, 16, 512> shape = pto::Shape<1, 1, 1, 16, 512>();
+        pto::Stride<81920, 81920, 81920, 5120, 1> stride =
+            pto::Stride<81920, 81920, 81920, 5120, 1>();
         GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>
-            v17 = GlobalTensor<
+            destination = GlobalTensor<
                 float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>(
-                v1 + (v10 + v10 * v7 + v14 * v6), v15, v16
+                v1 + column_offset, shape, stride
             );
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         pipe_barrier(PIPE_MTE3);
-        TSTORE(v17, v12);
+        TSTORE(destination, zero_tile);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-        Tile<
-            TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
-            CompactMode::Null>
-            v18 = Tile<
-                TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
-                CompactMode::Null>(v8, v3);
-        uint64_t v19 = (uint64_t)v9;
-        TASSIGN(v18, v19);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-        TEXPANDS(v18, v2);
-        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
-        pto::Shape<1, 1, 1, 16, 512> v20 = pto::Shape<1, 1, 1, 16, 512>();
-        pto::Stride<81920, 81920, 81920, 5120, 1> v21 = pto::Stride<81920, 81920, 81920, 5120, 1>();
-        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>
-            v22 = GlobalTensor<
-                float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>(
-                v1 + (v10 + v10 * v7 + (int64_t)((uint64_t)v14 + (uint64_t)v3) * v6), v20, v21
-            );
-        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
-        pipe_barrier(PIPE_MTE3);
-        TSTORE(v22, v18);
-        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     }
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
-    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
 #endif  // __DAV_VEC__
 
     ptoas_auto_sync_tail(PTOAutoSyncTailMode::kBarrierAll);
@@ -128,6 +102,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         reinterpret_cast<__gm__ float *>(q_proj_inline139__ssa_v0_tensor->buffer.addr) +
         q_proj_inline139__ssa_v0_tensor->start_offset;
 
+    union {
+        int32_t value;
+        uint64_t raw;
+    } half_idx_conv;
+    half_idx_conv.raw = args[1];
+
     // Forward to ptoas-generated function
-    q_seed(q_proj_inline139__ssa_v0);
+    q_seed(q_proj_inline139__ssa_v0, half_idx_conv.value);
 }

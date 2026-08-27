@@ -28,6 +28,12 @@ static inline TaskDomain spmd_half_domain(int64_t layer_idx, int32_t half_idx) {
     return ((layer_idx + half_idx) & 1) == 0 ? TaskDomain::DIE0 : TaskDomain::DIE1;
 }
 
+// Keep every ten-block OutProj hidden shard and its residual/RMS consumer on
+// one Die.  The five shards use a 3:2 split and swap Dies between layers.
+static inline TaskDomain out_proj_shard_domain(int64_t layer_idx, int32_t shard_idx) {
+    return spmd_half_domain(layer_idx, shard_idx & 1);
+}
+
 // Keep one MLP intermediate shard on the same Die through Gate/Up -> SiLU ->
 // Down.  Shards 0..2 are the first half of the six-block SPMD launches and
 // shards 3..5 are the second half; the direct shards preserve a 9:8 balance.
@@ -312,32 +318,17 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId rms_tid_inline148 = task_4_outs.task_id();
 
                     // Task 5: q_seed
-                    CoreTaskArgs params_t5;
-                    params_t5.add_inout(q_proj_inline139);
-                    params_t5.set_allow_early_resolve(true);
-                    TaskOutputTensors task_5_outs = rt_submit_aiv_task(5, params_t5);
-                    TaskId q_seed_tid_inline162 = task_5_outs.task_id();
-                    TaskId prev_normed_q_deps_inline105[2];
-                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
-                        prev_normed_q_deps_inline105[__init_i] = TaskId::invalid();
-                    TaskId t__tmp_v17 = prev_normed_tid[0];
-                    prev_normed_q_deps_inline105[0] = t__tmp_v17;
-                    prev_normed_q_deps_inline105[1] = q_seed_tid_inline162;
-                    TaskId _submit_deps_buf_inline182[2];
-                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
-                        _submit_deps_buf_inline182[__init_i] = TaskId::invalid();
-                    TaskId t__tmp_v18 = prev_normed_q_deps_inline105[0];
-                    _submit_deps_buf_inline182[0] = t__tmp_v18;
-                    TaskId t__tmp_v19 = prev_normed_q_deps_inline105[1];
-                    _submit_deps_buf_inline182[1] = t__tmp_v19;
+                    TaskId q_seed_tids[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        CoreTaskArgs params_t5;
+                        params_t5.set_task_domain(spmd_half_domain(i, half));
+                        params_t5.add_inout(q_proj_inline139);
+                        params_t5.add_scalar(half);
+                        params_t5.set_allow_early_resolve(true);
+                        q_seed_tids[half] = rt_submit_aiv_task(5, params_t5).task_id();
+                    }
 
                     // Spmd q_proj_spmd: q_proj
-                    TaskId params_t6_deps[2];
-                    uint32_t params_t6_deps_count = 0;
-                    if (_submit_deps_buf_inline182[0].is_valid())
-                        params_t6_deps[params_t6_deps_count++] = _submit_deps_buf_inline182[0];
-                    if (_submit_deps_buf_inline182[1].is_valid())
-                        params_t6_deps[params_t6_deps_count++] = _submit_deps_buf_inline182[1];
                     TaskId q_proj_tids_inline183[2];
                     for (int32_t half = 0; half < 2; ++half) {
                         CoreTaskArgs params_t6;
@@ -349,6 +340,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         params_t6.add_scalar(half * 25);
                         params_t6.launch_spec.set_core_num(25);
                         params_t6.set_allow_early_resolve(true);
+                        TaskId params_t6_deps[2] = {prev_normed_tid[0], q_seed_tids[half]};
+                        uint32_t params_t6_deps_count = 2;
                         params_t6.set_dependencies(params_t6_deps, params_t6_deps_count);
                         q_proj_tids_inline183[half] = rt_submit_aic_task(6, params_t6).task_id();
                     }
@@ -361,18 +354,22 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline261[1] = t__tmp_v25;
 
                     // Task 7: kv_seed
-                    CoreTaskArgs params_t7;
-                    params_t7.add_inout(k_proj_inline135);
-                    params_t7.add_inout(v_proj_inline255);
-                    TaskId params_t7_deps[2];
-                    uint32_t params_t7_deps_count = 0;
-                    if (_submit_deps_buf_inline261[0].is_valid())
-                        params_t7_deps[params_t7_deps_count++] = _submit_deps_buf_inline261[0];
-                    if (_submit_deps_buf_inline261[1].is_valid())
-                        params_t7_deps[params_t7_deps_count++] = _submit_deps_buf_inline261[1];
-                    params_t7.set_dependencies(params_t7_deps, params_t7_deps_count);
-                    TaskOutputTensors task_7_outs = rt_submit_aiv_task(7, params_t7);
-                    TaskId kv_seed_tid_inline238 = task_7_outs.task_id();
+                    TaskId kv_seed_tids[2];
+                    for (int32_t half = 0; half < 2; ++half) {
+                        CoreTaskArgs params_t7;
+                        params_t7.set_task_domain(spmd_half_domain(i, half));
+                        params_t7.add_inout(k_proj_inline135);
+                        params_t7.add_inout(v_proj_inline255);
+                        params_t7.add_scalar(half);
+                        TaskId params_t7_deps[2];
+                        uint32_t params_t7_deps_count = 0;
+                        if (_submit_deps_buf_inline261[0].is_valid())
+                            params_t7_deps[params_t7_deps_count++] = _submit_deps_buf_inline261[0];
+                        if (_submit_deps_buf_inline261[1].is_valid())
+                            params_t7_deps[params_t7_deps_count++] = _submit_deps_buf_inline261[1];
+                        params_t7.set_dependencies(params_t7_deps, params_t7_deps_count);
+                        kv_seed_tids[half] = rt_submit_aiv_task(7, params_t7).task_id();
+                    }
                     TaskId _submit_deps_buf_inline267[2];
                     for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
                         _submit_deps_buf_inline267[__init_i] = TaskId::invalid();
@@ -400,10 +397,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Spmd k_proj_spmd: k_proj
                     TaskId params_t9_deps[1];
-                    uint32_t params_t9_deps_count = 0;
-                    params_t9_deps[params_t9_deps_count++] = kv_seed_tid_inline238;
+                    uint32_t params_t9_deps_count = 1;
                     TaskId k_proj_tids_inline136[2];
                     for (int32_t half = 0; half < 2; ++half) {
+                        params_t9_deps[0] = kv_seed_tids[half];
                         CoreTaskArgs params_t9;
                         params_t9.set_task_domain(spmd_half_domain(i, half));
                         params_t9.add_inout(k_proj_inline135);
@@ -419,10 +416,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Spmd v_proj_spmd: v_proj
                     TaskId params_t10_deps[1];
-                    uint32_t params_t10_deps_count = 0;
-                    params_t10_deps[params_t10_deps_count++] = kv_seed_tid_inline238;
+                    uint32_t params_t10_deps_count = 1;
                     TaskId v_proj_tids_inline63[2];
                     for (int32_t half = 0; half < 2; ++half) {
+                        params_t10_deps[0] = kv_seed_tids[half];
                         CoreTaskArgs params_t10;
                         params_t10.set_task_domain(spmd_half_domain(i, half));
                         params_t10.add_inout(v_proj_inline255);
@@ -532,6 +529,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                         // Task 12: out_proj
                         CoreTaskArgs params_t12;
+                        params_t12.set_task_domain(out_proj_shard_domain(i, out_idx_inline74 / 10));
                         params_t12.add_input(attn_out_inline282__ssa_v4);
                         params_t12.add_input(ext_wo);
                         params_t12.add_inout(attn_proj_fp32_inline220);
@@ -552,20 +550,27 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     TaskId params_t13_deps[1];
                     uint32_t params_t13_deps_count = 0;
                     params_t13_deps[params_t13_deps_count++] = attn_done_tid_inline78;
-                    for (int32_t half = 0; half < 2; ++half) {
+                    // Blocks 26..49 cross three ten-block hidden shards.  Split
+                    // launches at shard boundaries so every block inherits the
+                    // domain of its residual/RMS consumer.
+                    constexpr int32_t out_proj_spmd_starts[] = {26, 30, 40};
+                    constexpr int32_t out_proj_spmd_counts[] = {4, 10, 10};
+                    for (int32_t chunk = 0; chunk < 3; ++chunk) {
+                        int32_t block_start = out_proj_spmd_starts[chunk];
+                        int32_t block_count = out_proj_spmd_counts[chunk];
                         CoreTaskArgs params_t13;
-                        params_t13.set_task_domain(spmd_half_domain(i, half));
+                        params_t13.set_task_domain(out_proj_shard_domain(i, block_start / 10));
                         params_t13.add_input(attn_out_inline282__ssa_v4);
                         params_t13.add_input(ext_wo);
                         params_t13.add_inout(attn_proj_fp32_inline220);
-                        params_t13.add_scalar(N_OUT_DIRECT_inline61);
+                        params_t13.add_scalar(block_start);
                         params_t13.add_scalar(layer_hidden_base_inline151);
-                        params_t13.add_scalar(half * 12);
-                        params_t13.launch_spec.set_core_num(12);
+                        params_t13.add_scalar(0);
+                        params_t13.launch_spec.set_core_num(block_count);
                         params_t13.set_dependencies(params_t13_deps, params_t13_deps_count);
-                        TaskId half_tid = rt_submit_aic_task(14, params_t13).task_id();
-                        for (int32_t block = 0; block < 12; ++block) {
-                            out_tids_inline271[N_OUT_DIRECT_inline61 + half * 12 + block] = half_tid;
+                        TaskId chunk_tid = rt_submit_aic_task(14, params_t13).task_id();
+                        for (int32_t block = 0; block < block_count; ++block) {
+                            out_tids_inline271[block_start + block] = chunk_tid;
                         }
                     }
                     int64_t k_base_inline111 = 0;
@@ -596,6 +601,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 14: residual_rms_cast
                     CoreTaskArgs params_t14;
+                    params_t14.set_task_domain(out_proj_shard_domain(i, 0));
                     params_t14.add_inout(mlp_norm_in_inline71);
                     params_t14.add_inout(post_norm_partial_inline118);
                     params_t14.add_input(attn_proj_fp32_inline220);
@@ -658,6 +664,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 15: residual_rms_cast_0
                     CoreTaskArgs params_t15;
+                    params_t15.set_task_domain(out_proj_shard_domain(i, 1));
                     params_t15.add_inout(mlp_norm_in_inline71);
                     params_t15.add_inout(post_norm_partial_inline118);
                     params_t15.add_input(attn_proj_fp32_inline220);
@@ -720,6 +727,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 16: residual_rms_cast_1
                     CoreTaskArgs params_t16;
+                    params_t16.set_task_domain(out_proj_shard_domain(i, 2));
                     params_t16.add_inout(mlp_norm_in_inline71);
                     params_t16.add_inout(post_norm_partial_inline118);
                     params_t16.add_input(attn_proj_fp32_inline220);
@@ -782,6 +790,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 17: residual_rms_cast_2
                     CoreTaskArgs params_t17;
+                    params_t17.set_task_domain(out_proj_shard_domain(i, 3));
                     params_t17.add_inout(mlp_norm_in_inline71);
                     params_t17.add_inout(post_norm_partial_inline118);
                     params_t17.add_input(attn_proj_fp32_inline220);
@@ -844,6 +853,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                     // Task 18: residual_rms_cast_3
                     CoreTaskArgs params_t18;
+                    params_t18.set_task_domain(out_proj_shard_domain(i, 4));
                     params_t18.add_inout(mlp_norm_in_inline71);
                     params_t18.add_inout(post_norm_partial_inline118);
                     params_t18.add_input(attn_proj_fp32_inline220);

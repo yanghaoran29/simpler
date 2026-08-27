@@ -1,0 +1,24 @@
+[mono_ns=182675872106830][T0x738a8f082740][TIMING] clock_anchor: [CLOCK_ANCHOR] v=1 pid=488540 mono_ns=182675872105889 wall_ns=1787829057516249873
+
+=== Runtime: tensormap_and_ringbuffer  Level: 2 ===
+  TestAlternatingMatmulAdd::Case1 ...
+[mono_ns=182678699086709][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=2 name=chip.run.bind.args ts=182678624132649 dur=74940339
+[mono_ns=182678726297710][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=2 name=chip.run.bind.prebuilt ts=182678699137125 dur=27150891
+[mono_ns=182678726333244][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=1 name=chip.run.bind ts=182678621855000 dur=104476291
+[mono_ns=182678735399081][T0x738a8f082740][WARN] query_cpu_topo: [aicpu_topology_probe.cpp:125] aicpu_topology_probe: halGetDeviceInfoByBuff(CPU_TOPO) rc=65534 total=0
+[mono_ns=182678737414356][T0x738a8f082740][WARN] query_cpu_topo: [aicpu_topology_probe.cpp:137] aicpu_topology_probe: dsmi_get_device_info(CPU_TOPO) rc=65534 total=0
+[mono_ns=182678737531061][T0x738a8f082740][WARN] prepare_execution: [device_runner.cpp:343] AICPU CPU_TOPO unavailable; using json_fallback: soc=Ascend950PR_9579 occupy=0x3e stable_reachable=5 requested=0 effective=5 affinity=[1, 2, 3, 4, 5(orch)]
+[mono_ns=182678982174110][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=1 name=chip.run.runner_run ts=182678854468404 dur=127696462
+[mono_ns=182679041372012][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=1 name=chip.run.validate ts=182678982203404 dur=59163860
+[mono_ns=182679041386774][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=2 name=chip.run.runner_run.device_wall ts=0 dur=1581706 clk=dev
+[mono_ns=182679041391401][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.preamble ts=0 dur=520009 clk=dev
+[mono_ns=182679041395327][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.graph_build ts=234694 dur=1329562 clk=dev
+[mono_ns=182679041398601][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.config_validate ts=240064 dur=3267 clk=dev
+[mono_ns=182679041401536][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.arena_wire ts=243377 dur=20091 clk=dev
+[mono_ns=182679041404080][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.sm_reset ts=263515 dur=42792 clk=dev
+[mono_ns=182679041406654][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.post_orch ts=1564357 dur=10309 clk=dev
+[mono_ns=182679041411671][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.orch ts=309837 dur=1109761 clk=dev
+[mono_ns=182679041414375][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=3 name=chip.run.runner_run.device_wall.sched ts=523091 dur=928269 clk=dev
+[mono_ns=182679041418521][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=1 name=chip.run.claim_release ts=182679041416508 dur=571
+[mono_ns=182679041424160][T0x738a8f082740][TIMING] emit_host_span: [STRACE] v=1 pid=488540 tid=488540 inv=1 hid=1b9a2b8de39e9724 depth=0 name=chip.run ts=182678621797294 dur=419625153 run_id=0 dispatch_id=0 slot_id=0 generation=1 run_epoch=1
+  TestAlternatingMatmulAdd::Case1 PASSED
