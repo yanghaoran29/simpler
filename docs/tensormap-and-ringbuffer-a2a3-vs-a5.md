@@ -112,6 +112,7 @@ The functional differences group into the following themes:
 | URMA completion | A5-specific implementation and product capability gate | Yes, for now | Retain the A5 path; do not claim that URMA is available in the default build |
 | Next-block prefetch | A2/A3-only performance optimization | No | Retain on A2/A3; validate on A5 before considering a port |
 | Scheduler progress publication | AICPU topology and measured publication cost | No | Retain A5's 16-task batching; keep per-advance publication on A2/A3, where the portable implementation showed no significant benefit |
+| Terminal deferred release | Measured end-of-run Scheduler release cost | No | Keep the current experiment scoped to A5; A2/A3 traces do not show the same large terminal release stall |
 | Fatal teardown | Software reliability strategy | No | Retain the current implementations; decide whether to converge after measuring the worst-case A5 teardown time |
 | Scheduler trace attribution | Software diagnostic strategy | No | Preserve the current traces; converge only after comparing generated timelines |
 
@@ -292,6 +293,36 @@ without a demonstrated payoff. The same-device A5
 measurements instead showed lower Effective time in all eight workloads, with
 an unweighted mean reduction of `2.81%`. Full A2/A3 measurements are recorded
 in the [PR benchmark follow-up](https://github.com/hw-native-sys/simpler/pull/1575#issuecomment-5310909143).
+
+### Terminal Deferred Release: A5 Experiment Scope
+
+The terminal deferred-release experiment is currently A5-only. A5 swimlanes
+showed Scheduler time extending beyond useful work while a large accumulated
+release backlog updated task reference counts and advanced ring reclamation at
+the end of a run. The corresponding A2/A3 traces reviewed for this work did
+not show a comparable block of terminal release work, so there is no measured
+A2/A3 bottleneck for this optimization to address.
+
+On A5, the experiment keeps exact per-task release while orchestration can
+still create work. Once orchestration is sealed, Schedulers may discard their
+local deferred-release backlogs at existing release boundaries. After every
+task has completed and all Schedulers leave dispatch, the last thread at a
+terminal barrier closes the remaining live ring slots in one pass and
+publishes the final ring state. Errors and non-terminal exits retain exact
+per-task lifecycle handling.
+
+The A5 benchmark covers seven workloads for 100 rounds and Qwen3 for five
+rounds. No workload regressed by 5% in Orchestrator time. Batch Paged Attention,
+the workload that exposed the terminal release cost, changed from
+`5918.916 us` on the refreshed A5 Main baseline to `5819.991 us` with the
+experiment (`-1.67%`). The same experiment had measured `6947.106 us` before
+restoring the Main Scheduler entry gate, which also demonstrates that hot-code
+layout must be preserved when evaluating the lifecycle optimization.
+
+These results establish an A5 optimization target, not a platform-independent
+policy. A2/A3 keeps its existing release behavior unless a future A2/A3
+swimlane shows the same terminal release bottleneck and a separate benchmark
+demonstrates a benefit.
 
 ### Fatal Teardown
 

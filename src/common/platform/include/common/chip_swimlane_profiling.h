@@ -550,6 +550,11 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
     // phase_data.graph_task identifies the ring-0 outer Graph task and
     // tasks_processed is the number of in-graph tasks patched in this slice.
     GraphPrepare = 13,
+    // Outer (sched lane): successful-run bulk lifecycle closure after every
+    // scheduler thread has left dispatch/completion. tasks_processed is the
+    // number of live slots terminalized across all rings.
+    // 记录阶段：Orchestrator 已结束且全部 Scheduler 调度循环退出后，由 terminal leader 写入。
+    TerminalClose = 14,
 };
 
 /** Index layout of the queue-depth snapshot arrays below: AIC=0, AIV=1, MIX=2.

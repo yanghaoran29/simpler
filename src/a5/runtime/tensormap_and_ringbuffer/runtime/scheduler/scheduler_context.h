@@ -214,6 +214,12 @@ private:
     // Platform AICore-register base array (set by AicpuExecutor before init()).
     uint64_t regs_{0};
 
+    // 使用阶段：Orchestrator 已结束、Scheduler 调度循环退出后的成功终态协调。
+    // status: 0 表示 closure 未完成，1 表示成功，-1 表示失败。两个 32 位原子
+    // 复用 regs_ 后的 8 字节尾部空洞，不扩大 SchedulerContext。
+    std::atomic<int32_t> terminal_close_arrived_{0};
+    std::atomic<int32_t> terminal_close_status_{0};
+
     // =========================================================================
     // Core management (scheduler_cold_path.cpp)
     // =========================================================================
@@ -469,6 +475,9 @@ private:
         uint64_t sched_start_ts
 #endif
     );
+
+    // 调用阶段：单个 Scheduler 调度循环退出后；最后到达线程负责 terminal closure。
+    __attribute__((noinline, cold)) int32_t finish_successful_terminal(SharedMemoryHeader *header, int32_t thread_idx);
 
 #if SIMPLER_DFX
     __attribute__((noinline, cold)) void log_chip_swimlane_summary(int32_t thread_idx, int32_t cur_thread_completed);
