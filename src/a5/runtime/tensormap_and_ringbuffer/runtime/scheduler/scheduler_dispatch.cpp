@@ -1045,7 +1045,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
-                rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_CAP
+                rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_CAP,
+                &orchestrator_done_
 #if SIMPLER_SCHED_PROFILING
                 ,
                 thread_idx
@@ -1174,18 +1175,22 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 }
 #endif
                 // Dummy tasks have no subtasks to retire and no fanout pre-conditions
-                // beyond their own producers; release self-reference so the slot can
-                // reach CONSUMED once all consumers drain.
+                // beyond their own producers. While lifecycle reclamation is active,
+                // release their self-reference so the slot can reach CONSUMED.
                 deferred_release_slot_states[deferred_release_count++] = &dummy_slot;
                 if (deferred_release_count >= DEFERRED_RELEASE_CAP) {
-                    while (deferred_release_count > 0) {
+                    if (orchestrator_done_.load(std::memory_order_acquire)) {
+                        deferred_release_count = 0;
+                    } else {
+                        while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
-                        (void)sched_->on_task_release(
-                            *deferred_release_slot_states[--deferred_release_count], thread_idx
-                        );
+                            (void)sched_->on_task_release(
+                                *deferred_release_slot_states[--deferred_release_count], thread_idx
+                            );
 #else
-                        sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+                            sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
+                        }
                     }
                 }
                 int32_t prev = completed_tasks_.fetch_add(1, std::memory_order_relaxed);
@@ -1298,15 +1303,20 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                     0;
             uint32_t released_count = static_cast<uint32_t>(deferred_release_count);
 #endif
-            while (deferred_release_count > 0) {
+            // A sealed graph delegates the remaining lifecycle work to terminal closure.
+            bool release_elided = deferred_release_count > 0 && orchestrator_done_.load(std::memory_order_acquire);
+            while (!release_elided && deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
                 (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
 #else
                 sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
             }
+            if (release_elided) {
+                deferred_release_count = 0;
+            }
 #if SIMPLER_DFX
-            if (release_t0 != 0) {
+            if (release_t0 != 0 && !release_elided) {
                 chip_swimlane_aicpu_record_sched_phase(
                     thread_idx, ChipSwimlaneSchedPhaseKind::Release, release_t0, get_sys_cnt_aicpu(),
                     chip_swimlane.sched_loop_count, released_count
@@ -1384,17 +1394,18 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         }
     }
 
-    // Drain any entries left in the deferred-release batch. The in-loop flush
-    // only fires on idle iterations and on buffer-full; a loop exit while the
-    // last iteration made progress can leave entries un-released. Drop them
-    // here so every consumed producer slot completes its on_task_release
-    // regardless of which loop-exit path fired.
-    while (deferred_release_count > 0) {
+    // An unsealed graph still needs exact lifecycle bookkeeping on every exit.
+    // Once orchestration is sealed, terminal closure owns the remaining slots.
+    bool release_elided = deferred_release_count > 0 && orchestrator_done_.load(std::memory_order_acquire);
+    while (!release_elided && deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
         (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
 #else
         sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
+    }
+    if (finish_successful_terminal(header, thread_idx) < 0) {
+        timeout_rc = -1;
     }
 
 #if SIMPLER_DFX

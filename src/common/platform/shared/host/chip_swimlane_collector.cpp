@@ -1173,6 +1173,8 @@ int ChipSwimlaneCollector::export_swimlane_json() {
                 return "async_poll";
             case ChipSwimlaneSchedPhaseKind::GraphPrepare:
                 return "graph_prepare";
+            case ChipSwimlaneSchedPhaseKind::TerminalClose:
+                return "terminal_close";
             }
             return "unknown";
         };

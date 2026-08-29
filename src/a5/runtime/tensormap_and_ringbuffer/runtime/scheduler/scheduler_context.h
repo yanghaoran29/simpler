@@ -214,6 +214,11 @@ private:
     // Platform AICore-register base array (set by AicpuExecutor before init()).
     uint64_t regs_{0};
 
+    // Successful terminal coordination. Status is 0 while pending, 1 on
+    // success, and -1 on failure. These fields occupy the 8-byte tail gap.
+    std::atomic<int32_t> terminal_close_arrived_{0};
+    std::atomic<int32_t> terminal_close_status_{0};
+
     // =========================================================================
     // Core management (scheduler_cold_path.cpp)
     // =========================================================================
@@ -469,6 +474,8 @@ private:
         uint64_t sched_start_ts
 #endif
     );
+
+    __attribute__((noinline, cold)) int32_t finish_successful_terminal(SharedMemoryHeader *header, int32_t thread_idx);
 
 #if SIMPLER_DFX
     __attribute__((noinline, cold)) void log_chip_swimlane_summary(int32_t thread_idx, int32_t cur_thread_completed);

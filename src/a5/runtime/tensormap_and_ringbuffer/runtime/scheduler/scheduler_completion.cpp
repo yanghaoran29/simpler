@@ -199,8 +199,11 @@ void SchedulerContext::complete_slot_task(
         }
         chip_swimlane.phase_complete_count++;
 #endif
+        // At capacity, a sealed graph delegates deferred lifecycle closure to the terminal barrier.
         if (deferred_release_count < DEFERRED_RELEASE_CAP) {
             deferred_release_slot_states[deferred_release_count++] = &slot_state;
+        } else if (orchestrator_done_.load(std::memory_order_acquire)) {
+            deferred_release_count = 0;
         } else {
             while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING

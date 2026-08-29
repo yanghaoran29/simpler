@@ -955,6 +955,7 @@ def run_analysis(  # noqa: PLR0912, PLR0915
         "early_dispatch": "EarlyDispatch (speculative staging)",
         "drain": "Drain (sync-start staging)",
         "graph_prepare": "GraphPrepare (Definition expansion)",
+        "terminal_close": "TerminalClose (bulk lifecycle closure)",
         "resolve": "Resolve (completion/dependency resolution)",
         "idle": "Idle (spinning, no progress — reconstructed from gaps)",
     }

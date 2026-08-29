@@ -195,6 +195,95 @@ TEST_F(SchedulerStateTest, ConsumedTransition) {
     EXPECT_EQ(slot.task_state.load(), CHIP_TASK_CONSUMED);
 }
 
+TEST_F(SchedulerStateTest, TerminalCloseResetsLiveIntervalAndPublishesTail) {
+    constexpr int32_t ring_id = 2;
+    SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
+    SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+
+    ring.fc.current_task_index.store(5, std::memory_order_release);
+    ring.fc.last_task_alive.store(1, std::memory_order_release);
+    ring_sched.last_task_alive = 1;
+    ring_sched.last_published_to_sm = 1;
+    for (int32_t task_id = 1; task_id < 5; task_id++) {
+        init_ring_slot(ring, task_id, CHIP_TASK_COMPLETED, ring_id, 7, 2);
+        ChipTaskSlotState &slot = ring.get_slot_state_by_task_id(task_id);
+        slot.fanin_refcount.store(3, std::memory_order_relaxed);
+        slot.completed_subtasks.store(1, std::memory_order_relaxed);
+    }
+
+    EXPECT_EQ(sched.terminal_close_live_slots(), 4);
+    EXPECT_EQ(ring_sched.last_task_alive, 5);
+    EXPECT_EQ(ring_sched.last_published_to_sm, 5);
+    EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 5);
+    for (int32_t task_id = 1; task_id < 5; task_id++) {
+        ChipTaskSlotState &slot = ring.get_slot_state_by_task_id(task_id);
+        EXPECT_EQ(slot.task_state.load(std::memory_order_relaxed), CHIP_TASK_CONSUMED);
+        EXPECT_EQ(slot.fanin_refcount.load(std::memory_order_relaxed), 0);
+        EXPECT_EQ(slot.fanout_refcount.load(std::memory_order_relaxed), 0u);
+        EXPECT_EQ(slot.fanout_count, FANOUT_SCOPE_BIT);
+        EXPECT_EQ(slot.completed_subtasks.load(std::memory_order_relaxed), 0);
+    }
+}
+
+TEST_F(SchedulerStateTest, TerminalCloseRejectsIntervalLargerThanWindow) {
+    constexpr int32_t ring_id = 1;
+    SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
+    SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+
+    int32_t invalid_head = static_cast<int32_t>(ring.task_window_size) + 1;
+    ring.fc.current_task_index.store(invalid_head, std::memory_order_release);
+    ring.fc.last_task_alive.store(0, std::memory_order_release);
+    ring_sched.last_task_alive = 0;
+
+    EXPECT_EQ(sched.terminal_close_live_slots(), -1);
+    EXPECT_EQ(ring_sched.last_task_alive, 0);
+    EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 0);
+}
+
+TEST_F(SchedulerStateTest, AsyncInlineCompletionDefersReleaseBeforeOrchestratorDone) {
+    alignas(64) ChipTaskSlotState slot;
+    init_slot(slot, CHIP_TASK_PENDING, 0, 1);
+    ChipTaskSlotState *deferred[1]{};
+    int32_t deferred_count = 0;
+    std::atomic<bool> release_seal{false};
+    AsyncWaitList::DrainCompletionSink sink{};
+    sink.sched = &sched;
+    sink.deferred_release_slot_states = deferred;
+    sink.deferred_release_count = &deferred_count;
+    sink.deferred_release_capacity = 1;
+    sink.release_seal = &release_seal;
+
+    EXPECT_TRUE(sched.async_wait_list.try_inline_complete_locked(sink, slot));
+    EXPECT_EQ(slot.task_state.load(), CHIP_TASK_COMPLETED);
+    EXPECT_EQ(deferred_count, 1);
+    EXPECT_EQ(deferred[0], &slot);
+}
+
+TEST_F(SchedulerStateTest, AsyncInlineCompletionElidesReleaseAtSealedCapacityBoundary) {
+    alignas(64) ChipTaskSlotState first;
+    alignas(64) ChipTaskSlotState second;
+    init_slot(first, CHIP_TASK_PENDING, 0, 1);
+    init_slot(second, CHIP_TASK_PENDING, 0, 1);
+    ChipTaskSlotState *deferred[1]{};
+    int32_t deferred_count = 0;
+    std::atomic<bool> release_seal{true};
+    AsyncWaitList::DrainCompletionSink sink{};
+    sink.sched = &sched;
+    sink.deferred_release_slot_states = deferred;
+    sink.deferred_release_count = &deferred_count;
+    sink.deferred_release_capacity = 1;
+    sink.release_seal = &release_seal;
+
+    EXPECT_TRUE(sched.async_wait_list.try_inline_complete_locked(sink, first));
+    EXPECT_EQ(first.task_state.load(), CHIP_TASK_COMPLETED);
+    EXPECT_EQ(deferred_count, 1);
+    EXPECT_EQ(deferred[0], &first);
+
+    EXPECT_TRUE(sched.async_wait_list.try_inline_complete_locked(sink, second));
+    EXPECT_EQ(second.task_state.load(), CHIP_TASK_COMPLETED);
+    EXPECT_EQ(deferred_count, 0);
+}
+
 TEST_F(SchedulerStateTest, ConsumedHeadAdvancesAfterContendedAdvanceLock) {
     constexpr int32_t ring_id = CHIP_MAX_RING_DEPTH - 1;
     constexpr int32_t head_task_id = 0;

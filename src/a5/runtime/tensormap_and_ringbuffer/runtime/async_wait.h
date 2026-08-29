@@ -188,6 +188,7 @@ struct AsyncWaitList {
         ChipTaskSlotState **deferred_release_slot_states{nullptr};
         int32_t *deferred_release_count{nullptr};
         int32_t deferred_release_capacity{0};
+        const std::atomic<bool> *release_seal{nullptr};
         int32_t inline_completed{0};
 #if SIMPLER_SCHED_PROFILING
         int32_t thread_idx{0};
@@ -306,7 +307,7 @@ struct AsyncWaitList {
     AsyncPollResult poll_and_complete(
         AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched,
         ChipTaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
-        int32_t deferred_release_capacity
+        int32_t deferred_release_capacity, const std::atomic<bool> *release_seal
 #if SIMPLER_SCHED_PROFILING
         ,
         int thread_idx

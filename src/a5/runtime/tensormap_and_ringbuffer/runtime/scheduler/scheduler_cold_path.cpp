@@ -10,8 +10,10 @@
  */
 #include "scheduler_context.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
+#include <limits>
 
 #include "common/unified_log.h"
 #include "aicpu/aicpu_device_config.h"
@@ -50,6 +52,48 @@ static bool latch_scheduler_error(SharedMemoryHeader *header, int32_t thread_idx
         header->sched_error_bitmap.fetch_or(1U << static_cast<uint32_t>(thread_idx), std::memory_order_acq_rel);
     }
     return won;
+}
+
+// The last scheduler to arrive performs bulk closure; the others wait for its result.
+int32_t SchedulerContext::finish_successful_terminal(SharedMemoryHeader *header, int32_t thread_idx) {
+    (void)thread_idx;
+    bool successful_terminal = orchestrator_done_.load(std::memory_order_acquire) && total_tasks_ > 0 &&
+                               completed_tasks_.load(std::memory_order_acquire) >= total_tasks_ &&
+                               header->orch_error_code.load(std::memory_order_acquire) == SIMPLER_ERROR_NONE &&
+                               header->sched_error_code.load(std::memory_order_acquire) == SIMPLER_ERROR_NONE;
+    if (!successful_terminal) return 0;
+
+    int32_t terminal_close_result = 0;
+    int32_t arrived = terminal_close_arrived_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (arrived == active_sched_threads_) {
+#if SIMPLER_DFX
+        uint64_t terminal_close_t0 = get_sys_cnt_aicpu();
+#endif
+        terminal_close_result = sched_->terminal_close_live_slots();
+#if SIMPLER_DFX
+        if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) {
+            uint64_t terminal_close_t1 = get_sys_cnt_aicpu();
+            int16_t phase_depth[CHIP_SWIMLANE_NUM_QUEUE_SHAPES];
+            constexpr size_t kMax = static_cast<size_t>(std::numeric_limits<int16_t>::max());
+            for (int s = 0; s < CHIP_SWIMLANE_NUM_QUEUE_SHAPES; s++) {
+                size_t qsize = sched_->ready_queues[s].size() + sched_->ready_sync_queues[s].size();
+                phase_depth[s] = static_cast<int16_t>(std::min(qsize, kMax));
+            }
+            chip_swimlane_aicpu_record_sched_phase(
+                thread_idx, ChipSwimlaneSchedPhaseKind::TerminalClose, terminal_close_t0, terminal_close_t1,
+                sched_chip_swimlane_[thread_idx].sched_loop_count,
+                static_cast<uint32_t>(terminal_close_result < 0 ? 0 : terminal_close_result), /*pop_hit=*/0,
+                /*pop_miss=*/0, phase_depth, phase_depth
+            );
+        }
+#endif
+        terminal_close_status_.store(terminal_close_result < 0 ? -1 : 1, std::memory_order_release);
+    } else {
+        while ((terminal_close_result = terminal_close_status_.load(std::memory_order_acquire)) == 0) {
+            SPIN_WAIT_HINT();
+        }
+    }
+    return terminal_close_result < 0 ? -1 : 0;
 }
 
 LoopAction SchedulerContext::handle_orchestrator_exit(
@@ -1158,6 +1202,8 @@ int32_t SchedulerContext::pre_handshake_init(
     // released to dispatch.
     completed_tasks_.store(0, std::memory_order_release);
     orchestrator_done_.store(false, std::memory_order_release);
+    terminal_close_arrived_.store(0, std::memory_order_release);
+    terminal_close_status_.store(0, std::memory_order_release);
     func_id_to_addr_ = runtime->dev.func_id_to_addr_;
 
     // total_tasks_ must be read before hs_setup_done_ is published: on the
@@ -1321,6 +1367,8 @@ void SchedulerContext::deinit() {
     total_tasks_ = 0;
     orchestrator_done_.store(false, std::memory_order_release);
     completed_.store(false, std::memory_order_release);
+    terminal_close_arrived_.store(0, std::memory_order_release);
+    terminal_close_status_.store(0, std::memory_order_release);
 
     // Reset core discovery and assignment state
     aic_count_ = 0;

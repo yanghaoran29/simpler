@@ -554,6 +554,10 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
     // nested TMR Resolve so post-processing never infers the role from rounded
     // timestamps. tasks_processed is completed SPSC slots.
     ResolveStandalone = 14,
+    // Outer (sched lane): successful-run bulk lifecycle closure after every
+    // scheduler thread has left dispatch/completion. tasks_processed is the
+    // number of live slots terminalized across all rings.
+    TerminalClose = 15,
 };
 
 /** Index layout of the queue-depth snapshot arrays below: AIC=0, AIV=1, MIX=2.

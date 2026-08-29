@@ -78,7 +78,7 @@ class TestChipSwimlane(SceneTestCase):
             "platforms": ["a5sim", "a5"],
             "manual": ["a5sim"],
             "params": {},
-            "required_sched_phases": ("release",),
+            "required_sched_phases": ("terminal_close",),
         },
         {
             "name": "aicpu_threads_2",
@@ -86,7 +86,7 @@ class TestChipSwimlane(SceneTestCase):
             "manual": ["a5sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {},
-            "required_sched_phases": ("release",),
+            "required_sched_phases": ("terminal_close",),
         },
     ]
 

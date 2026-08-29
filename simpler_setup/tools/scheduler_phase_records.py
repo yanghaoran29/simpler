@@ -19,9 +19,12 @@ SCHED_OUTER_PHASES = (
     "early_dispatch",
     "drain",
     "graph_prepare",
+    "terminal_close",
 )
 
-_SCHEDULER_WORK_PHASES = frozenset({"complete", "dispatch", "release", "early_dispatch", "drain", "graph_prepare"})
+_SCHEDULER_WORK_PHASES = frozenset(
+    {"complete", "dispatch", "release", "early_dispatch", "drain", "graph_prepare", "terminal_close"}
+)
 _RESOLUTION_WORK_PHASES = frozenset({"resolve", "resolve_standalone", "async_poll", "dummy"})
 
 

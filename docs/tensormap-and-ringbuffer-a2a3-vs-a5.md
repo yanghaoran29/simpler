@@ -4,7 +4,7 @@ This document describes the substantive differences in the current code under
 `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/`.
 
 > **Maintenance baseline:** The source layout and classifications were verified
-> on 2026-08-17. Recompute the counts and update the affected sections whenever
+> on 2026-08-31. Recompute the counts and update the affected sections whenever
 > the files or constants described here change.
 
 ## Comparison Boundary and Classification
@@ -112,6 +112,7 @@ The functional differences group into the following themes:
 | URMA completion | A5-specific implementation and product capability gate | Yes, for now | Retain the A5 path; do not claim that URMA is available in the default build |
 | Next-block prefetch | A2/A3-only performance optimization | No | Retain on A2/A3; validate on A5 before considering a port |
 | Scheduler progress publication | AICPU topology and measured publication cost | No | Retain A5's 16-task batching; keep per-advance publication on A2/A3, where the portable implementation showed no significant benefit |
+| Terminal task release | Measured end-of-run scheduler cost | No | A5 traces show per-task release blocking the tail after task submission has ended, so successful A5 runs close the remaining live interval once; retain incremental release on A2/A3 because no tail release blocking was found there |
 | Fatal teardown | Software reliability strategy | No | Retain the current implementations; decide whether to converge after measuring the worst-case A5 teardown time |
 | Scheduler trace attribution | Software diagnostic strategy | No | Preserve the current traces; converge only after comparing generated timelines |
 
@@ -292,6 +293,90 @@ without a demonstrated payoff. The same-device A5
 measurements instead showed lower Effective time in all eight workloads, with
 an unweighted mean reduction of `2.81%`. Full A2/A3 measurements are recorded
 in the [PR benchmark follow-up](https://github.com/hw-native-sys/simpler/pull/1575#issuecomment-5310909143).
+
+### Terminal Task Release: A5 Seal and Bulk Closure
+
+Task completion and task release are separate scheduler operations. Completion
+records the finished AICore work and unlocks dependent tasks. Release later
+drops the completed task's retained references, advances the ring's reclaim
+head across consumed slots, resets reusable slot state, and publishes reclaim
+progress. Both platforms defer this release work in a per-scheduler array with
+a capacity of 256 entries.
+
+A2/A3 preserves the incremental protocol for the whole run. It drains the
+array when it becomes full, during idle cleanup, and when dispatch exits. Every
+completed task therefore reaches `on_task_release()` before the scheduler
+returns.
+
+A5 follows the same protocol while the Orchestrator can still submit tasks.
+After `orchestrator_done_` seals the graph, however, no new task can require a
+reclaimed ring slot. At the next existing full-array, idle-drain, or exit-drain
+boundary, A5 discards the deferred-release backlog instead of calling
+`on_task_release()` once per entry. The seal is deliberately not loaded on
+every scheduler-loop iteration or every completion: completion and dependency
+unlocking remain unchanged, and the added acquire loads stay on boundaries
+that already perform release bookkeeping.
+
+Skipping incremental release does not leave a successful runtime reusable
+state open. After all submitted tasks are complete and every active Scheduler
+has left dispatch, the last Scheduler to reach a terminal barrier closes each
+ring's live interval `[last_task_alive, current_task_index)` in bulk. It marks
+the slots consumed, resets their reusable state, advances the local reclaim
+head, force-publishes the final shared watermark, and clears pending
+publication masks. The other Schedulers wait for the leader's result. The
+barrier uses two 32-bit atomics in an existing eight-byte `SchedulerContext`
+tail gap, and the closure routine is kept on a cold, out-of-line path.
+
+This terminal protocol is entered only when orchestration is sealed, the
+completed-task count has reached the submitted-task count, and neither the
+Orchestrator nor a Scheduler has reported an error. Fatal executions continue
+through emergency teardown instead of treating a partial graph as a successful
+bulk-close candidate. Initialization, deinitialization, and runtime reuse reset
+the barrier state.
+
+This optimization is independent of the A5 K=16 progress-publication policy in
+the preceding section. K=16 controls how often an already-advanced reclaim
+head is copied to shared memory during the run. Terminal release elision avoids
+the per-task reference-count and ring-advance work itself after graph sealing;
+its deferred-release array still has capacity 256 and does not impose a
+16-task release limit.
+
+| Stage | A2/A3 | A5 |
+| ----- | ----- | -- |
+| Before graph sealing | Complete tasks, defer release, then incrementally call `on_task_release()` | Same |
+| After graph sealing | Continue incremental release | Drop deferred release work at existing release boundaries |
+| Successful Scheduler exit | Drain every remaining deferred entry | All Schedulers rendezvous; one closes and publishes all remaining live slots |
+| Fatal or partial exit | Emergency teardown after the existing error checks | Emergency teardown; terminal bulk closure is not admitted |
+| Profiling | Release phases | Release phases plus a distinct `TerminalClose` phase |
+
+| File | A5-only terminal-release role |
+| ---- | ----------------------------- |
+| `runtime/async_wait.h`, `runtime/scheduler/scheduler_completion.cpp` | Propagate or read the graph seal at deferred-release capacity boundaries for normal and asynchronous completion |
+| `runtime/scheduler/scheduler_dispatch.cpp` | Elide sealed idle/exit backlog drains and enter terminal coordination after dispatch |
+| `runtime/scheduler/scheduler.h` | Validate and bulk-close each ring's remaining live interval, then force-publish the terminal watermark |
+| `runtime/scheduler/{scheduler_context.h,scheduler_cold_path.cpp}` | Store, reset, and execute the successful-terminal barrier and leader election |
+| `platform/include/common/chip_swimlane_profiling.h`, `platform/shared/host/chip_swimlane_collector.cpp`, `simpler_setup/tools/swimlane_converter.py` | Preserve terminal closure as a distinct Scheduler phase in generated timelines |
+
+The motivating experiment was run only on the local A5 system. Against main
+commit `bf68bb6c`, the seven non-Qwen workloads improved by `9.195%` in
+Effective geometric mean; Qwen3 improved by `0.604%`, and no workload regressed
+by 5% or more in Effective time. The largest gains were in the four paged-
+attention-unroll cases (`12.944%` to `18.083%`).
+
+The platform scope follows the observed bottleneck. On A5, the motivating
+timelines contain a visible tail after the Orchestrator has finished submitting
+tasks: Schedulers continue executing per-task release work even though no new
+task can consume the reclaimed capacity. That release interval extends the
+execution critical path, which gives the seal-and-bulk-close protocol a direct
+optimization target. No tail release blocking was found on A2/A3. Its release
+work did not appear as the corresponding post-orchestration critical-path
+interval, so there is currently no performance evidence that A2/A3 would
+benefit from the extra graph-seal observation, terminal barrier, leader
+election, and bulk-closure state. A2/A3 therefore keeps the simpler incremental
+release protocol, and this experiment does not run an A2/A3 benchmark or port
+the implementation there. This is an evidence-based software decision rather
+than an A5 hardware requirement; revisit it if a future A2/A3 timeline exposes
+the same tail release blocking.
 
 ### Fatal Teardown
 
