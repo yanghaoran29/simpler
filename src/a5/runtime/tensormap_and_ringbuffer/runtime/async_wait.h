@@ -188,6 +188,8 @@ struct AsyncWaitList {
         ChipTaskSlotState **deferred_release_slot_states{nullptr};
         int32_t *deferred_release_count{nullptr};
         int32_t deferred_release_capacity{0};
+        // 调用阶段：Scheduler 运行期间；Orchestrator 可能仍在运行，也可能已经结束。
+        const std::atomic<bool> *release_seal{nullptr};
         int32_t inline_completed{0};
 #if SIMPLER_SCHED_PROFILING
         int32_t thread_idx{0};
@@ -303,10 +305,11 @@ struct AsyncWaitList {
     }
 
     template <bool Profiling>
+    // 调用阶段：Scheduler 主循环轮询异步完成；Orchestrator 可能仍在运行，也可能已经结束。
     AsyncPollResult poll_and_complete(
         AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched,
         ChipTaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
-        int32_t deferred_release_capacity
+        int32_t deferred_release_capacity, const std::atomic<bool> *release_seal
 #if SIMPLER_SCHED_PROFILING
         ,
         int thread_idx

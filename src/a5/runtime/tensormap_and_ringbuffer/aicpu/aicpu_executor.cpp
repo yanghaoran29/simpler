@@ -304,13 +304,11 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
             if (init_failed_.load(std::memory_order_acquire)) return -1;
         }
 #else
+        // 调用阶段：Orchestrator 和 Scheduler 启动前的 AICPU 握手阶段。
         // Perf path: a scheduler that sees an invalid core report (its own or a
-        // peer's, observed so far) latches completed_ via abort_and_shutdown, which
-        // stops any peer still entering dispatch (run()'s is_completed() gate). A
-        // peer that already passed that gate is not joined here — its own cores are
-        // valid (it handshaked them), and the failure ends in the host device reset
-        // that reaps every core, so the residual overlap is bounded and
-        // non-corrupting. finished_count_ is reset per-run in deinit(), not here.
+        // peer's, observed so far) latches completed_ via abort_and_shutdown.
+        // Peers that have not entered dispatch stop at run()'s completion gate;
+        // the failure ends in the host device reset that reaps every core.
         if (sched_ctx_.handshake_failed()) {
             sched_ctx_.abort_and_shutdown(runtime);
             init_failed_.store(true, std::memory_order_release);
@@ -851,6 +849,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         LOG_INFO("Thread %d: Orchestrator completed", thread_idx);
     }
 
+    // 调用阶段：Scheduler 线程进入调度；正常并发模式下 Orchestrator 此时仍可能运行。
+    // 成功路径的 Scheduler 参加统一终态协议；已完成的失败路径直接进入 shutdown。
     // Scheduler thread (orchestrator thread skips dispatch and exits after orchestration)
     if (!sched_ctx_.is_completed() && thread_idx < sched_thread_num_) {
         // Device orchestration: wait for the primary orchestrator to initialize the SM header

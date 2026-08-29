@@ -637,6 +637,45 @@ struct SchedulerState {
         return advanced;
     }
 
+    // 调用阶段：Orchestrator 已结束、所有任务已完成，并且全部 Scheduler 调度循环均已退出。
+    // 仅 terminal barrier 的最后到达线程调用，统一关闭仍存活的 ring slot。
+    int32_t terminal_close_live_slots() {
+        int32_t current_task_indices[CHIP_MAX_RING_DEPTH];
+        int32_t total_closed = 0;
+
+        for (int32_t ring_id = 0; ring_id < CHIP_MAX_RING_DEPTH; ring_id++) {
+            auto &ring_sched = ring_sched_states[ring_id];
+            int32_t current_task_index = ring_sched.ring->fc.current_task_index.load(std::memory_order_acquire);
+            int32_t live_count = current_task_index - ring_sched.last_task_alive;
+            if (live_count < 0 || static_cast<uint64_t>(live_count) > ring_sched.ring->task_window_size) {
+                LOG_ERROR(
+                    "terminal lifecycle close has invalid ring %d interval [%d, %d) for window %" PRIu64, ring_id,
+                    ring_sched.last_task_alive, current_task_index, ring_sched.ring->task_window_size
+                );
+                return -1;
+            }
+            current_task_indices[ring_id] = current_task_index;
+            total_closed += live_count;
+        }
+
+        for (int32_t ring_id = 0; ring_id < CHIP_MAX_RING_DEPTH; ring_id++) {
+            auto &ring_sched = ring_sched_states[ring_id];
+            int32_t current_task_index = current_task_indices[ring_id];
+            for (int32_t id = ring_sched.last_task_alive; id < current_task_index; id++) {
+                ChipTaskSlotState &slot_state = ring_sched.ring->get_slot_state_by_task_id(id);
+                slot_state.task_state.store(CHIP_TASK_CONSUMED, std::memory_order_relaxed);
+                slot_state.reset_for_reuse();
+            }
+            ring_sched.last_task_alive = current_task_index;
+            ring_sched.sync_to_sm(true);
+        }
+
+        advance_pending_mask.store(0, std::memory_order_relaxed);
+        publication_request_mask.store(0, std::memory_order_relaxed);
+        publication_ack_mask.store(0, std::memory_order_relaxed);
+        return total_closed;
+    }
+
     bool try_claim_ready_once(ChipTaskSlotState &slot_state) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         for (;;) {
@@ -1323,26 +1362,37 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 #else
     sink.sched->on_task_complete(slot_state);
 #endif
+    // 调用阶段：Scheduler drain 正在处理异步完成；Orchestrator 可能仍在运行，也可能已经结束。
+    // 仅当本地 release buffer 满时读取 seal，Orchestrator 结束后跳过逐 task release。
+    bool release_elided = false;
     if (*sink.deferred_release_count >= sink.deferred_release_capacity) {
-        while (*sink.deferred_release_count > 0) {
+        release_elided = sink.release_seal != nullptr && sink.release_seal->load(std::memory_order_acquire);
+        if (release_elided) {
+            *sink.deferred_release_count = 0;
+        } else {
+            while (*sink.deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
-            (void)sink.sched->on_task_release(
-                *sink.deferred_release_slot_states[--(*sink.deferred_release_count)], sink.thread_idx
-            );
+                (void)sink.sched->on_task_release(
+                    *sink.deferred_release_slot_states[--(*sink.deferred_release_count)], sink.thread_idx
+                );
 #else
-            sink.sched->on_task_release(*sink.deferred_release_slot_states[--(*sink.deferred_release_count)]);
+                sink.sched->on_task_release(*sink.deferred_release_slot_states[--(*sink.deferred_release_count)]);
 #endif
+            }
         }
     }
-    sink.deferred_release_slot_states[(*sink.deferred_release_count)++] = &slot_state;
+    if (!release_elided) {
+        sink.deferred_release_slot_states[(*sink.deferred_release_count)++] = &slot_state;
+    }
     sink.inline_completed++;
     return true;
 }
 
 template <bool Profiling>
+// 调用阶段：Scheduler 主循环轮询异步任务；Orchestrator 可能仍在运行，也可能已经结束。
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
     AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched, ChipTaskSlotState **deferred_release_slot_states,
-    int32_t &deferred_release_count, int32_t deferred_release_capacity
+    int32_t &deferred_release_count, int32_t deferred_release_capacity, const std::atomic<bool> *release_seal
 #if SIMPLER_SCHED_PROFILING
     ,
     int thread_idx
@@ -1356,6 +1406,8 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
     sink.deferred_release_slot_states = deferred_release_slot_states;
     sink.deferred_release_count = &deferred_release_count;
     sink.deferred_release_capacity = deferred_release_capacity;
+    // 调用阶段：Scheduler 运行期间向 mailbox drain 传递 Orchestrator 完成标志。
+    sink.release_seal = release_seal;
 #if SIMPLER_SCHED_PROFILING
     sink.thread_idx = thread_idx;
 #endif
@@ -1394,16 +1446,28 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
 #else
             sched->on_task_complete(*entry.slot_state);
 #endif
+            // 调用阶段：Scheduler 完成异步 task；Orchestrator 可能仍在运行，也可能已经结束。
+            // seal 只在 release buffer 满的边界生效。
+            bool release_elided = false;
             if (deferred_release_count >= deferred_release_capacity) {
-                while (deferred_release_count > 0) {
+                release_elided = release_seal != nullptr && release_seal->load(std::memory_order_acquire);
+                if (release_elided) {
+                    deferred_release_count = 0;
+                } else {
+                    while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
-                    (void)sched->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
+                        (void)sched->on_task_release(
+                            *deferred_release_slot_states[--deferred_release_count], thread_idx
+                        );
 #else
-                    sched->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
+                        sched->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
+                    }
                 }
             }
-            deferred_release_slot_states[deferred_release_count++] = entry.slot_state;
+            if (!release_elided) {
+                deferred_release_slot_states[deferred_release_count++] = entry.slot_state;
+            }
             result.completed++;
 
             int32_t last = count - 1;

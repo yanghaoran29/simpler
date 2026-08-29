@@ -1171,6 +1171,9 @@ int ChipSwimlaneCollector::export_swimlane_json() {
                 return "async_poll";
             case ChipSwimlaneSchedPhaseKind::GraphPrepare:
                 return "graph_prepare";
+            // 调用阶段：设备侧 Orchestrator/Scheduler 均已结束，Host 导出已采集的 terminal phase。
+            case ChipSwimlaneSchedPhaseKind::TerminalClose:
+                return "terminal_close";
             }
             return "unknown";
         };

@@ -1759,6 +1759,8 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             "drain_prepare": "cq_build_attempt_runnable",  # inner: cluster scan + build_payload
             "drain_publish": "cq_build_attempt_passed",  # inner: MMIO write_reg per subtask (the cohort launch)
             "graph_prepare": "rail_animation",  # bounded Scheduler-side Definition expansion
+            # 调用阶段：设备侧 Scheduler 已结束，Host 正在离线转换 terminal phase。
+            "terminal_close": "olive",  # successful-run bulk lifecycle closure
             # Inner in TMR; standalone on HBG's dedicated P thread.
             "resolve": "vsync_highlight_color",  # on_task_complete: walk consumer list
             # Separate-lane (Worker View AICPU_N) — fallback color if it ever lands on Sched
@@ -1935,6 +1937,8 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                     "drain_prepare",
                     "drain_publish",
                     "graph_prepare",
+                    # 调用阶段：设备侧 Scheduler 已结束，Host 筛选并导出已回传的 terminal phase。
+                    "terminal_close",
                 ):
                     continue
                 start_us = record["start_time_us"]

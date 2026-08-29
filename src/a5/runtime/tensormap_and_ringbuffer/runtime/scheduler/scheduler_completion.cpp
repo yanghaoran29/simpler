@@ -198,8 +198,12 @@ void SchedulerContext::complete_slot_task(
         }
         chip_swimlane.phase_complete_count++;
 #endif
+        // 调用阶段：Scheduler 处理 AICore completion；Orchestrator 可能仍在运行，也可能已经结束。
+        // 仅在本地 release buffer 满时读取 seal；编排结束后丢弃 release 债务，稍后统一收口。
         if (deferred_release_count < DEFERRED_RELEASE_CAP) {
             deferred_release_slot_states[deferred_release_count++] = &slot_state;
+        } else if (orchestrator_done_.load(std::memory_order_acquire)) {
+            deferred_release_count = 0;
         } else {
             while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
