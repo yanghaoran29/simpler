@@ -1,0 +1,206 @@
+{
+  "schema": 1,
+  "params": [
+    {
+      "name": "x_hc",
+      "direction": "In",
+      "shape": [
+        -1,
+        4,
+        7168
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "hc_attn_fn",
+      "direction": "In",
+      "shape": [
+        24,
+        28672
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "hc_attn_scale",
+      "direction": "In",
+      "shape": [
+        3
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "hc_attn_base",
+      "direction": "In",
+      "shape": [
+        24
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "attn_norm_w",
+      "direction": "In",
+      "shape": [
+        7168
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "wq_a",
+      "direction": "In",
+      "shape": [
+        7168,
+        1536
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "wq_b",
+      "direction": "In",
+      "shape": [
+        1536,
+        65536
+      ],
+      "dtype": "int8"
+    },
+    {
+      "name": "wq_b_scale",
+      "direction": "In",
+      "shape": [
+        65536
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "wkv",
+      "direction": "In",
+      "shape": [
+        7168,
+        512
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "gamma_cq",
+      "direction": "In",
+      "shape": [
+        1536
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "gamma_ckv",
+      "direction": "In",
+      "shape": [
+        512
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "freqs_cos",
+      "direction": "In",
+      "shape": [
+        16384,
+        64
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "freqs_sin",
+      "direction": "In",
+      "shape": [
+        16384,
+        64
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "kv_cache",
+      "direction": "InOut",
+      "shape": [
+        -1,
+        128,
+        1,
+        512
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "block_table",
+      "direction": "In",
+      "shape": [
+        128
+      ],
+      "dtype": "int32"
+    },
+    {
+      "name": "ori_slot_mapping",
+      "direction": "In",
+      "shape": [
+        128
+      ],
+      "dtype": "int64"
+    },
+    {
+      "name": "position_ids",
+      "direction": "In",
+      "shape": [
+        -1
+      ],
+      "dtype": "int32"
+    },
+    {
+      "name": "attn_sink",
+      "direction": "In",
+      "shape": [
+        128
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "wo_a",
+      "direction": "In",
+      "shape": [
+        16,
+        1024,
+        4096
+      ],
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "wo_b",
+      "direction": "In",
+      "shape": [
+        7168,
+        16384
+      ],
+      "dtype": "int8"
+    },
+    {
+      "name": "wo_b_scale",
+      "direction": "In",
+      "shape": [
+        7168
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "x_out",
+      "direction": "Out",
+      "shape": [
+        -1,
+        4,
+        7168
+      ],
+      "dtype": "fp32"
+    },
+    {
+      "name": "num_tokens",
+      "direction": "In",
+      "shape": null,
+      "dtype": "int32"
+    }
+  ],
+  "num_return_types": 2,
+  "platform": "a5",
+  "backend_type": "Ascend950"
+}

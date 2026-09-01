@@ -274,8 +274,8 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     const int32_t hs_nthreads = decouple_orch ? (nthreads - 1) : nthreads;
 
     // Barrier-free scheduler init (the decoupled default). Each scheduler thread
-    // handshakes exactly the clusters it will dispatch to (blocked-layout
-    // ownership: cluster ci = {ci, N/3+2ci, N/3+2ci+1}, owned by ci % hs_nthreads)
+    // handshakes exactly the balanced contiguous range of clusters it will
+    // dispatch to (cluster ci = {ci, N/3+2ci, N/3+2ci+1} in blocked layout)
     // and self-assigns them, then returns straight to run(). With no all-thread
     // barrier a thread starts dispatching to its own cores as soon as they come
     // up, independent of peers still handshaking. hs_nthreads == active_sched_threads_

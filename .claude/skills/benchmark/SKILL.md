@@ -1,415 +1,425 @@
 ---
 name: benchmark
-description: Benchmark runtime performance on hardware. If the current branch has commits ahead of upstream/main or uncommitted changes, compares against the fork point (merge-base). Otherwise benchmarks current state only. Use when the user asks to benchmark, measure performance, or compare latency.
+description: "Benchmark iterative A5 performance with a three-way Main/Before/After comparison, change-scope-aware case selection, a coarse screen with chip swimlanes, precise runs, and timestamped reports. Use when asked to benchmark, measure latency, compare performance, run an ablation, or produce A5 swimlanes; example-only changes retest only affected cases, while shared algorithm/runtime changes retest the full suite."
 ---
 
-# Benchmark Workflow
+# A5 Performance Update Workflow
 
-Benchmark runtime performance on Ascend hardware. Automatically detects whether to run a single benchmark or a comparison.
+Use this workflow for every performance-related code update unless the user explicitly overrides it.
 
-## Modes
+## Required comparison
 
-| Condition | Mode | What happens |
-| --------- | ---- | ------------ |
-| 0 commits ahead AND no uncommitted changes | **Single** | Benchmark current state and report its runtime-specific timing columns |
-| >= 1 commits ahead OR uncommitted changes | **Compare** | Benchmark merge-base (worktree) AND current workspace, show comparison table |
+Every update compares exactly three datasets:
 
-## Input
+1. **Main** — matching historical data for the recorded Main commit.
+2. **Before** — matching historical data for the workspace immediately before the current experiment.
+3. **After** — newly measured data for selected affected cases; for an example-only update, unaffected
+   cases may reuse matching Before data and must be labeled as reused.
 
-Optional benchmark arguments forwarded to `tools/benchmark_rounds.sh`:
+Never replace this with a two-way comparison. Show all three absolute values and these deltas:
+
+- Before versus Main;
+- After versus Main;
+- After versus Before — the primary effect of the current update.
+
+Positive latency change means slower; negative means faster.
+
+## Historical-data rule
+
+Do not rerun Main or Before. Read both from existing timestamped reports, `summary.csv` files, and
+raw timing summaries under `outputs/` or another user-specified historical result directory.
+
+Resolve provenance before editing code:
+
+- record Main's exact commit SHA;
+- record Before's `HEAD`, changed source files, and local diff identity;
+- identify the historical source path and timestamp for both datasets;
+- verify device, CANN, PTO-ISA pin, runtime, case, round count, and aggregation method.
+
+Before normally equals the preceding update report's After dataset. Do not use a similarly named
+result unless its code identity and measurement method match. If matching historical data is absent
+or ambiguous, report the missing provenance and ask the user which history to use; do not silently
+rerun Main/Before or fabricate values.
+
+Historical data may use a different time window. Record that limitation. Use the same NPU device as
+the historical datasets for After whenever possible; otherwise call out device-to-device variance.
+
+## Select benchmark scope from the code diff
+
+Classify the update before running hardware:
+
+- **Example-only change** — changes are confined to one or more workload-specific example/test
+  implementations and do not modify shared runtime, scheduler, allocator, graph construction,
+  codegen, library, or common kernel logic. Retest only the directly affected case or cases.
+- **Algorithm/shared change** — changes touch a shared algorithm, runtime, scheduler, orchestrator,
+  allocator, ring/queue logic, common library, codegen, shared kernel, or another component that can
+  affect multiple workloads. Retest the full default suite.
+- **Mixed or ambiguous change** — if example-specific and shared code both change, or the impact
+  boundary cannot be established from the diff, classify it as algorithm/shared and retest the full
+  suite.
+
+For an example-only update, keep the full three-way document coherent by reusing Before as After
+for unaffected cases and marking those rows `reused`, not measured. Copy their matching historical
+swimlane artifacts into the new artifact directory when a complete eight-case artifact set is useful;
+capture new swimlanes only for affected cases. Never present a reused `0.00%` row as a new measurement.
+
+Record the classification, changed files, selected cases, and why those cases cover the diff in the
+timestamped report.
+
+## Defaults
+
+- Platform: `a5`.
+- Runtime: `tensormap_and_ringbuffer`.
+- Device: the same card used by the selected historical datasets; card 1 when their established
+  baseline is card 1.
+- Coarse screen: one golden-enabled performance round, one separate level-4 chip-swimlane round,
+  and one separate dependency-graph round per selected case. Run them serially, never combine
+  `--enable-chip-swimlane` and `--enable-dep-gen` in one process, and never overlap those two
+  processes. Gate on the swimlane's full AICore task window versus the matching historical Main
+  swimlane; the dependency run is artifact-only and does not contribute timing.
+- Precise default: 100 rounds per selected case, arithmetic average.
+- Precise Qwen3 / DeepSeek-V4 Pro attention: five rounds. For Qwen3, sort by Device latency, drop
+  the fastest and slowest rounds, then average the other three rounds and their corresponding
+  Host/Effective/Orch/Sched values. DeepSeek-V4 Pro attention uses the arithmetic mean of its five
+  rounds.
+- Performance runs and swimlane runs are separate; swimlane instrumentation must not affect the
+  performance table. Do not recapture swimlanes after the gate passes; the coarse-stage capture is
+  the update's one required After swimlane.
+
+Default A5 TMR cases:
+
+| Case | Test file | Rounds |
+| --- | --- | ---: |
+| alternating_matmul_add Case1 | `tests/st/a5/tensormap_and_ringbuffer/alternating_matmul_add/test_alternating_matmul_add.py` | 100 |
+| benchmark_bgemm Case0 | `examples/a5/tensormap_and_ringbuffer/benchmark_bgemm/test_benchmark_bgemm.py` | 100 |
+| paged_attention_unroll Case1 | `tests/st/a5/tensormap_and_ringbuffer/paged_attention_unroll/test_paged_attention_unroll.py` | 100 |
+| paged_attention_unroll Case2 | same as above | 100 |
+| paged_attention_unroll_manual_scope Case1 | `examples/a5/tensormap_and_ringbuffer/paged_attention_unroll_manual_scope/test_paged_attention_unroll_manual_scope.py` | 100 |
+| paged_attention_unroll_manual_scope Case2 | same as above | 100 |
+| batch_paged_attention Case1 | `tests/st/a5/tensormap_and_ringbuffer/batch_paged_attention/test_batch_paged_attention.py` | 100 |
+| qwen3_14b_decode StressBatch16Seq3500 | `examples/a5/tensormap_and_ringbuffer/qwen3_14b_decode/test_qwen3_14b_decode.py` | 5 |
+| deepseek_v4_pro_attention DecodeSWA | `examples/a5/tensormap_and_ringbuffer/deepseek_v4_pro_attention/test_deepseek_v4_pro_attention.py` | 5 |
+| deepseek_v4_pro_attention DecodeCSA | same as above | 5 |
+| deepseek_v4_pro_attention DecodeHCA | same as above | 5 |
+| deepseek_v4_pro_attention PrefillSWA | same as above | 5 |
+| deepseek_v4_pro_attention PrefillCSA | same as above | 5 |
+| deepseek_v4_pro_attention PrefillHCA | same as above | 5 |
+
+The default case list defines the full suite for algorithm/shared changes. Example-only changes use
+only the affected rows from this list. If several example directories change, select their union.
+Do not run a selected list with one uniform `-n 100`: Qwen3 and DeepSeek-V4 Pro attention precise
+measurement remain five rounds.
+
+## Workflow
+
+### 1. Define the update
+
+Before changing code:
+
+- state the single mechanism or hypothesis being tested;
+- capture `git rev-parse HEAD`, `git status --short`, `git diff --stat`, and `pto_isa.pin`;
+- classify the diff as example-only or algorithm/shared and record the selected cases;
+- locate and validate the Main and Before historical datasets;
+- choose a timestamp and short slug for the update.
+
+Use `YYYYMMDD_HHMMSS` in Asia/Shanghai time. Keep this timestamp stable for all artifacts from the
+same update.
+
+### 2. Implement and validate locally
+
+Make the requested code change without disturbing unrelated workspace edits. Run formatting,
+`git diff --check`, and tests proportional to the changed path. The coarse one-round pass for each
+selected case should be golden-enabled when output correctness is meaningful, so it acts as both a
+correctness check and the first performance screen.
+
+Use a workspace-local venv:
+
+```bash
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+pip install --no-build-isolation -e .
+```
+
+Verify `build/lib/pto_isa_build.json` points into the current workspace and matches `pto_isa.pin`.
+
+### 3. Run the coarse screen and capture swimlanes
+
+Use one `task-submit` allocation for all selected cases. Never run two benchmark processes on the
+same device concurrently. Do not run Main or Before. On known local A5 hosts where
+`onboard-arch-precheck` cannot read `npu-smi` board info, set
+`SIMPLER_SKIP_ARCH_PRECHECK=1` and proceed with `--platform a5` (see the personal
+`a5-onboard-host` skill).
+
+For every selected After case, run these as three separate processes/runs in this order:
+
+1. one golden-enabled performance round without swimlane instrumentation, for correctness and a
+   supporting one-round performance signal;
+2. one `--skip-golden --enable-chip-swimlane 4` round, saved as the update's After swimlane;
+3. after the swimlane process has fully exited, one `--skip-golden --enable-dep-gen` round using the
+   same case, inputs, runtime, build, and round count, saved as that swimlane's `deps.json`.
+
+The swimlane and dependency graph must be captured serially. Do not place
+`--enable-chip-swimlane 4` and `--enable-dep-gen` on the same command line, do not launch their
+processes in the background, and do not start dep-gen while the swimlane process is still running.
+Dep-gen perturbs device execution and is not valid swimlane timing. After both captures finish,
+place `deps.json` beside `chip_swimlane_records.json` in the final per-case artifact directory, then
+run the swimlane converter so `merged_swimlane.json` includes dependency identities and arrows.
+
+Compare the After swimlane's full AICore task window with the matching historical **Main
+swimlane**. Define this window as:
 
 ```text
-/benchmark
-/benchmark -d 4 -n 50
-/benchmark -d 4 -d 6
-/benchmark --serial-orch-sched
+max(aicore_tasks.end_time) - min(aicore_tasks.start_time)
 ```
 
-Extra arguments (`-n`, `-r`, `--serial-orch-sched`, etc.) are forwarded to
-`tools/benchmark_rounds.sh`.
-
-### Device arguments (`-d`)
-
-The `-d` flag specifies NPU device IDs.
-
-**Hard rule: one benchmark process per device at any time.** Never run two benchmark processes on the same `-d` device concurrently — not two runtimes, not baseline + current, nothing. This prevents resource contention and ensures stable measurements.
-
-On a shared hardware host, the complete single or compare run must execute
-inside one `task-submit` allocation. Let that allocation own every device for
-the full sequence; do not submit one job per example or run the script bare.
-
-| `-d` count | Compare mode behavior |
-| ---------- | --------------------- |
-| One device (`-d 4`) | **Sequential**: baseline first, then current, both on the same device. Multiple runtimes also run serially on that device. |
-| Two devices (`-d 4 -d 6`) | **Parallel per-runtime**: for each runtime, baseline on first device and current on second device can run in parallel (different devices). Multiple runtimes still run serially — finish one runtime on both devices before starting the next. |
-| Zero (not specified) | Let `task-submit --device auto` allocate one device (see Step 2) |
-
-**Defaults** (when not specified): use `benchmark_rounds.sh` defaults (device 0, 100 rounds, a2a3, tensormap_and_ringbuffer).
-
-## Runtime Selection
-
-`tools/benchmark_rounds.sh` supports `-r <runtime>`:
-
-- `tensormap_and_ringbuffer` (default)
-- `host_build_graph`
-
-Each architecture/runtime quadrant has its own list at the top of the script.
-TMR reports Host / Device / Effective / Orch / Sched. HBG reports Host / Device
-because its orchestration runs on the host and has no device-side Orch/Sched
-windows. `--serial-orch-sched` is TMR-only and must be rejected for HBG.
-
-## Step 1: Detect Mode
+It spans the first AIC/AIV task start through the final AIC/AIV task end. Do not use the capture
+log's Device wall time as the gate metric; report it only as supporting data. Main swimlane history
+must use the same case, accelerator model, runtime and instrumentation level. Prefer the same card;
+if only another card of the same model is available, use it only with an explicit cross-card
+variance caveat. Do not substitute Main's precise aggregate or Before's swimlane for this gate. If
+matching Main swimlane history is absent or ambiguous, stop and request the correct history rather
+than rerunning Main automatically.
 
 ```bash
-git fetch upstream main --quiet
-COMMITS_AHEAD=$(git rev-list HEAD --not upstream/main --count 2>/dev/null || echo "0")
-HAS_CHANGES=$(git status --porcelain)
-
-if [ "$COMMITS_AHEAD" -eq 0 ] && [ -z "$HAS_CHANGES" ]; then
-  MODE="single"
-else
-  MODE="compare"
-  MERGE_BASE=$(git merge-base upstream/main HEAD)
-fi
+task-submit --timeout 7200 --max-time 7200 --device <historical-device> \
+  --run "bash '<absolute-coarse-payload-script>'"
 ```
 
-## Step 2: Device Isolation
-
-When `task-submit` is available, allocate the requested device IDs or use
-`--device auto`; run the architecture gate as the first command inside that
-allocation, then pass `$TASK_DEVICE` to every benchmark command. Hold one
-allocation for the whole baseline/current sequence. When `task-submit` is
-unavailable, follow
-`.claude/lib/onboard-detection.md` and clearly report that the fallback run is
-unlocked.
-
-Before submitting, inspect the queue:
+For the golden-enabled coarse performance round, invoke:
 
 ```bash
-task-submit --list
+--platform a5 --device "$DEVICE_ID" --case <case> --manual include \
+--rounds 1
 ```
 
-Remove each `-d` option from the forwarded `BENCH_ARGS` after collecting its
-value in `REQUESTED_DEVICES`. Build the allocation arguments once and reuse
-them for the single `task-submit` call:
+For the separate coarse-stage swimlane round, invoke:
 
 ```bash
-case "${#REQUESTED_DEVICES[@]}" in
-  0) TASK_SUBMIT_DEVICE_ARGS=(--device auto --device-num 1) ;;
-  1) TASK_SUBMIT_DEVICE_ARGS=(--device "${REQUESTED_DEVICES[0]}") ;;
-  2) TASK_SUBMIT_DEVICE_ARGS=(--device "${REQUESTED_DEVICES[0]},${REQUESTED_DEVICES[1]}") ;;
-  *) echo "ERROR: benchmark accepts at most two -d devices"; exit 1 ;;
-esac
+--platform a5 --device "$DEVICE_ID" --case <case> --manual include \
+--rounds 1 --skip-golden --enable-chip-swimlane 4
 ```
 
-## Step 3: Confirm PTO-ISA Pin
-
-PTO-ISA is selected by the repo-root `pto_isa.pin`. Record the pin in the
-benchmark notes so baseline and current runs can be compared against the same
-source revision:
+Only after that command exits, invoke the separate dependency-graph round:
 
 ```bash
-PTO_ISA_PIN=$(tr -d '[:space:]' < pto_isa.pin)
+--platform a5 --device "$DEVICE_ID" --case <case> --manual include \
+--rounds 1 --skip-golden --enable-dep-gen
 ```
 
-## Step 4: Prepare — Compute Absolute Paths
+Save all three raw outputs, render the performance timing table, and preserve the swimlane and
+dependency artifacts listed in step 5. Apply this gate to the full AICore task-window metric:
 
-The Bash tool resets its working directory to the project root on every call. Relative paths like `cd worktree && ...` are fragile and easy to forget. **Compute absolute paths once, then use them everywhere.**
+- if any selected After swimlane's full AICore task window is at least `+5.00%` longer than its
+  matching historical Main swimlane, stop before precise measurement;
+- if every selected case is below `+5.00%` regression, proceed to precise measurement;
+- if correctness fails, dependency capture fails, swimlane conversion fails, or either timing
+  source is missing, stop that case and treat the gate as failed.
+
+The uninstrumented coarse time and the instrumented swimlane time are both diagnostic only. Do not
+combine either with precise rounds or use them in the final precise average. Record the supporting
+coarse After/Before comparison, but do not use it as the 5% stop gate unless the user explicitly
+requests that additional gate.
+
+### 4. Run precise After performance after the gate passes
+
+Use one `task-submit` allocation for the complete selected-case precise sequence. For each selected
+case, invoke its test file with:
 
 ```bash
-PROJECT_ROOT="$(pwd)"                    # e.g. /home/user/simpler
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-WORKTREE_ABS="${PROJECT_ROOT}/tmp/worktree_baseline_${TIMESTAMP}"
-PAYLOAD_SCRIPT="${PROJECT_ROOT}/tmp/benchmark_payload_${TIMESTAMP}.sh"
-mkdir -p "${PROJECT_ROOT}/tmp"
+--platform a5 --device "$DEVICE_ID" --case <case> --manual include \
+--rounds <100-or-5> --skip-golden
 ```
 
-Store `PROJECT_ROOT` and `WORKTREE_ABS` as shell variables in every Bash call that needs them (the Bash tool does not persist variables across calls). Use this pattern:
+Use 100 rounds for every selected default case and five rounds for selected Qwen3 or
+DeepSeek-V4 Pro attention cases. Save the raw
+combined output, then render its timing table:
 
 ```bash
-# Correct — self-contained, uses absolute path
-WORKTREE_ABS="/home/user/simpler/tmp/worktree_baseline_20260331_102302"
-"${WORKTREE_ABS}/tools/benchmark_rounds.sh" -d 2 ...
+python -m simpler_setup.tools.strace_timing <raw.log> --rounds-table
 ```
 
-**Do NOT use `cd` + relative `./tools/...`** — this is the #1 source of silent errors (running the wrong workspace).
+Do not rebuild or execute Main/Before during this step.
 
-## Step 5: Run Benchmarks
+### 5. Validate the coarse-stage After swimlanes
 
-### Single Mode
+Use the level-4 captures already produced during step 3. Do not capture selected cases a second time
+after the gate. Do not capture Main or Before again. For example-only changes, copy matching
+unaffected historical artifacts if the update directory should expose all eight cases; do not
+recapture them.
 
-```bash
-task-submit --timeout 7200 --max-time 7200 "${TASK_SUBMIT_DEVICE_ARGS[@]}" \
-  --run "set -o pipefail && \
-    .claude/skills/onboard-arch-precheck/check.sh '$PLATFORM' && \
-    BENCH_DEVICE=\${TASK_DEVICE%%,*} && \
-    ./tools/benchmark_rounds.sh $BENCH_ARGS -d \$BENCH_DEVICE -r '$RUNTIME' \
-      2>&1 | tee 'tmp/benchmark_${TIMESTAMP}.txt'"
-```
+Preserve, per case:
 
-Use `--serial-orch-sched` to run each case once in the default overlapped mode
-and once with `SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE=1`, then emit serial-vs-parallel
-Delta/Change tables.
+- `chip_swimlane_records.json`;
+- `deps.json`, captured by a separate serial `--enable-dep-gen` run with the same topology;
+- `merged_swimlane.json` for direct Perfetto loading;
+- the kernel name map when generated;
+- the swimlane capture log and the dep-gen capture log.
 
-### Compare Mode
+Validate every newly captured raw file reports `chip_swimlane_level == 4`, contains task records,
+and converts with its separately captured `deps.json` to a non-empty Perfetto trace. Validate that
+`deps.json` is non-empty, parseable, and contains the expected task topology. Validate copied
+artifacts as well before linking them.
 
-Use a **git worktree** for the baseline so the current workspace is never disturbed.
-Prepare the worktree and venv before taking an NPU lock. Steps 5b and 5c below
-are the inner payload of one self-contained shell script; never execute either
-onboard command outside that script's single `task-submit` allocation. Embed
-the computed paths and selected platform/runtime as literal assignments at the
-top of the payload, then map the allocated devices and run the architecture
-check:
+### 6. Calculate the three-way result
 
-```bash
-set -euo pipefail
+For every metric available to the runtime, report:
 
-PROJECT_ROOT="/absolute/path/to/current"
-WORKTREE_ABS="/absolute/path/to/baseline"
-PLATFORM="a2a3"
-RUNTIME="tensormap_and_ringbuffer"
-TIMESTAMP="YYYYmmdd_HHMMSS"
-BENCH_ARGS=("-n" "100")  # all forwarded args except -d/--device and -r/--runtime
-IFS=',' read -r -a LOCKED_DEVICES <<< "$TASK_DEVICE"
-BASELINE_DEVICE="${LOCKED_DEVICES[0]}"
-CURRENT_DEVICE="${LOCKED_DEVICES[1]:-${LOCKED_DEVICES[0]}}"
-"$PROJECT_ROOT/.claude/skills/onboard-arch-precheck/check.sh" "$PLATFORM"
-```
+| Case | Main | Before | After | Before/Main | After/Main | After/Before |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
 
-After composing the payload from the sequential or parallel block below,
-submit that script exactly once:
+TMR metrics are Host, Device, Effective, Orch, and Sched. Use Device as the primary end-to-end
+latency headline and retain the other columns for mechanism analysis. HBG has only Host and Device;
+do not invent missing fields.
 
-```bash
-task-submit --timeout 7200 --max-time 7200 "${TASK_SUBMIT_DEVICE_ARGS[@]}" \
-  --run "bash '$PAYLOAD_SCRIPT'"
-```
+Calculate percentage change as `(new / reference - 1) * 100`. For multi-case summaries, calculate
+the geometric mean of per-case ratios, not an arithmetic mean of percentages.
 
-#### CRITICAL: Worktree needs its own build environment
+For Qwen, list all five Device samples, identify the dropped fastest/slowest rounds, and state the
+three retained indices or values. Apply those same retained rounds to every other Qwen metric.
 
-The worktree is a fresh checkout at merge-base — it has **no pre-built runtime binaries** and no compiled nanobind extension. Two things must be built:
+For an example-only change, include the selected cases as newly measured After data. If the report
+also shows the full suite, set unaffected After values equal to the matching Before history, label
+their provenance as `reused`, and exclude them from claims about measured change. For an
+algorithm/shared change, all eight After rows must come from the new precise run.
 
-1. **Runtime `.so` binaries** (`build/lib/`) — loaded via ctypes by `bindings.py`
-2. **Nanobind `_task_interface` extension** — compiled C++ Python bindings
+Interpretation guide:
 
-Pure Python files under `simpler_setup/` (e.g. `scene_test.py`, `kernel_compiler.py`) are resolved via `sys.path` from the worktree when an editable install is active there, so they correctly come from the worktree. But `_task_interface.*.so` is installed into site-packages by `pip install -e .` and is **shared system-wide**. Without isolation, the worktree would use the main workspace's nanobind extension — which may have incompatible API changes.
+| After/Before | Assessment |
+| ---: | --- |
+| below -2% | notable improvement |
+| -2% to +2% | likely within noise unless consistently supported by related metrics/traces |
+| above +2% | potential regression requiring explicit discussion |
 
-**Solution: always create a venv in the worktree** (~26s overhead). This builds both the nanobind extension AND runtime binaries, fully isolating the baseline.
+Highlight every Device, Effective, Orchestrator, or Scheduler regression at or above 5%. Do not
+hide mixed results behind the geometric mean. Use Effective only for the deprecated-name acceptance
+rule below so one workload is counted once rather than once per correlated metric.
 
-#### 5a. Create worktree, venv, and build
+## Deprecated experiment naming
 
-Inline the **absolute** worktree path (copy-paste the value, do not rely on shell variables persisting):
+Use like-for-like **After versus Before Effective latency** as the precise-run acceptance metric.
+Do not count Main deltas or the correlated Device, Orchestrator, and Scheduler columns again when
+choosing the filename. Continue to show and discuss all of those metrics in the report.
 
-```bash
-# Create worktree
-git worktree add "$WORKTREE_ABS" "$MERGE_BASE" --quiet
+Classify each selected case by its precise round count:
 
-# Create venv with system site-packages (for torch, numpy, etc.)
-python3 -m venv "${WORKTREE_ABS}/.venv" --system-site-packages
+- **Five-round cases** — currently Qwen3 StressBatch16Seq3500 and all six
+  `deepseek_v4_pro_attention` cases (DecodeSWA/CSA/HCA, PrefillSWA/CSA/HCA).
+- **Other cases** — the remaining default suite rows (100-round cases).
 
-# Install into venv — builds nanobind extension + runtime binaries
-"${WORKTREE_ABS}/.venv/bin/pip" install -e "${WORKTREE_ABS}" -q 2>&1 | tail -3
-```
+Prefix the experiment with `deprecated_` when **any** of the following hold over the selected
+cases:
 
-This gives the worktree its own `_task_interface.*.so` in `.venv/lib/python3.*/site-packages/`, completely independent from the main workspace.
+1. **Five-round single-case hard limit** — any selected five-round case has Effective regression
+   of at least `+5.00%` versus matching Before.
+2. **Five-round geometric-mean optimization** — over all selected five-round cases, compute
+   `ratio_i = After Effective / Before Effective` and the geometric-mean optimization
+   `(1 - exp(mean(log(ratio_i)))) * 100%`. This value **must be strictly positive** (overall
+   faster). Zero or negative → deprecated. Skip this clause (and clause 1) when no five-round
+   case is selected.
+3. **Other-case allowance** — among selected non-five-round cases, at most **two** may show
+   Effective regression of at least `+5.00%`. Three or more → deprecated.
 
-#### 5b. Run baseline
+Do **not** use the older Qwen-only `+2.00%` rule or the older non-Qwen geometric-mean tier table
+that permitted 0/1/2 regressions from aggregate gain brackets. For an example-only experiment,
+apply the three clauses only over newly measured selected cases; exclude reused rows.
 
-Activate the venv so `benchmark_rounds.sh` (which calls `python3`) picks up the worktree's nanobind extension and Python bindings:
+Never use Host time to decide whether an experiment is deprecated. Host remains a diagnostic field
+in the comparison table. Device, Orchestrator, Scheduler, After/Main, and swimlane deltas remain
+mandatory diagnostics and may still fail their own coarse gate, but they do not independently add
+to the precise-run deprecated count unless the user explicitly designates another acceptance
+metric for that update.
 
-```bash
-# WORKTREE_ABS must be the literal absolute path.
-(
-  cd "$WORKTREE_ABS"
-  source .venv/bin/activate
-  pwd
-  ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$BASELINE_DEVICE" -r "$RUNTIME" \
-    2>&1 | tee "${PROJECT_ROOT}/tmp/benchmark_baseline_${TIMESTAMP}_${RUNTIME}.txt"
-)
-```
+Do not trigger this rule by comparing an uninstrumented one-round coarse result with a historical
+100/5-round aggregate, by comparing different cards without an accepted cross-card baseline, or by
+using a diagnostic metric that the report has established as non-comparable. Main baseline and Main
+rerun documents are datasets rather than experiments and are not deprecated because two Main
+captures differ by 5%.
 
-**Always print `pwd` after `cd` to verify you are in the correct directory.** If it does not print the worktree path, something went wrong — do not proceed.
-
-#### 5c. Run current
-
-```bash
-cd "$PROJECT_ROOT"
-./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$CURRENT_DEVICE" -r "$RUNTIME" \
-  2>&1 | tee "tmp/benchmark_current_${TIMESTAMP}_${RUNTIME}.txt"
-```
-
-#### 5d. Cleanup
-
-```bash
-git worktree remove "$WORKTREE_ABS" --force
-```
-
-If `git worktree remove` fails (e.g., cwd was inside the deleted worktree), use:
-
-```bash
-git -C "$PROJECT_ROOT" worktree remove "$WORKTREE_ABS" --force
-```
-
-#### Parallel execution (two devices)
-
-When two devices are available, run baseline and current **for the same runtime** in parallel on separate devices. The venv ensures the worktree has its own nanobind extension, so both workspaces are fully independent.
-
-```bash
-# For each runtime (serially):
-for RUNTIME in "${RUNTIMES_TO_BENCH[@]}"; do
-  # Baseline on device A (from worktree with venv), current on device B (from main) — parallel
-  (cd "$WORKTREE_ABS" && source .venv/bin/activate && pwd && ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$BASELINE_DEVICE" -r "$RUNTIME") &
-  BASELINE_PID=$!
-  (cd "$PROJECT_ROOT" && ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$CURRENT_DEVICE" -r "$RUNTIME") &
-  CURRENT_PID=$!
-  PARALLEL_RC=0
-  wait "$BASELINE_PID" || PARALLEL_RC=$?
-  wait "$CURRENT_PID" || PARALLEL_RC=$?
-  if [[ $PARALLEL_RC -ne 0 ]]; then
-    exit "$PARALLEL_RC"
-  fi
-done
-```
-
-**Never launch the next runtime until the current one finishes on all devices.**
-
-#### Sequential execution (one device)
-
-```bash
-# 1. Worktree + venv already created in step 5a
-
-# 2. For each runtime (serially — one device, one process at a time):
-#    Baseline first (from worktree with venv activated in a subshell)
-(
-  cd "$WORKTREE_ABS"
-  source .venv/bin/activate
-  pwd
-  ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$BASELINE_DEVICE" -r "$RUNTIME" \
-    2>&1 | tee "${PROJECT_ROOT}/tmp/benchmark_baseline_${TIMESTAMP}_${RUNTIME}.txt"
-)
-
-#    Then current (from main workspace, no baseline venv)
-cd "$PROJECT_ROOT"
-./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$CURRENT_DEVICE" -r "$RUNTIME" \
-  2>&1 | tee "tmp/benchmark_current_${TIMESTAMP}_${RUNTIME}.txt"
-
-# 3. Cleanup
-git -C "$PROJECT_ROOT" worktree remove "$WORKTREE_ABS" --force
-```
-
-## Step 6: Report Results
-
-Parse every `Avg <Metric>:` field present in the runtime's output. Missing
-runtime-inapplicable columns are not zero measurements and must not be printed.
-
-| Metric | Source | What it captures |
-| ------ | ------ | ---------------- |
-| Host | `[STRACE]` `chip.run` span | steady_clock around dispatch (Python overhead included); rendered from markers by `strace_timing --rounds-table` |
-| Device | `[STRACE]` `chip.run.runner_run.device_wall` span | full on-NPU AICPU run wall (`AicpuPhase::RunWall`, `max(end) − min(start)` across threads); on TMR this whole run + teardown is strictly larger than the windows below |
-| Effective | TMR orch/sched markers' device-domain `ts`+`dur` | TMR only: `max(orch_end,sched_end) − min(orch_start,sched_start)` — the orch∪sched merged window |
-| Orch | `[STRACE]` `…device_wall.orch` span (`--rounds-table`) | TMR only: device orchestrator (graph-build) window |
-| Sched | `[STRACE]` `…device_wall.sched` span (`--rounds-table`) | TMR only: scheduler dispatch/execution window |
-
-The scene test only *emits* `[STRACE]` markers to stderr; `benchmark_rounds.sh`
-tees the run and renders the Host/Device/Effective/Orch/Sched table with
-`python -m simpler_setup.tools.strace_timing <log> --rounds-table`. All columns
-come from the markers (onboard and sim) — no CANN device log is read.
-
-Use Effective as the TMR headline metric. HBG has no equivalent phase window:
-report Host and Device independently and do not synthesize an overall score
-from one of them.
-
-For a per-stage breakdown of `Host`/`Device` (host `bind`/`runner_run`/`validate`
-plus TMR's AICPU `preamble`/`so_load`/`graph_build`
-(`config_validate`/`arena_wire`/`sm_reset` prep sub-phases)/`post_orch`
-subdivision), parse the `[STRACE]` markers with
-`simpler_setup/tools/strace_timing.py` (add `--tree` for the nested view) — see
-[docs/dfx/host-trace.md](../../../docs/dfx/host-trace.md). Same `SIMPLER_HOST_STRACE`
-gate, no extra flag (set `SIMPLER_DEVICE_STRACE_ENABLE=0` to drop only the device
-`clk=dev` markers).
-
-### Single Mode
-
-Use the runtime's actual column set; the five-column example below is TMR. An
-HBG table contains only Host and Device.
+Use the exact sibling names:
 
 ```text
-Benchmark at: <short SHA>
-Args: -d 4 -n 100
-
-Example                          Host (us)   Device (us)   Effective (us)    Orch (us)   Sched (us)
--------------------------------  ---------   -----------   --------------   ----------   ----------
-alternating_matmul_add           480000.0        9050.0         1235.5          820.3       1235.4
-benchmark_bgemm                  370000.0        7100.0          892.1          650.2        892.0
-...
+outputs/perf-updates/deprecated_<YYYYMMDD_HHMMSS>_<slug>.md
+outputs/perf-updates/deprecated_<YYYYMMDD_HHMMSS>_<slug>/
 ```
 
-### Compare Mode
+Historical reports under `outputs/perf-updates/202608/` keep their existing names; do not bulk
+rename them when the acceptance rule changes. Rename both the Markdown report and its artifact
+directory for **new** experiments after the precise acceptance calculation is complete. Update
+every relative link in that report and every cross-report reference to either old name. Preserve
+all raw results; `deprecated_` marks the conclusion and must not delete data.
 
-Show a comparison table per metric (one row per metric per example), **grouped
-by runtime**. For TMR, `Effective` is the headline metric used in the overall
-summary and the other four are context. HBG has no combined headline metric:
-show Host and Device as independent rows and summarize regressions separately.
+### 7. Write exactly one timestamped update report
+
+Create one new Markdown document for each update; use the deprecated form immediately when the
+experiment has met the rule above:
 
 ```text
-Merge-base: <short SHA>  →  HEAD: <short SHA> (+ uncommitted)
-Args: -d 4 -n 100
-Device: baseline=4, current=4  (or baseline=4, current=6)
-
-### tensormap_and_ringbuffer
-
-Example                      Base (us)   HEAD (us)   Delta (us)   Change (%)
----------------------------  ---------   ---------   ----------   ----------
-alternating_matmul_add         1240.1      1235.5        -4.6       -0.37%
-  (host)                     480000.0    470000.0    -10000.0       -2.08%
-  (device)                     9000.0      8800.0       -200.0       -2.22%
-  (orch)                        830.0       820.3        -9.7       -1.17%
-  (sched)                      1240.0      1235.4        -4.6       -0.37%
-benchmark_bgemm                 890.3       892.1        +1.8       +0.20%
-  (host)                     370000.0    370500.0      +500.0       +0.14%
-  (device)                     7100.0      7080.0       -20.0       -0.28%
-  (orch)                        650.0       650.2        +0.2       +0.03%
-  (sched)                       890.2       892.0        +1.8       +0.20%
-...
-
-Overall: X of Y examples improved, Z regressed   (based on Effective)
+outputs/perf-updates/<YYYYMMDD_HHMMSS>_<slug>.md
+outputs/perf-updates/deprecated_<YYYYMMDD_HHMMSS>_<slug>.md
 ```
 
-If baseline and current ran on **different devices**, add a note:
+Never overwrite or append the previous update's report. Do not create an additional README for the
+same update unless the user requests one. CSV files, raw logs, and traces are artifacts rather than
+additional update documents and may live under:
 
-> Note: Baseline and current ran on different NPU devices (4 vs 6). Results within ±2% may reflect device-to-device variance rather than code changes. For definitive comparison, re-run on the same device with `/benchmark -d <single_device>`.
+```text
+outputs/perf-updates/<YYYYMMDD_HHMMSS>_<slug>/
+```
 
-**Interpretation:**
+The report must contain:
 
-| Change (%) | Assessment |
-| ---------- | ---------- |
-| < -2% | Notable improvement |
-| -2% to +2% | Within noise margin |
-| > +2% | Potential regression — flag for review |
+1. **Update purpose** — what changed, the hypothesis, and the exact code scope.
+2. **Code identities** — Main SHA, Before identity, After identity/local diff, and PTO-ISA pin.
+3. **Historical provenance** — source path and timestamp for Main and Before; explicitly state they
+   were reused rather than rerun.
+4. **Method** — device, CANN, runtime, cases, round counts, aggregation, ordering, and whether runs
+   were interleaved; include change classification, selected cases, coarse results, and gate decision.
+5. **Three-way results** — absolute Main/Before/After data and all three delta views.
+6. **Effect analysis** — which cases improved/regressed, likely mechanism, noise limitations, and a
+   clear retain/revert/further-test conclusion.
+7. **Validation** — local tests and golden results.
+8. **Swimlanes** — one clickable `merged_swimlane.json` link and one `deps.json` link per selected
+   After case plus the raw-artifact directory; state that swimlane and dep-gen were captured in
+   separate serial runs, and identify copied historical artifacts separately.
 
-If any example shows > 5% regression, highlight it explicitly.
+If the coarse gate fails, still create the one timestamped report. Mark it as a coarse-and-swimlane
+stopped experiment, show the uninstrumented coarse values and the Main/After swimlane gate, link all
+raw logs and traces, and state that precise runs were intentionally not performed.
 
-## Error Handling
+State clearly when the After workspace is uncommitted. Use relative paths inside repository docs;
+do not embed usernames or user-specific absolute paths.
 
-| Error | Action |
-| ----- | ------ |
-| `task-submit` cannot allocate the requested device count | Report the queue/allocation error; do not run outside the lock |
-| Benchmark script fails | Report which examples failed; continue with remaining |
-| No timing data | Warn: "No timing markers — ensure `SIMPLER_HOST_STRACE` is enabled" |
-| All examples fail | Check: did you run `pip install -e .` in the worktree venv? |
-| Worktree creation fails | Fall back to stash/checkout approach or report error |
-| `Pre-built runtime binaries not found` | The venv `pip install -e .` should have built these; re-run it |
-| `ModuleNotFoundError: _task_interface` | Venv not activated; add `source .venv/bin/activate &&` before the command |
+## Failure handling
 
-## Checklist
+| Failure | Action |
+| --- | --- |
+| Main or Before history is missing/ambiguous | Stop the comparison and request the correct historical source; do not rerun it automatically |
+| `task-submit` cannot allocate the device | Report the allocation/queue error; do not run unlocked |
+| After full AICore swimlane window versus matching Main swimlane is at least 5% longer | Stop before precise runs; preserve coarse logs and swimlanes and write a timestamped stopped-experiment report; identify the coarse-gate failure, but do not apply the precise-run aggregate naming rule without precise data |
+| Coarse correctness/timing fails | Treat the gate as failed; preserve logs and do not start precise measurement for that case |
+| One After benchmark fails | Preserve its log, continue safe independent cases, and mark the three-way table incomplete |
+| Timing markers are absent | Preserve the log and report that the case has no usable performance data |
+| Dependency-graph capture fails or `deps.json` is invalid | Preserve the independent swimlane and both capture logs; treat the case's coarse artifact gate as failed and do not start its precise measurement |
+| Swimlane conversion fails | Preserve the raw JSON and capture log; report the affected case without claiming 8/8 coverage |
+| Build metadata points outside the workspace | Rebuild in the local venv before running hardware |
 
-- [ ] Mode detected (single vs compare)
-- [ ] Architecture precheck passed and one `task-submit` allocation owns the run
-- [ ] PTO-ISA pinned to CI commit
-- [ ] `PROJECT_ROOT` and `WORKTREE_ABS` absolute paths computed
-- [ ] (Compare mode) Worktree created, venv built with `pip install -e .`
-- [ ] (Compare mode) Baseline completed — venv activated, `pwd` confirmed worktree path before running
-- [ ] Current completed in main workspace
-- [ ] Worktree cleaned up (compare mode)
-- [ ] Results table uses TMR's five columns or HBG's Host / Device columns
-- [ ] (Compare mode) Device difference noted if applicable
-- [ ] (Compare mode) Regressions > 2% flagged
+## Completion checklist
+
+- [ ] Main historical dataset identified and not rerun.
+- [ ] Before historical dataset identified before editing and not rerun.
+- [ ] After workspace identity and update purpose recorded.
+- [ ] Diff classified as example-only or algorithm/shared; selected cases and rationale recorded.
+- [ ] One golden-enabled coarse round, one level-4 swimlane round, and one separate dep-gen round completed for every selected case.
+- [ ] Swimlane and dep-gen ran serially as separate processes; neither command enabled both features.
+- [ ] Matching historical Main swimlane provenance identified and the 5% full-AICore-window gate evaluated.
+- [ ] If the gate passed, selected default cases use 100 precise rounds; selected Qwen3 and
+      DeepSeek-V4 Pro attention use five.
+- [ ] Qwen middle-three aggregation uses Device ordering and matching rows for all metrics.
+- [ ] One coarse-stage level-4 chip swimlane captured and validated for every selected After case.
+- [ ] One matching, separately captured `deps.json` is beside every selected After swimlane and was used during conversion.
+- [ ] Unaffected reused rows/artifacts are clearly labeled and were not rerun.
+- [ ] Main/Before/After absolute values and all three delta views are present.
+- [ ] Qwen Effective is below +2%, and the non-Qwen Effective geometric-mean optimization and permitted/actual >=5% regression counts are recorded.
+- [ ] If Qwen fails or the non-Qwen actual count exceeds its permitted count, `deprecated_` is on both the report and artifact directory, with links updated.
+- [ ] One new timestamped Markdown report describes the update and its effect.
+- [ ] Raw logs, timing summaries, CSV, swimlane artifacts, and `deps.json` files are linked from that report.

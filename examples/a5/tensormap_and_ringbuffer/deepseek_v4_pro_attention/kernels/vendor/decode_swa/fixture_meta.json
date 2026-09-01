@@ -1,0 +1,208 @@
+{
+  "schema": 1,
+  "start_pos": 8192,
+  "num_tokens": 8,
+  "params": [
+    {
+      "name": "x_hc",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        8,
+        4,
+        7168
+      ]
+    },
+    {
+      "name": "hc_attn_fn",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        24,
+        28672
+      ]
+    },
+    {
+      "name": "hc_attn_scale",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        3
+      ]
+    },
+    {
+      "name": "hc_attn_base",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        24
+      ]
+    },
+    {
+      "name": "attn_norm_w",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        7168
+      ]
+    },
+    {
+      "name": "wq_a",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        7168,
+        1536
+      ]
+    },
+    {
+      "name": "wq_b",
+      "kind": "tensor",
+      "dtype": "int8",
+      "shape": [
+        1536,
+        65536
+      ]
+    },
+    {
+      "name": "wq_b_scale",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        65536
+      ]
+    },
+    {
+      "name": "wkv",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        7168,
+        512
+      ]
+    },
+    {
+      "name": "gamma_cq",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        1536
+      ]
+    },
+    {
+      "name": "gamma_ckv",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        512
+      ]
+    },
+    {
+      "name": "freqs_cos",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        16384,
+        64
+      ]
+    },
+    {
+      "name": "freqs_sin",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        16384,
+        64
+      ]
+    },
+    {
+      "name": "kv_cache",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        128,
+        128,
+        1,
+        512
+      ]
+    },
+    {
+      "name": "swa_slot_mapping",
+      "kind": "tensor",
+      "dtype": "int64",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "name": "swa_indices",
+      "kind": "tensor",
+      "dtype": "int32",
+      "shape": [
+        8,
+        128
+      ]
+    },
+    {
+      "name": "swa_lens",
+      "kind": "tensor",
+      "dtype": "int32",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "name": "position_ids",
+      "kind": "tensor",
+      "dtype": "int32",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "name": "attn_sink",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "name": "wo_a",
+      "kind": "tensor",
+      "dtype": "bfloat16",
+      "shape": [
+        16,
+        1024,
+        4096
+      ]
+    },
+    {
+      "name": "wo_b",
+      "kind": "tensor",
+      "dtype": "int8",
+      "shape": [
+        7168,
+        16384
+      ]
+    },
+    {
+      "name": "wo_b_scale",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        7168
+      ]
+    },
+    {
+      "name": "x_out",
+      "kind": "tensor",
+      "dtype": "float32",
+      "shape": [
+        8,
+        4,
+        7168
+      ]
+    }
+  ]
+}

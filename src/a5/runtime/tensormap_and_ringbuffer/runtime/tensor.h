@@ -32,3 +32,5 @@
 // wire form, at global scope. tests/lint/check_kernel_wire_isolation.py holds that
 // separation; an include that breaks it turns this line into a redeclaration.
 using Tensor = simpler::tmr::Tensor;
+// Harvested orchestration (e.g. deepseek_v4_pro_attention) emits TaskTensor.
+using TaskTensor = simpler::tmr::Tensor;

@@ -64,6 +64,7 @@ A5_TMR_EXAMPLE_CASES=(
     "paged_attention_unroll_manual_scope=Case1,Case2"
     "batch_paged_attention=Case1"
     "qwen3_14b_decode=StressBatch16Seq3500"
+    "deepseek_v4_pro_attention=DecodeSWA,DecodeCSA,DecodeHCA,PrefillSWA,PrefillCSA,PrefillHCA"
 )
 
 # --- a5 + host_build_graph ---
@@ -75,6 +76,25 @@ A5_HBG_EXAMPLE_CASES=(
     "batch_paged_attention=Case1"
     "qwen3_14b_decode=GraphExecutionBatch16Seq3500"
 )
+
+# Examples that stay on five precise rounds even when the global default is 100.
+# Keep in sync with .claude/skills/benchmark/SKILL.md.
+FIVE_ROUND_EXAMPLES=(
+    qwen3_14b_decode
+    deepseek_v4_pro_attention
+)
+
+example_rounds() {
+    local example="$1"
+    local name
+    for name in "${FIVE_ROUND_EXAMPLES[@]}"; do
+        if [[ "$example" == "$name" ]]; then
+            echo 5
+            return
+        fi
+    done
+    echo "$ROUNDS"
+}
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -124,7 +144,8 @@ Usage:
 Options:
   -p, --platform Platform to run on (default: a2a3)
   -d, --device   Device ID (default: 0)
-  -n, --rounds   Override number of rounds for each example (default: 100)
+  -n, --rounds   Override number of rounds for most examples (default: 100).
+                 qwen3_14b_decode and deepseek_v4_pro_attention stay at 5.
   -r, --runtime  Runtime to benchmark: tensormap_and_ringbuffer (default),
                  host_build_graph
   -v, --verbose  Save detailed test_*.py output to a timestamped log file
@@ -251,11 +272,13 @@ parse_timing() {
 run_bench() {
     local example="$1" example_dir="$2" case_name="${3:-}"
     local mode="${4:-parallel}"
+    local case_rounds
+    case_rounds=$(example_rounds "$example")
 
     if [[ -n "$case_name" ]]; then
-        echo "  ---- $case_name [$mode] ----"
+        echo "  ---- $case_name [$mode] (rounds=$case_rounds) ----"
     else
-        echo "  ---- $mode ----"
+        echo "  ---- $mode (rounds=$case_rounds) ----"
     fi
 
     local fw_stdout_file
@@ -271,7 +294,7 @@ run_bench() {
         run_cmd=(
             python3 "$test_file"
             --platform "$PLATFORM" --device "$DEVICE_ID"
-            --rounds "$ROUNDS" --skip-golden
+            --rounds "$case_rounds" --skip-golden
         )
     else
         echo "  SKIPPED: no test_*.py found in $example_dir"
