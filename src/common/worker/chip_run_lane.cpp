@@ -12,6 +12,8 @@
 #include "chip_run_lane.h"
 
 #include "chip_worker.h"
+#include "common/unified_log.h"
+#include "runtime_c_api.h"
 
 #include <algorithm>
 #include <deque>
@@ -45,9 +47,18 @@ struct ChipRunState {
 };
 
 struct ChipRunLaneState {
+    enum class PrewarmPhase : uint8_t { PENDING, RUNNING, COMPLETE, SKIPPED };
+
     explicit ChipRunLaneState(ChipWorker &worker) :
         worker(&worker),
         generations(worker.pipeline_depth(), 0) {}
+
+    static CallConfig make_prewarm_config(const CallConfig &src) {
+        CallConfig dry{};
+        dry.aicpu_thread_num = src.aicpu_thread_num;
+        dry.runtime_env = src.runtime_env;
+        return dry;
+    }
 
     [[noreturn]] static void rethrow_as_poisoned(const std::exception_ptr &error) {
         try {
@@ -77,6 +88,54 @@ struct ChipRunLaneState {
 
     bool permits_native_successor(const ChipRunState &predecessor, const ChipRunState &successor) const {
         return permits_native_successor(predecessor, successor.config);
+    }
+
+    bool run_prewarm_dry_run(const std::shared_ptr<ChipRunState> &seed) {
+        if (prewarm != PrewarmPhase::PENDING) return true;
+        prewarm = PrewarmPhase::RUNNING;
+        const CallConfig dry_config = make_prewarm_config(seed->config);
+        ChipWorkerNativeRun native{};
+        try {
+            native = worker->prepare_native_run_on_slot(
+                seed->callable_id, &seed->args, dry_config, seed->lease.slot_id, seed->lease.generation, seed->run_id,
+                seed->dispatch_id, nullptr, 0, false, PTO_NATIVE_RUN_FLAG_PREWARM_DRY_RUN
+            );
+        } catch (const ChipWorker::UnsupportedNativeRun &) {
+            LOG_WARN(
+                "chip prewarm dry-run unsupported; continuing with the official first run (callable_id=%d slot=%u)",
+                seed->callable_id, seed->lease.slot_id
+            );
+            prewarm = PrewarmPhase::SKIPPED;
+            return true;
+        } catch (...) {
+            LOG_WARN(
+                "chip prewarm dry-run prepare failed before launch; continuing with the official first run "
+                "(callable_id=%d slot=%u)",
+                seed->callable_id, seed->lease.slot_id
+            );
+            prewarm = PrewarmPhase::SKIPPED;
+            return true;
+        }
+        try {
+            worker->launch_native_run(native);
+            worker->wait_native_run(native);
+            worker->finalize_native_run(native);
+            prewarm = PrewarmPhase::COMPLETE;
+            return true;
+        } catch (...) {
+            const std::exception_ptr error = std::current_exception();
+            try {
+                worker->finalize_native_run(native);
+            } catch (...) {
+                poison_with(seed, std::current_exception());
+            }
+            // Prepare already succeeded. A launch/wait/finalize failure leaves
+            // device state unknown, so the official first run must not retry.
+            if (seed->error == nullptr) seed->error = error;
+            poison_with(seed, error);
+            prewarm = PrewarmPhase::COMPLETE;
+            return false;
+        }
     }
 
     void prepare(const std::shared_ptr<ChipRunState> &run) {
@@ -131,6 +190,12 @@ struct ChipRunLaneState {
             return;
         }
         if (run->phase == ChipRunState::Phase::QUEUED) {
+            if (!run_prewarm_dry_run(run)) {
+                if (run->error == nullptr) run->error = poison;
+                run->phase = ChipRunState::Phase::TERMINAL;
+                fifo.pop_front();
+                return;
+            }
             try {
                 prepare(run);
             } catch (...) {
@@ -262,6 +327,7 @@ struct ChipRunLaneState {
     uint64_t direct_generation{0};
     std::exception_ptr poison;
     bool closed{false};
+    PrewarmPhase prewarm{PrewarmPhase::PENDING};
 };
 
 ChipRun::ChipRun(std::shared_ptr<ChipRunLaneState> lane, std::shared_ptr<ChipRunState> run) :

@@ -63,6 +63,7 @@ from simpler_setup.goldens.qwen3_14b_decode import (
 from simpler_setup.log_config import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, configure_logging
 from simpler_setup.parallel_scheduler import device_range_to_list
 from simpler_setup.scene_test import (
+    _build_prewarm_config,
     build_output_prefix,
     compile_chip_callable_spec,
     effective_diagnostic_options,
@@ -662,7 +663,11 @@ def run(  # noqa: PLR0913 -- one knob per standalone CLI option
     )
     worker = Worker(level=2, platform=platform, runtime=runtime, device_id=device_id)
     chip_handle = worker.register(chip)
-    worker.init()
+    prewarm_config = _build_prewarm_config(runtime, {"runtime_env": runtime_env})
+    if prewarm_config is None:
+        worker.init()
+    else:
+        worker.init(prewarm_config=prewarm_config)
     try:
         buffers = _allocate_params(worker, N_LAYERS)
         golden = None

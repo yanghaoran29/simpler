@@ -421,6 +421,9 @@ class TestMailboxConfigRoundtrip:
             _read_config_from_mailbox,
         )
 
+        assert _CFG_FMT.format.startswith("=iiiiiii")
+        assert not hasattr(CallConfig(), "prewarm")
+
         cfg = CallConfig()
         cfg.aicpu_thread_num = 2
         cfg.enable_chip_swimlane = 3

@@ -143,6 +143,25 @@ Entries unused for 14 days are pruned. When `build/` is not writable — a wheel
 installed into a read-only `site-packages` — the cache is skipped with a warning
 and every callable is compiled in-process, exactly as before the cache existed.
 
+### Runtime prewarm
+
+Every `Worker` / `ChipWorker` inserts one internal dry-run on the first
+activated run of each chip. `tensormap_and_ringbuffer` executes that dry-run:
+it walks graph-build, submit, handshake, and dispatch, but does not execute
+the user kernel, write `accepted_state`, advance a pipeline lease, or emit
+chip swimlane / rounds rows. `host_build_graph` prepare returns unsupported
+and ChipRunLane skips the dry-run, then continues with the official first
+run. The dry-run uses the first activated callable on that chip; later
+callables and later rounds do not add another attempt. L3 staged frames stay
+inert until activation.
+
+`--rounds N` still means exactly N official workload runs and N timing rows.
+L3 swimlane files contain only official runs.
+
+Separately, TMR Scene Test still passes the first selected case's ring sizing
+to `Worker.init(prewarm_config=)` so the runtime arena can be built before
+the first official case. `host_build_graph` does not use that arena prewarm.
+
 Scene tests support advanced CLI options for benchmarking, profiling, and runtime control. These work identically in both pytest and standalone mode.
 
 > "Profiling" is the umbrella for three parallel diagnostics sub-features: `--enable-chip-swimlane` (chip swimlane), `--dump-args` (unified argument dump), and `--enable-pmu` (PMU CSV). They are independent and can be combined.
@@ -172,7 +191,7 @@ python test_xxx.py -p a2a3sim --log-level debug                  # verbose C++ l
 
 | Option | Short | Default | Description |
 | ------ | ----- | ------- | ----------- |
-| `--rounds N` | | 1 | Run each case N times (reuses the same Worker across rounds) |
+| `--rounds N` | | 1 | Run each case N times (reuses the same Worker across rounds; the one-time per-chip dry-run and optional TMR arena prewarm are not rounds) |
 | `--device IDS` | `-d` | `0` | Single id (`0`), range (`0-7`), or list (`0,2,5`). Sets the device-id pool for L3 cases and the available slots for L2 fanout. |
 | `--max-parallel N` | | `auto` | Max in-flight subprocesses (make-style). `auto` = `min(nproc, len(--device))` on sim, `len(--device)` on hardware. Decouples device-id pool size from parallelism; use to throttle sim on a CPU-constrained runner. |
 | `--runtime NAME` | | (all) | Restrict to one runtime (also used internally as the child-mode marker) |

@@ -22,6 +22,7 @@ import pytest
 from simpler_setup import parallel_scheduler
 from simpler_setup.scene_test import (
     SceneTestCase,
+    _build_prewarm_config,
     _dispatch_test_phases_standalone,
     effective_diagnostic_options,
     run_class_cases,
@@ -162,6 +163,40 @@ def test_multi_rounds_disable_every_diagnostic() -> None:
     )
 
     assert options == (0, 0, 0, False, False, False)
+
+
+def test_tmr_prewarm_config_copies_only_runtime_sizing() -> None:
+    config = _build_prewarm_config(
+        "tensormap_and_ringbuffer",
+        {
+            "aicpu_thread_num": 4,
+            "runtime_env": {
+                "ring_task_window": [64, 32, 16, 8],
+                "ring_heap": 4096,
+                "ring_dep_pool": 128,
+            },
+        },
+    )
+
+    assert config is not None
+    assert config.aicpu_thread_num == 0
+    assert config.runtime_env.ring_task_window == [64, 32, 16, 8]
+    assert config.runtime_env.ring_heap == [4096, 4096, 4096, 4096]
+    assert config.runtime_env.ring_dep_pool == [128, 128, 128, 128]
+    assert config.enable_chip_swimlane == 0
+    assert config.output_prefix == ""
+
+
+def test_host_build_graph_has_no_scene_prewarm_config() -> None:
+    assert _build_prewarm_config("host_build_graph", {"runtime_env": {"ring_task_window": 64}}) is None
+
+
+def test_scene_test_does_not_issue_a_true_run_prewarm() -> None:
+    source = Path(__file__).resolve().parents[3] / "simpler_setup" / "scene_test.py"
+    text = source.read_text()
+    assert "_PREWARMED_WORKERS" not in text
+    assert "warmup_config.prewarm" not in text
+    assert "config.prewarm" not in text
 
 
 def test_swimlane_overhead_requires_chip_swimlane() -> None:

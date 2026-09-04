@@ -652,9 +652,10 @@ def print_rounds_table(buckets, stream=sys.stdout):
     """Print a per-round Host/Device/Effective/Orch/Sched table (µs) for the busiest hid.
 
     This renders the per-round benchmark table that ``scene_test`` used to print
-    inline. The most-invoked hid bucket is treated as the rounds (one row per
-    invocation, ordered by ``inv``); each row's metrics come from
-    :func:`_round_metrics`. A column is hidden when every row read 0 (e.g.
+    inline. Prewarm-only invocations are excluded, then the most-invoked hid
+    bucket is treated as the rounds (one row per invocation, ordered by
+    ``inv``); each row's metrics come from :func:`_round_metrics`. A column is
+    hidden when every row read 0 (e.g.
     device/orch/sched/effective are 0 when their marker is absent; for example,
     HBG emits device wall but has no device-side orch/sched windows).
 
@@ -666,9 +667,18 @@ def print_rounds_table(buckets, stream=sys.stdout):
         print("No [STRACE] markers found.", file=stream)
         return
 
-    # Busiest hid = the rounds (decode emits one invocation per token; a static
-    # L2 example emits one per --rounds repetition).
-    _, invs = max(buckets.items(), key=lambda kv: len(kv[1]))
+    # A lightweight TMR Worker prewarm has its own invocation but is setup, not
+    # a measured round. Busiest remaining hid = the rounds (decode emits one
+    # invocation per token; a static L2 example emits one per repetition).
+    run_buckets = {
+        hid: [inv for inv in invs if _ROUNDS_TABLE_NAMES["run"] in inv.by_name()] for hid, invs in buckets.items()
+    }
+    run_buckets = {hid: invs for hid, invs in run_buckets.items() if invs}
+    if not run_buckets:
+        print("No [STRACE] markers found.", file=stream)
+        return
+
+    _, invs = max(run_buckets.items(), key=lambda kv: len(kv[1]))
     invs = sorted(invs, key=lambda i: i.inv)
     rows = [_round_metrics(inv) for inv in invs]
 

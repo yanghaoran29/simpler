@@ -943,6 +943,11 @@ int32_t run_host_orchestration(
     DeviceArena &host_arena, const RuntimeArenaLayout &layout, uint64_t sm_size, uint64_t task_capacity,
     void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
+    if ((runtime->get_run_flags() & PTO_NATIVE_RUN_FLAG_PREWARM_DRY_RUN) != 0) {
+        LOG_WARN("host-orch: prewarm dry-run is unsupported; falling back to the official run");
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+
     // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
 

@@ -11,10 +11,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 
 #include "native_run_context.h"
 #include "native_run_execution_test_peer.h"
+#include "native_run_trace.h"
 
 namespace {
 
@@ -39,6 +41,7 @@ NativeRunDescriptor make_descriptor(volatile int32_t *accepted_state) {
     descriptor.pipeline_slot = kPipelineSlot;
     descriptor.accepted_state = accepted_state;
     descriptor.accepted_value = kAcceptedValue;
+    descriptor.flags = 0;
     return descriptor;
 }
 
@@ -57,6 +60,28 @@ LaunchReceipt complete_receipt(const NativeRunIdentity &identity) {
 }
 
 }  // namespace
+
+TEST(NativeRunTrace, DryRunRenamesChipRunFamily) {
+    EXPECT_STREQ(native_run_span_name(false, "chip.run"), "chip.run");
+    const char *root = native_run_span_name(true, "chip.run");
+    const char *bind = native_run_span_name(true, "chip.run.bind");
+    const char *wall = native_run_span_name(true, "chip.run.runner_run.device_wall");
+    EXPECT_STREQ(root, "chip.prewarm.run");
+    EXPECT_STREQ(bind, "chip.prewarm.bind");
+    EXPECT_STREQ(wall, "chip.prewarm.runner_run.device_wall");
+    EXPECT_STREQ(native_run_span_name(true, "chip.prewarm.build"), "chip.prewarm.build");
+}
+
+TEST(NativeRunDescriptorAbi, FlagsSitAfterAcceptedValueAndStayZeroByDefault) {
+    NativeRunDescriptor descriptor{};
+    EXPECT_EQ(descriptor.flags, 0u);
+    descriptor.flags = PTO_NATIVE_RUN_FLAG_PREWARM_DRY_RUN;
+    EXPECT_EQ(descriptor.flags, PTO_NATIVE_RUN_FLAG_PREWARM_DRY_RUN);
+    EXPECT_EQ(
+        offsetof(NativeRunDescriptor, flags),
+        offsetof(NativeRunDescriptor, accepted_value) + sizeof(int32_t)
+    );
+}
 
 TEST(NativeRunAcceptanceTest, MatchingReceiptStoresTheAcceptedValue) {
     volatile int32_t accepted_state = 0;

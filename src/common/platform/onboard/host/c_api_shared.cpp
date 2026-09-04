@@ -31,6 +31,7 @@
 #include "runtime_c_api.h"
 #include "task_args_wire.h"
 #include "native_run_context.h"
+#include "native_run_trace.h"
 
 #include <acl/acl.h>
 #include <dlfcn.h>
@@ -558,11 +559,13 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
 // emitted at depth 3 beneath it. Phases never stamped (0 ns) are skipped.
 // Capture and emission share one gate, so a gated-off run performs no transfers
 // for markers that cannot reach the log.
-static void emit_device_phase_markers(DeviceRunnerBase *runner) {
+static void emit_device_phase_markers(DeviceRunnerBase *runner, bool prewarm = false) {
     if (!device_phase_capture_enabled()) return;
     const uint64_t run_wall_ns = runner->last_device_phase_ns(AicpuPhase::RunWall);
     if (run_wall_ns != 0) {
-        STRACE_DEV_SPAN_AT("chip.run.runner_run.device_wall", 0, static_cast<long long>(run_wall_ns), 2);
+        STRACE_DEV_SPAN_AT(
+            native_run_span_name(prewarm, "chip.run.runner_run.device_wall"), 0, static_cast<long long>(run_wall_ns), 2
+        );
     }
     struct PhaseName {
         AicpuPhase phase;
@@ -588,8 +591,8 @@ static void emit_device_phase_markers(DeviceRunnerBase *runner) {
         const uint64_t ns = runner->last_device_phase_ns(p.phase);
         if (ns != 0) {
             STRACE_DEV_SPAN_AT(
-                p.name, static_cast<long long>(runner->last_device_phase_start_ns(p.phase)), static_cast<long long>(ns),
-                3
+                native_run_span_name(prewarm, p.name),
+                static_cast<long long>(runner->last_device_phase_start_ns(p.phase)), static_cast<long long>(ns), 3
             );
         }
     }
@@ -613,8 +616,8 @@ static void emit_device_phase_markers(DeviceRunnerBase *runner) {
         const uint64_t finish_ns = runner->last_task_slot_finish_ns(s);
         if (finish_ns > dispatch_ns) {
             STRACE_DEV_SPAN_AT(
-                kTaskSlotNames[s], static_cast<long long>(dispatch_ns), static_cast<long long>(finish_ns - dispatch_ns),
-                3
+                native_run_span_name(prewarm, kTaskSlotNames[s]), static_cast<long long>(dispatch_ns),
+                static_cast<long long>(finish_ns - dispatch_ns), 3
             );
         }
     }
@@ -637,18 +640,23 @@ native_run_context(DeviceContextHandle ctx, RuntimeHandle runtime, const char *o
     return state;
 }
 
-static void
-emit_native_run_host_wall(uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs) {
+static void emit_native_run_host_wall(
+    uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs, bool prewarm = false
+) {
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(trace_inv, trace_hid, 0);
-    STRACE_HOST_SPAN_AT_A("chip.run", trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
+    const char *name = prewarm ? "chip.prewarm.run" : "chip.run";
+    STRACE_HOST_SPAN_AT_A(name, trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
 }
 
 static void emit_native_run_runner_wall(OnboardNativeRunContext *state) {
     if (state->runner_trace_start_ns == 0) return;
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
-    STRACE_HOST_SPAN_AT("chip.run.runner_run", state->runner_trace_start_ns, end_ns - state->runner_trace_start_ns, 1);
+    STRACE_HOST_SPAN_AT(
+        native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.runner_run"),
+        state->runner_trace_start_ns, end_ns - state->runner_trace_start_ns, 1
+    );
     state->runner_trace_start_ns = 0;
 }
 
@@ -695,8 +703,9 @@ static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_
         state->runner->release_native_run_reservation(state);
         state->runner_reserved = false;
     }
+    const bool prewarm = native_run_is_prewarm_dry_run(state->descriptor);
     destroy_native_run_context(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs);
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs, prewarm);
     if (validation_rc != 0) return validation_rc;
     if (resources_rc != 0) return resources_rc;
     return execution_rc;
@@ -745,6 +754,7 @@ int simpler_prepare_run(
     const long long trace_start_ns = STRACE_NOW_NS();
     try {
         state = new (runtime) OnboardNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
+        state->runtime.set_run_flags(descriptor->flags);
         std::snprintf(
             state->trace_attrs, sizeof(state->trace_attrs),
             "run_id=%llu dispatch_id=%llu slot_id=%u generation=%llu run_epoch=%llu",
@@ -774,7 +784,7 @@ int simpler_prepare_run(
         if (overlaps_active_run) {
             int compatibility_rc = 0;
             {
-                STRACE("chip.run.bind.compatibility");
+                STRACE(native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.bind.compatibility"));
                 compatibility_rc = prepared_run_config_compatible_impl(
                     &state->host_api, config->runtime_env.ring_task_window, config->runtime_env.ring_heap,
                     config->runtime_env.ring_dep_pool
@@ -817,13 +827,14 @@ int simpler_prepare_run(
         if (!overlaps_active_run) runner->apply_call_config(state->config);
 
         {
-            STRACE("chip.run.bind");
+            STRACE(native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.bind"));
             rc = runner->bind_callable_to_runtime(
                 state->runtime, callable_id, &state->host_api, args, state->config.runtime_env.ring_task_window,
                 state->config.runtime_env.ring_heap, state->config.runtime_env.ring_dep_pool
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+        state->runtime.set_run_flags(state->descriptor.flags);
         rc = runner->prepare_execution(
             state->runtime, state->config, state->descriptor.pipeline_slot, state->identity(),
             &state->prepared_execution
@@ -1000,12 +1011,14 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         if (!launched) state->runtime.set_gm_sm_ptr(nullptr);
         if (attach_rc == 0) {
             {
-                STRACE("chip.run.validate");
+                STRACE(native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.validate"));
                 validation_rc = validate_runtime_impl(
                     &state->runtime, &state->host_api, launched ? execution_rc : PTO_RUNTIME_ERR_INTERNAL
                 );
             }
-            if (launched && execution_rc == 0) emit_device_phase_markers(state->runner);
+            if (launched && execution_rc == 0) {
+                emit_device_phase_markers(state->runner, native_run_is_prewarm_dry_run(state->descriptor));
+            }
         } else {
             validation_rc = attach_rc;
         }
@@ -1039,7 +1052,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         // The point a successor's launch becomes admissible. Ordering a
         // successor's device work against this boundary is what separates a
         // pipelined launch from a reordered one, and no other span marks it.
-        STRACE("chip.run.claim_release");
+        STRACE(native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.claim_release"));
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
@@ -1047,8 +1060,9 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->runner->release_native_run_reservation(state);
         state->runner_reserved = false;
     }
+    const bool prewarm = native_run_is_prewarm_dry_run(state->descriptor);
     destroy_native_run_context(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs);
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs, prewarm);
     if (validation_rc != 0) return validation_rc;
     if (resources_rc != 0) return resources_rc;
     return launched ? execution_rc : 0;

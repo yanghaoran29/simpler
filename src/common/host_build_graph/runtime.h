@@ -160,6 +160,10 @@ public:
     int32_t aicpu_allowed_cpu_count;
     int32_t aicpu_launch_count;
 
+    // Copied from NativeRunDescriptor.flags during prepare. HBG does not execute
+    // a prewarm dry-run; prepare returns unsupported when the flag is set.
+    uint32_t run_flags;
+
     // kernel binary resolution: kernel_id -> GM function_bin_addr mapping
     // NOTE: Made public for direct access from aicore code
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
@@ -228,6 +232,8 @@ public:
     void set_aicpu_launch_count(int32_t n) { aicpu_launch_count = n; }
     int32_t *get_aicpu_allowed_cpus() { return aicpu_allowed_cpus; }
     size_t aicpu_allowed_cpus_capacity() const { return sizeof(aicpu_allowed_cpus) / sizeof(aicpu_allowed_cpus[0]); }
+    uint32_t get_run_flags() const { return run_flags; }
+    void set_run_flags(uint32_t flags) { run_flags = flags; }
 
     // =========================================================================
     // Performance Profiling

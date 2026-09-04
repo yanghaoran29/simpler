@@ -29,6 +29,7 @@
 #include "prepare_callable_common.h"
 #include "task_args_wire.h"
 #include "native_run_context.h"
+#include "native_run_trace.h"
 
 #include <dlfcn.h>
 
@@ -524,11 +525,13 @@ static bool device_profiling_enabled() {
 // Emit device-domain phase markers (RunWall + its 4 AICPU subdivisions),
 // mirroring the onboard c_api. Phases never stamped (0 ns) are skipped.
 // STRACE_DEV_SPAN_AT self-compiles to nothing when profiling is off.
-static void emit_device_phase_markers(SimDeviceRunnerBase *runner) {
+static void emit_device_phase_markers(SimDeviceRunnerBase *runner, bool prewarm = false) {
     if (!device_profiling_enabled()) return;
     const uint64_t run_wall_ns = runner->last_device_phase_ns(AicpuPhase::RunWall);
     if (run_wall_ns != 0) {
-        STRACE_DEV_SPAN_AT("chip.run.runner_run.device_wall", 0, static_cast<long long>(run_wall_ns), 2);
+        STRACE_DEV_SPAN_AT(
+            native_run_span_name(prewarm, "chip.run.runner_run.device_wall"), 0, static_cast<long long>(run_wall_ns), 2
+        );
     }
     struct PhaseName {
         AicpuPhase phase;
@@ -554,8 +557,8 @@ static void emit_device_phase_markers(SimDeviceRunnerBase *runner) {
         const uint64_t ns = runner->last_device_phase_ns(p.phase);
         if (ns != 0) {
             STRACE_DEV_SPAN_AT(
-                p.name, static_cast<long long>(runner->last_device_phase_start_ns(p.phase)), static_cast<long long>(ns),
-                3
+                native_run_span_name(prewarm, p.name),
+                static_cast<long long>(runner->last_device_phase_start_ns(p.phase)), static_cast<long long>(ns), 3
             );
         }
     }
@@ -579,8 +582,8 @@ static void emit_device_phase_markers(SimDeviceRunnerBase *runner) {
         const uint64_t finish_ns = runner->last_task_slot_finish_ns(s);
         if (finish_ns > dispatch_ns) {
             STRACE_DEV_SPAN_AT(
-                kTaskSlotNames[s], static_cast<long long>(dispatch_ns), static_cast<long long>(finish_ns - dispatch_ns),
-                3
+                native_run_span_name(prewarm, kTaskSlotNames[s]), static_cast<long long>(dispatch_ns),
+                static_cast<long long>(finish_ns - dispatch_ns), 3
             );
         }
     }
@@ -602,17 +605,20 @@ static SimNativeRunContext *native_run_context(DeviceContextHandle ctx, RuntimeH
     return state;
 }
 
-static void emit_native_run_host_wall(uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns) {
+static void emit_native_run_host_wall(uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns, bool prewarm = false) {
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(trace_inv, trace_hid, 0);
-    STRACE_HOST_SPAN_AT("chip.run", trace_start_ns, end_ns - trace_start_ns, 0);
+    STRACE_HOST_SPAN_AT(prewarm ? "chip.prewarm.run" : "chip.run", trace_start_ns, end_ns - trace_start_ns, 0);
 }
 
 static void emit_native_run_runner_wall(SimNativeRunContext *state) {
     if (state->runner_trace_start_ns == 0) return;
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
-    STRACE_HOST_SPAN_AT("chip.run.runner_run", state->runner_trace_start_ns, end_ns - state->runner_trace_start_ns, 1);
+    STRACE_HOST_SPAN_AT(
+        native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.runner_run"),
+        state->runner_trace_start_ns, end_ns - state->runner_trace_start_ns, 1
+    );
     state->runner_trace_start_ns = 0;
 }
 
@@ -635,8 +641,9 @@ static int cleanup_failed_prepare(SimNativeRunContext *state, int execution_rc, 
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
+    const bool prewarm = native_run_is_prewarm_dry_run(state->descriptor);
     destroy_native_run_context(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns);
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, prewarm);
     return validation_rc != 0 ? validation_rc : execution_rc;
 }
 
@@ -683,6 +690,7 @@ int simpler_prepare_run(
     const long long trace_start_ns = STRACE_NOW_NS();
     try {
         state = new (runtime) SimNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
+        state->runtime.set_run_flags(descriptor->flags);
         if (!runner->try_acquire_native_run(state, state->identity(), &state->launch_permit)) {
             LOG_ERROR("simpler_prepare_run: another native run is active on this device context");
             destroy_native_run_context(state);
@@ -702,13 +710,14 @@ int simpler_prepare_run(
         runner->apply_call_config(state->config);
 
         {
-            STRACE("chip.run.bind");
+            STRACE(native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.bind"));
             rc = runner->bind_callable_to_runtime(
                 state->runtime, callable_id, &state->host_api, args, state->config.runtime_env.ring_task_window,
                 state->config.runtime_env.ring_heap, state->config.runtime_env.ring_dep_pool
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+        state->runtime.set_run_flags(state->descriptor.flags);
         rc = runner->prepare_execution(
             state->runtime, state->config, state->descriptor.pipeline_slot, state->identity(),
             &state->prepared_execution
@@ -850,12 +859,14 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         if (!launched) state->runtime.set_gm_sm_ptr(nullptr);
         if (attach_rc == 0) {
             {
-                STRACE("chip.run.validate");
+                STRACE(native_run_span_name(native_run_is_prewarm_dry_run(state->descriptor), "chip.run.validate"));
                 validation_rc = validate_runtime_impl(
                     &state->runtime, &state->host_api, launched ? execution_rc : PTO_RUNTIME_ERR_INTERNAL
                 );
             }
-            if (launched && execution_rc == 0) emit_device_phase_markers(state->runner);
+            if (launched && execution_rc == 0) {
+                emit_device_phase_markers(state->runner, native_run_is_prewarm_dry_run(state->descriptor));
+            }
         } else {
             validation_rc = attach_rc;
         }
@@ -874,8 +885,9 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
+    const bool prewarm = native_run_is_prewarm_dry_run(state->descriptor);
     destroy_native_run_context(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns);
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, prewarm);
     if (validation_rc != 0) return validation_rc;
     return launched ? execution_rc : 0;
 }
