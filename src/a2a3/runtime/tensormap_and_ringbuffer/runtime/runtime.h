@@ -202,6 +202,10 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // Per-callable_id dispatch. AICPU dispatches via
     // `orch_so_table_[active_callable_id_]`.
     int32_t active_callable_id_;
+
+    // Copied from NativeRunDescriptor.flags during prepare. Device scheduler
+    // reads this to force function_bin_addr=0 on a prewarm dry-run.
+    uint32_t run_flags;
 };
 
 // =============================================================================
@@ -252,6 +256,8 @@ public:
     size_t aicpu_allowed_cpus_capacity() const {
         return sizeof(dev.aicpu_allowed_cpus) / sizeof(dev.aicpu_allowed_cpus[0]);
     }
+    uint32_t get_run_flags() const { return dev.run_flags; }
+    void set_run_flags(uint32_t flags) { dev.run_flags = flags; }
 
     // =========================================================================
     // Performance Profiling

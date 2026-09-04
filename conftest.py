@@ -53,7 +53,12 @@ import pytest  # noqa: E402
 from simpler_setup import parallel_scheduler as _ps  # noqa: E402
 from simpler_setup.log_config import DEFAULT_LOG_LEVEL, configure_logging  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.scene_test import SceneTestLevel, clear_compile_cache, is_manual_for_platform  # noqa: E402
+from simpler_setup.scene_test import (  # noqa: E402
+    SceneTestLevel,
+    _build_prewarm_config,
+    clear_compile_cache,
+    is_manual_for_platform,
+)
 
 # Exit code used when the session watchdog fires. Matches the GNU `timeout`
 # convention so shell wrappers (e.g. CI) can distinguish timeout from other
@@ -1669,6 +1674,8 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
     from simpler_setup.scene_test import _class_wants_sdma  # noqa: PLC0415
 
     wants_sdma = _class_wants_sdma(cls)
+    matching_cases = cls()._matching_cases(st_platform, request)
+    prewarm_config = _build_prewarm_config(runtime, matching_cases[0].get("config", {})) if matching_cases else None
 
     if level == 2:
         # A prior test on this runtime poisoned the device and the rebuild below
@@ -1732,7 +1739,10 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
         # mark the runtime poisoned and skip (this test and every later one for
         # the runtime) instead of surfacing a raw 507899 setup ERROR.
         try:
-            w.init()
+            if prewarm_config is None:
+                w.init()
+            else:
+                w.init(prewarm_config=prewarm_config)
         except RuntimeError as e:
             if _requires_l2_worker_retirement_msg(str(e)):
                 _l2_poisoned.add(runtime)
@@ -1797,7 +1807,10 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
         cls._st_sub_handles = sub_handles
         cls._st_chip_handles = chip_handles
 
-        w.init()
+        if prewarm_config is None:
+            w.init()
+        else:
+            w.init(prewarm_config=prewarm_config)
         yield w
         w.close()
         device_pool.release(ids)

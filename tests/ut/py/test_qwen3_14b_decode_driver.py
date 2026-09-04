@@ -63,6 +63,7 @@ class _FakeWorker:
         self.uploads = []
         self.runs = []
         self.copy_from_count = 0
+        self.prewarm_config = None
         self.closed = False
         self.__class__.instances.append(self)
 
@@ -70,7 +71,8 @@ class _FakeWorker:
         self.events.append("register")
         return ("handle", chip)
 
-    def init(self) -> None:
+    def init(self, prewarm_config=None) -> None:
+        self.prewarm_config = prewarm_config
         self.events.append("init")
 
     def malloc(self, nbytes: int) -> _FakeBuffer:
@@ -175,6 +177,8 @@ def test_standalone_driver_keeps_one_device_fixture_across_rounds(
     assert len(worker.allocations) == 20 == len(names)
     assert [name for _, name in worker.uploads] == [name for name in names if name != "out"]
     assert len(worker.runs) == 3
+    assert worker.prewarm_config is not None
+    assert worker.prewarm_config.runtime_env.ring_dep_pool == [expected_dep_pool] * 4
     assert len({id(task_args) for _, task_args, _ in worker.runs}) == 1
     assert len({id(config) for _, _, config in worker.runs}) == 1
     task_args = worker.runs[0][1]

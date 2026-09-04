@@ -800,6 +800,102 @@ def test_rounds_table_omits_tmr_only_columns_when_only_host_and_device_exist():
     assert "Avg Device: 22.0 us [2/2]" in rendered
 
 
+def test_rounds_table_ignores_prewarm_dry_run_invocation_when_run_count_is_one():
+    lines = [
+        _span_record(
+            pid=1,
+            tid=1,
+            inv=0,
+            hid="0",
+            name="chip.prewarm.run",
+            ts=10,
+            dur=800_000,
+        ),
+        _span_record(
+            pid=1,
+            tid=1,
+            inv=0,
+            hid="0",
+            name="chip.prewarm.bind",
+            depth=1,
+            ts=20,
+            dur=100_000,
+        ),
+        _span_record(
+            pid=1,
+            tid=1,
+            inv=1,
+            hid="abc",
+            name="chip.run",
+            ts=1_000_000,
+            dur=100_000,
+        ),
+        _span_record(
+            pid=1,
+            tid=1,
+            inv=1,
+            hid="abc",
+            name="chip.run.runner_run.device_wall",
+            attrs="clk=dev",
+            depth=1,
+            ts=2_000_000,
+            dur=20_000,
+        ),
+    ]
+    buckets = bucket_by_hid(group_invocations(parse_spans(lines)))
+    output = StringIO()
+
+    print_rounds_table(buckets, stream=output)
+
+    rendered = output.getvalue()
+    assert "Avg Host: 100.0 us" in rendered
+    assert "Avg Device: 20.0 us [1/1]" in rendered
+    assert "(1 rounds)" in rendered
+
+
+def test_rounds_table_ignores_prewarm_only_invocation_when_run_count_is_one():
+    lines = [
+        _span_record(
+            pid=1,
+            tid=1,
+            inv=0,
+            hid="0",
+            name="chip.prewarm.build",
+            ts=10,
+            dur=900_000,
+        ),
+        _span_record(
+            pid=1,
+            tid=1,
+            inv=1,
+            hid="abc",
+            name="chip.run",
+            ts=1_000_000,
+            dur=100_000,
+        ),
+        _span_record(
+            pid=1,
+            tid=1,
+            inv=1,
+            hid="abc",
+            name="chip.run.runner_run.device_wall",
+            attrs="clk=dev",
+            depth=1,
+            ts=2_000_000,
+            dur=20_000,
+        ),
+    ]
+    buckets = bucket_by_hid(group_invocations(parse_spans(lines)))
+    output = StringIO()
+
+    print_rounds_table(buckets, stream=output)
+
+    rendered = output.getvalue()
+    assert "Avg Host: 100.0 us" in rendered
+    assert "Avg Device: 20.0 us [1/1]" in rendered
+    assert "(1 rounds)" in rendered
+
+
 def _run_records(*, run_epoch, prepare, device, release, run_id=0, dispatch_id=0, slot_id=0, pid=7, inv=None):
     """One phased native run's spans, as the `chip.run` tree carries them.
 

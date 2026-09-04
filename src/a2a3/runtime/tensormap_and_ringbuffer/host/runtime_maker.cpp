@@ -47,6 +47,7 @@
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
 #include "../../../../common/worker/runtime_c_api.h"
+#include "../../../../common/worker/native_run_trace.h"
 #include "callable.h"
 #include "common/platform_config.h"
 #include "common/strace.h"
@@ -506,7 +507,7 @@ static bool stage_device_args(
     int scalar_count = orch_args->scalar_count();
 
     int64_t t_args_start = _now_ms();
-    STRACE_A("chip.run.bind.args", "");
+    STRACE_A(native_run_span_name(native_run_is_prewarm_dry_run(runtime->get_run_flags()), "chip.run.bind.args"), "");
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
@@ -837,7 +838,7 @@ extern "C" int bind_callable_to_runtime_impl(
 
     int64_t t_prebuilt_start = _now_ms();
     {
-        STRACE("chip.run.bind.prebuilt");
+        STRACE(native_run_span_name(native_run_is_prewarm_dry_run(runtime->get_run_flags()), "chip.run.bind.prebuilt"));
         PrebuiltRuntimeArenaCacheProbe cache_probe = make_prebuilt_runtime_arena_cache_probe(sizing);
         int cache_rc = bind_cached_runtime_image(runtime, api, cache_probe, device_args);
         if (cache_rc < 0) {
@@ -931,7 +932,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     LOG_INFO("ChipTensor leases to process: %d", tensor_lease_count);
 
-    bool skip_tensor_copy_back = execution_rc != 0;
+    bool skip_tensor_copy_back = execution_rc != 0 || (runtime->get_run_flags() & 1u) != 0;
     int32_t runtime_status = 0;
     SharedMemoryHeader host_header;
     memset(&host_header, 0, sizeof(host_header));
@@ -964,7 +965,11 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     }
 
     if (skip_tensor_copy_back) {
-        LOG_WARN("Skipping tensor copy-back because execution failed");
+        if ((runtime->get_run_flags() & 1u) != 0) {
+            LOG_WARN("Skipping tensor copy-back because this is a prewarm dry-run");
+        } else {
+            LOG_WARN("Skipping tensor copy-back because execution failed");
+        }
     } else {
         for (int i = 0; i < tensor_lease_count; i++) {
             const TensorLease &lease = tensor_leases[i];

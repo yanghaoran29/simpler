@@ -55,6 +55,7 @@ _CASE_CONFIG_KEYS = frozenset({"aicpu_thread_num", "runtime_env", "device_count"
 _TORCH_BACKEND_AUTOLOAD_ENV = "TORCH_DEVICE_BACKEND_AUTOLOAD"
 _TORCH_BACKEND_AUTOLOAD_VALUE_LIMIT = 64
 _RUNTIME_ENV_KEYS = frozenset({"ring_task_window", "ring_heap", "ring_dep_pool"})
+_TMR_RUNTIME = "tensormap_and_ringbuffer"
 
 
 class _DiagnosticOptions(NamedTuple):
@@ -64,6 +65,35 @@ class _DiagnosticOptions(NamedTuple):
     dep_gen: bool
     scope_stats: bool
     swimlane_overhead: bool
+
+
+def _apply_runtime_env_config(config, config_dict) -> None:
+    """Copy per-task ring sizing from a scene config into a CallConfig."""
+    runtime_env = config_dict.get("runtime_env", {})
+    config.runtime_env.ring_task_window = runtime_env.get("ring_task_window", 0)
+    config.runtime_env.ring_heap = runtime_env.get("ring_heap", 0)
+    config.runtime_env.ring_dep_pool = runtime_env.get("ring_dep_pool", 0)
+
+
+def _build_prewarm_config(runtime, config_dict):
+    """Build the lightweight Worker.init config for the TMR runtime only."""
+    if runtime != _TMR_RUNTIME:
+        return None
+
+    from simpler.task_interface import CallConfig  # noqa: PLC0415
+
+    config = CallConfig()
+    _apply_runtime_env_config(config, config_dict)
+    return config
+
+
+def _first_selected_prewarm_config(runtime, group, selected_by_cls):
+    """Use the first case in execution order to size a standalone prewarm."""
+    for cls in group:
+        selected = selected_by_cls.get(cls, [])
+        if selected:
+            return _build_prewarm_config(runtime, selected[0].get("config", {}))
+    return None
 
 
 def _validate_diagnostic_flags(*, chip_swimlane: int, swimlane_overhead: bool) -> None:
@@ -1733,7 +1763,7 @@ class SceneTestCase:
     # ------------------------------------------------------------------
 
     @classmethod
-    def _create_worker(cls, platform, device_id=0):
+    def _create_worker(cls, platform, device_id=0, prewarm_config=None):
         """Create the L2 Worker for the standalone path.
 
         Mirrors the ``st_worker`` pytest fixture, which yields a ``Worker``
@@ -1750,7 +1780,10 @@ class SceneTestCase:
             runtime=cls._st_runtime,
             enable_sdma=_class_wants_sdma(cls),
         )
-        w.init()
+        if prewarm_config is None:
+            w.init()
+        else:
+            w.init(prewarm_config=prewarm_config)
         return w
 
     # ------------------------------------------------------------------
@@ -1790,10 +1823,7 @@ class SceneTestCase:
         # rings -- there is no process-wide env. Each value is either a scalar
         # (broadcast to every ring) or a list of RUNTIME_ENV_RING_COUNT ints
         # (per-ring); the binding accepts both forms.
-        runtime_env = config_dict.get("runtime_env", {})
-        config.runtime_env.ring_task_window = runtime_env.get("ring_task_window", 0)
-        config.runtime_env.ring_heap = runtime_env.get("ring_heap", 0)
-        config.runtime_env.ring_dep_pool = runtime_env.get("ring_dep_pool", 0)
+        _apply_runtime_env_config(config, config_dict)
         config.enable_chip_swimlane = enable_chip_swimlane
         config.enable_dump_args = enable_dump_args
         config.enable_pmu = enable_pmu  # 0=disabled, >0=enabled with event type
@@ -1894,7 +1924,9 @@ class SceneTestCase:
             handle = worker.register(callable_obj)
             type(self)._st_l2_handle = handle
 
-        # Build args
+        # Build args. ChipRunLane inserts one internal dry-run on the first
+        # activated run of each ChipWorker; Scene Test only issues official
+        # rounds here.
         test_args = self.generate_args(params)
         chip_args, output_names = _build_l2_ref_args(test_args, orch_sig, worker)
 
@@ -2672,8 +2704,9 @@ def _create_standalone_worker(group, level, args, selected_by_cls):
     callables nor pre-registered chip callables, so both dicts are empty.
     """
     first_cls = group[0]
+    prewarm_config = _first_selected_prewarm_config(first_cls._st_runtime, group, selected_by_cls)
     if level == 2:
-        return first_cls._create_worker(args.platform, args.device), {}, {}
+        return first_cls._create_worker(args.platform, args.device, prewarm_config=prewarm_config), {}, {}
 
     from simpler.worker import Worker  # noqa: PLC0415
 
@@ -2721,5 +2754,8 @@ def _create_standalone_worker(group, level, args, selected_by_cls):
                 cls_chip_handles[f"{name}_sig"] = entry["orchestration"].get("signature", [])
         per_class_sub_handles[cls] = cls_sub_handles
         per_class_chip_handles[cls] = cls_chip_handles
-    worker.init()
+    if prewarm_config is None:
+        worker.init()
+    else:
+        worker.init(prewarm_config=prewarm_config)
     return worker, per_class_sub_handles, per_class_chip_handles
