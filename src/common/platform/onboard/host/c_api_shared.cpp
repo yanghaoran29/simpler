@@ -27,6 +27,7 @@
 #include "callable.h"
 #include "call_config.h"
 #include "device_runner_base.h"
+#include "host/dep_gen_collector.h"  // make_deps_json_path
 #include "prepare_callable_common.h"
 #include "runtime_c_api.h"
 #include "task_args_wire.h"
@@ -54,10 +55,42 @@
 // time against `libunified_dlog.so` / `libascendalog.so`.
 extern "C" int dlog_setlevel(int moduleId, int level, int enableEvent);
 
+// Forward-declared for the same reason: the host-orchestrated graph capture lives
+// in the host_build_graph runtime .so, and its header pulls in that runtime's own
+// types. Each platform .so carries weak `false` / `-1` fallbacks for the runtimes
+// that capture on the device instead — see each arch's device_runner.cpp.
+extern "C" bool dep_gen_host_graph_active();
+extern "C" int dep_gen_host_graph_emit(const char *deps_json_path);
+
 using OnboardNativeRunContext = NativeRunContext<DeviceRunnerBase>;
 // Phase entry points validate raw caller storage before beginning object
 // lifetime, so the on-storage magic must remain the leading bytes.
 static_assert(__builtin_offsetof(OnboardNativeRunContext, magic) == 0, "native-run magic must lead runtime storage");
+
+/**
+ * Write a host-orchestrated run's dependency graph, at the point its capture
+ * window closes.
+ *
+ * The graph is complete when bind returns — host_build_graph runs its
+ * orchestrator there — and it lives in state private to the thread that ran it.
+ * Writing it here keeps the write on that thread and ahead of any later capture,
+ * which is what the alternative (writing at drain) cannot promise: a drain may
+ * land on another thread, and a successor's bind resets the capture state.
+ *
+ * The destination comes from this run's own config rather than the runner's,
+ * which a concurrent prepare deliberately leaves untouched.
+ *
+ * A no-op for runtimes that capture on the device: their `dep_gen_host_graph_active`
+ * is the weak `false`, and their graph is emitted from the collector at drain.
+ */
+static void emit_host_dep_gen_graph(const CallConfig &config, const char *trace_attrs) {
+    if (config.enable_dep_gen == 0 || !dep_gen_host_graph_active()) return;
+    const std::string deps_path = make_deps_json_path(config.output_prefix);
+    const int emit_rc = dep_gen_host_graph_emit(deps_path.c_str());
+    if (emit_rc != 0) {
+        LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced (%s)", emit_rc, trace_attrs);
+    }
+}
 
 extern "C" {
 
@@ -206,6 +239,13 @@ static uint32_t get_chip_swimlane_level(void *runner_ctx) {
     return static_cast<DeviceRunnerBase *>(runner_ctx)->chip_swimlane_level();
 }
 
+static bool publish_chip_swimlane_extension(
+    void *runner_ctx, ChipSwimlaneExtensionSection section, const char *json_value, size_t json_size
+) {
+    return runner_ctx != nullptr &&
+           static_cast<DeviceRunnerBase *>(runner_ctx)->publish_chip_swimlane_extension(section, json_value, json_size);
+}
+
 static void *host_phase_pool_arm(void *runner_ctx, int producer_wants_records) {
     if (runner_ctx == nullptr) return nullptr;
     return static_cast<DeviceRunnerBase *>(runner_ctx)->host_phase_pool_arm(producer_wants_records != 0);
@@ -292,6 +332,10 @@ extern "C" int prewarm_config_impl(
     const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
 );
 
+// Weak default rejects non-zero flags; TMR links the strong implementation.
+// A null Runtime is a capability probe used before acquiring run resources.
+extern "C" int configure_native_run_flags_impl(Runtime *runtime, uint32_t flags);
+
 // One immutable function table is shared by all runners. Each HostApi value
 // binds it to a specific runner and immutable per-run slot/bank selection.
 static const HostApiOps g_host_api_ops = {
@@ -317,6 +361,7 @@ static const HostApiOps g_host_api_ops = {
     .get_chip_swimlane_level = get_chip_swimlane_level,
     .host_phase_pool_arm = host_phase_pool_arm,
     .host_phase_pool_finish = host_phase_pool_finish,
+    .publish_chip_swimlane_extension = publish_chip_swimlane_extension,
 };
 
 /* ===========================================================================
@@ -637,11 +682,13 @@ native_run_context(DeviceContextHandle ctx, RuntimeHandle runtime, const char *o
     return state;
 }
 
-static void
-emit_native_run_host_wall(uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs) {
+static void emit_native_run_host_wall(
+    uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs, bool prewarm = false
+) {
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(trace_inv, trace_hid, 0);
-    STRACE_HOST_SPAN_AT_A("chip.run", trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
+    const char *name = prewarm ? "chip.prewarm.run" : "chip.run";
+    STRACE_HOST_SPAN_AT_A(name, trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
 }
 
 static void emit_native_run_runner_wall(OnboardNativeRunContext *state) {
@@ -695,8 +742,9 @@ static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_
         state->runner->release_native_run_reservation(state);
         state->runner_reserved = false;
     }
+    const bool prewarm = (state->descriptor.flags & PTO_NATIVE_RUN_FLAG_INTERNAL_PREWARM) != 0;
     destroy_native_run_context(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs);
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs, prewarm);
     if (validation_rc != 0) return validation_rc;
     if (resources_rc != 0) return resources_rc;
     return execution_rc;
@@ -728,6 +776,8 @@ int simpler_prepare_run(
         LOG_ERROR("simpler_prepare_run: runner is unusable after a prior device failure");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
+    const int flags_rc = configure_native_run_flags_impl(nullptr, descriptor->flags);
+    if (flags_rc != 0) return flags_rc;
     uint64_t magic = 0;
     std::memcpy(&magic, runtime, sizeof(magic));
     if (magic == OnboardNativeRunContext::kMagic) {
@@ -745,6 +795,10 @@ int simpler_prepare_run(
     const long long trace_start_ns = STRACE_NOW_NS();
     try {
         state = new (runtime) OnboardNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
+        if (configure_native_run_flags_impl(&state->runtime, descriptor->flags) != 0) {
+            destroy_native_run_context(state);
+            return PTO_RUNTIME_ERR_INTERNAL;
+        }
         std::snprintf(
             state->trace_attrs, sizeof(state->trace_attrs),
             "run_id=%llu dispatch_id=%llu slot_id=%u generation=%llu run_epoch=%llu",
@@ -824,6 +878,7 @@ int simpler_prepare_run(
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+        emit_host_dep_gen_graph(state->config, state->trace_attrs);
         rc = runner->prepare_execution(
             state->runtime, state->config, state->descriptor.pipeline_slot, state->identity(),
             &state->prepared_execution
@@ -1047,8 +1102,9 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->runner->release_native_run_reservation(state);
         state->runner_reserved = false;
     }
+    const bool prewarm = (state->descriptor.flags & PTO_NATIVE_RUN_FLAG_INTERNAL_PREWARM) != 0;
     destroy_native_run_context(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs);
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs, prewarm);
     if (validation_rc != 0) return validation_rc;
     if (resources_rc != 0) return resources_rc;
     return launched ? execution_rc : 0;
