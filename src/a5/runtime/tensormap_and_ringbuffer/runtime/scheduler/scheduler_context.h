@@ -248,7 +248,8 @@ private:
     }
 
     int pop_ready_tasks_batch(
-        ChipReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
+        ChipReadyQueue *queues, ResourceShape shape, int32_t thread_idx, LocalReadyBuffer *local_buf,
+        ChipTaskSlotState **out, int max_count
     );
 
     void build_payload(
@@ -302,7 +303,7 @@ private:
 
     void dispatch_shape(
         int32_t thread_idx, ChipReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
-        CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
+        LocalReadyBuffer *local_buf, CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
     );
 
     // One pass of "Phase 4" in the resolve_and_dispatch loop: IDLE-stage dispatch
@@ -318,7 +319,8 @@ private:
     // not unbounded — once mix completes on at least one cluster, the next
     // pass either drains the residual or admits AIC/AIV.
     void dispatch_ready_tasks(
-        int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
+        int32_t thread_idx, CoreTracker &tracker, LocalReadyBuffer (&local_bufs)[NUM_RESOURCE_SHAPES], bool pmu_active,
+        bool &made_progress, bool &try_pushed
     );
 
     // Shared staging order for both dispatch sources (normal ready + speculative early):
@@ -352,7 +354,10 @@ private:
     // positions with std::memory_order_relaxed and may interleave with concurrent
     // push/pop. A stale read here causes at most one
     // extra/missed AIC/AIV skip and self-corrects on the next loop iteration.
-    bool has_residual_mix() const { return sched_->ready_queues[static_cast<int32_t>(ResourceShape::MIX)].size() > 0; }
+    bool has_residual_mix(const LocalReadyBuffer *local_buf = nullptr) const {
+        return (local_buf != nullptr && local_buf->count > 0) ||
+               sched_->ready_queues[static_cast<int32_t>(ResourceShape::MIX)].size() > 0;
+    }
 
     // Tier-0 analog of has_residual_mix for the ready sync_start lane: true if MIX
     // sync_start cohorts remain queued, so the Tier-0 pass keeps MIX strict priority
@@ -376,7 +381,7 @@ private:
     void complete_slot_task(
         ChipTaskSlotState &slot_state, int32_t expected_reg_task_id, SubtaskSlot subslot, int32_t thread_idx,
         int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
-        ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+        ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count, LocalReadyBuffer *local_bufs
 #if SIMPLER_DFX
         ,
         uint64_t dispatch_ts, uint64_t finish_ts
@@ -388,7 +393,8 @@ private:
 
     void check_running_cores_for_completion(
         int32_t thread_idx, Handshake *hank, int32_t &completed_this_turn, int32_t &cur_thread_completed,
-        bool &made_progress, ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+        bool &made_progress, ChipTaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count,
+        LocalReadyBuffer *local_bufs
     );
 
     bool enter_drain_mode(ChipTaskSlotState *slot_state, int32_t block_num);

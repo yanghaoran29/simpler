@@ -63,6 +63,24 @@ struct ChipReadyQueueSlot {
     uint64_t task_id_snapshot;  // generation tag for early-dispatch queue entries
 };
 
+struct LocalReadyBuffer {
+    ChipTaskSlotState **slot_states = nullptr;
+    int count = 0;
+    int capacity = 0;
+
+    void reset(ChipTaskSlotState **storage, int storage_capacity) {
+        slot_states = storage;
+        count = 0;
+        capacity = storage_capacity;
+    }
+
+    bool try_push(ChipTaskSlotState *slot_state) {
+        if (slot_states == nullptr || count >= capacity) return false;
+        slot_states[count++] = slot_state;
+        return true;
+    }
+};
+
 /**
  * Lock-free bounded MPMC queue (Dmitry Vyukov design)
  *
@@ -1034,7 +1052,9 @@ struct SchedulerState {
         return slot_state.next_block_idx.load(std::memory_order_seq_cst) >= slot_state.logical_block_num;
     }
 
-    bool route_ready_once(ChipTaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+    bool route_ready_once(
+        ChipTaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr, LocalReadyBuffer *local_bufs = nullptr
+    ) {
         if (!try_claim_ready_once(slot_state)) return false;
 
         // Early-dispatch: pre-staged tasks are released by doorbell
@@ -1053,6 +1073,8 @@ struct SchedulerState {
             dummy_ready_queue.push(&slot_state);
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state);
+        } else if (local_bufs != nullptr && local_bufs[static_cast<int32_t>(shape)].try_push(&slot_state)) {
+            return true;
         } else {
             ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
         }
@@ -1062,7 +1084,7 @@ struct SchedulerState {
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool route_ready_once(
         ChipTaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
-        EarlyDispatchReleaseSink *sink = nullptr
+        EarlyDispatchReleaseSink *sink = nullptr, LocalReadyBuffer *local_bufs = nullptr
     ) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         atomic_count += 1;
@@ -1090,6 +1112,8 @@ struct SchedulerState {
             dummy_ready_queue.push(&slot_state, atomic_count, push_wait);
         } else if (slot_state.task_attrs.requires_sync_start()) {
             ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
+        } else if (local_bufs != nullptr && local_bufs[static_cast<int32_t>(shape)].try_push(&slot_state)) {
+            return true;
         } else {
             ready_queues[static_cast<int32_t>(shape)].push(&slot_state, atomic_count, push_wait);
         }
@@ -1097,14 +1121,16 @@ struct SchedulerState {
     }
 #endif
 
-    bool release_fanin_and_check_ready(ChipTaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
+    bool release_fanin_and_check_ready(
+        ChipTaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr, LocalReadyBuffer *local_bufs = nullptr
+    ) {
         // Atomically increment fanin_refcount and check if all producers are done
         // ACQ_REL on fanin_refcount already synchronizes with the orchestrator's
         // init release, making fanin_count visible — plain load suffices.
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
 
         if (new_refcount == slot_state.fanin_count) {
-            return route_ready_once(slot_state, sink);
+            return route_ready_once(slot_state, sink, local_bufs);
         }
         return false;
     }
@@ -1112,13 +1138,13 @@ struct SchedulerState {
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
     bool release_fanin_and_check_ready(
         ChipTaskSlotState &slot_state, uint64_t &atomic_count, uint64_t &push_wait,
-        EarlyDispatchReleaseSink *sink = nullptr
+        EarlyDispatchReleaseSink *sink = nullptr, LocalReadyBuffer *local_bufs = nullptr
     ) {
         int32_t new_refcount = slot_state.fanin_refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
         atomic_count += 1;  // fanin_refcount.fetch_add
 
         if (new_refcount == slot_state.fanin_count) {
-            return route_ready_once(slot_state, atomic_count, push_wait, sink);
+            return route_ready_once(slot_state, atomic_count, push_wait, sink, local_bufs);
         }
         return false;
     }
@@ -1128,12 +1154,40 @@ struct SchedulerState {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count);
     }
 
+    int get_ready_tasks_batch(
+        ChipReadyQueue *queues, ResourceShape shape, LocalReadyBuffer *local_buf, ChipTaskSlotState **out, int max_count
+    ) {
+        int count = 0;
+        while (local_buf != nullptr && count < max_count && local_buf->count > 0) {
+            out[count++] = local_buf->slot_states[--local_buf->count];
+        }
+        if (count < max_count) {
+            count += queues[static_cast<int32_t>(shape)].pop_batch(out + count, max_count - count);
+        }
+        return count;
+    }
+
 #if SIMPLER_SCHED_PROFILING
     int get_ready_tasks_batch(
         ChipReadyQueue *queues, ResourceShape shape, ChipTaskSlotState **out, int max_count, uint64_t &atomic_count,
         uint64_t &wait_cycle
     ) {
         return queues[static_cast<int32_t>(shape)].pop_batch(out, max_count, atomic_count, wait_cycle);
+    }
+
+    int get_ready_tasks_batch(
+        ChipReadyQueue *queues, ResourceShape shape, LocalReadyBuffer *local_buf, ChipTaskSlotState **out,
+        int max_count, uint64_t &atomic_count, uint64_t &wait_cycle
+    ) {
+        int count = 0;
+        while (local_buf != nullptr && count < max_count && local_buf->count > 0) {
+            out[count++] = local_buf->slot_states[--local_buf->count];
+        }
+        if (count < max_count) {
+            count +=
+                queues[static_cast<int32_t>(shape)].pop_batch(out + count, max_count - count, atomic_count, wait_cycle);
+        }
+        return count;
     }
 #endif
 
@@ -1184,6 +1238,8 @@ struct SchedulerState {
         ,
         int thread_idx
 #endif
+        ,
+        LocalReadyBuffer *local_bufs = nullptr
     ) {
 #if SIMPLER_SCHED_PROFILING
         CompletionStats stats = {0, 0, 0, true};
@@ -1223,12 +1279,12 @@ struct SchedulerState {
             ChipTaskSlotState &consumer_slot = *current->slot_state;
 #if SIMPLER_SCHED_PROFILING
             stats.fanout_edges++;
-            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, &rel_sink)) {
+            if (release_fanin_and_check_ready(consumer_slot, fanout_atomics, push_wait, &rel_sink, local_bufs)) {
                 stats.tasks_enqueued++;
             }
 #else
             consumer_walk_count++;
-            release_fanin_and_check_ready(consumer_slot, &rel_sink);
+            release_fanin_and_check_ready(consumer_slot, &rel_sink, local_bufs);
 #endif
             current = current->next;
         }
@@ -1360,9 +1416,9 @@ inline void drain_or_elide_deferred_releases(
 inline bool
 AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &sink, ChipTaskSlotState &slot_state) {
 #if SIMPLER_SCHED_PROFILING
-    sink.sched->on_task_complete(slot_state, sink.thread_idx);
+    sink.sched->on_task_complete(slot_state, sink.thread_idx, sink.local_bufs);
 #else
-    sink.sched->on_task_complete(slot_state);
+    sink.sched->on_task_complete(slot_state, sink.local_bufs);
 #endif
     // Async path keeps exact deferred release (no graph-seal observation here).
     if (*sink.deferred_release_count >= sink.deferred_release_capacity) {
@@ -1382,7 +1438,7 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 template <bool Profiling>
 inline AsyncPollResult AsyncWaitList::poll_and_complete(
     AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched, ChipTaskSlotState **deferred_release_slot_states,
-    int32_t &deferred_release_count, int32_t deferred_release_capacity
+    int32_t &deferred_release_count, int32_t deferred_release_capacity, LocalReadyBuffer *local_bufs
 #if SIMPLER_SCHED_PROFILING
     ,
     int thread_idx
@@ -1396,6 +1452,7 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
     sink.deferred_release_slot_states = deferred_release_slot_states;
     sink.deferred_release_count = &deferred_release_count;
     sink.deferred_release_capacity = deferred_release_capacity;
+    sink.local_bufs = local_bufs;
 #if SIMPLER_SCHED_PROFILING
     sink.thread_idx = thread_idx;
 #endif
@@ -1430,9 +1487,9 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
 
         if (entry.normal_done && entry.waiting_completion_count <= 0) {
 #if SIMPLER_SCHED_PROFILING
-            sched->on_task_complete(*entry.slot_state, thread_idx);
+            sched->on_task_complete(*entry.slot_state, thread_idx, local_bufs);
 #else
-            sched->on_task_complete(*entry.slot_state);
+            sched->on_task_complete(*entry.slot_state, local_bufs);
 #endif
             if (deferred_release_count >= deferred_release_capacity) {
                 drain_or_elide_deferred_releases(

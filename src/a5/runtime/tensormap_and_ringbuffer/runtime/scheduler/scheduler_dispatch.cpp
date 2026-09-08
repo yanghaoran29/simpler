@@ -83,7 +83,8 @@ bool SchedulerContext::has_idle_in_other_threads(int32_t self_thread_idx, Resour
 }
 
 int SchedulerContext::pop_ready_tasks_batch(
-    ChipReadyQueue *queues, ResourceShape shape, int32_t thread_idx, ChipTaskSlotState **out, int max_count
+    ChipReadyQueue *queues, ResourceShape shape, int32_t thread_idx, LocalReadyBuffer *local_buf,
+    ChipTaskSlotState **out, int max_count
 ) {
 #if SIMPLER_DFX
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -91,11 +92,12 @@ int SchedulerContext::pop_ready_tasks_batch(
     extern uint64_t g_sched_pop_atomic_count[], g_sched_pop_wait_cycle[];
     uint64_t t_pop_start = get_sys_cnt_aicpu();
     int count = sched_->get_ready_tasks_batch(
-        queues, shape, out, max_count, g_sched_pop_atomic_count[thread_idx], g_sched_pop_wait_cycle[thread_idx]
+        queues, shape, local_buf, out, max_count, g_sched_pop_atomic_count[thread_idx],
+        g_sched_pop_wait_cycle[thread_idx]
     );
     chip_swimlane.sched_dispatch_pop_cycle += (get_sys_cnt_aicpu() - t_pop_start);
 #else
-    int count = sched_->get_ready_tasks_batch(queues, shape, out, max_count);
+    int count = sched_->get_ready_tasks_batch(queues, shape, local_buf, out, max_count);
 #endif
     if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) {
         if (count > 0) {
@@ -106,7 +108,7 @@ int SchedulerContext::pop_ready_tasks_batch(
     }
 #else
     (void)thread_idx;
-    int count = sched_->get_ready_tasks_batch(queues, shape, out, max_count);
+    int count = sched_->get_ready_tasks_batch(queues, shape, local_buf, out, max_count);
 #endif
     return count;
 }
@@ -276,7 +278,7 @@ int SchedulerContext::prepare_block_for_dispatch(
 
 void SchedulerContext::dispatch_shape(
     int32_t thread_idx, ChipReadyQueue *disp_queues, ResourceShape shape, CoreTracker::DispatchPhase phase,
-    CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
+    LocalReadyBuffer *local_buf, CoreTracker &tracker, bool &entered_drain, bool &made_progress, bool &try_pushed
 ) {
 #if SIMPLER_SCHED_PROFILING
     auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
@@ -291,7 +293,7 @@ void SchedulerContext::dispatch_shape(
     while (cores.has_value() && !entered_drain) {
         int want = cores.count();
         ChipTaskSlotState *batch[CoreTracker::MAX_CLUSTERS * 3];
-        int got = pop_ready_tasks_batch(disp_queues, shape, thread_idx, batch, want);
+        int got = pop_ready_tasks_batch(disp_queues, shape, thread_idx, local_buf, batch, want);
         if (got == 0) break;
 
         // sync_start exclusion gate.
@@ -518,11 +520,26 @@ void SchedulerContext::run_staging_order(
 }
 
 void SchedulerContext::dispatch_ready_tasks(
-    int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
+    int32_t thread_idx, CoreTracker &tracker, LocalReadyBuffer (&local_bufs)[NUM_RESOURCE_SHAPES], bool pmu_active,
+    bool &made_progress, bool &try_pushed
 ) {
     // Normal ready dispatch (is_ready): dispatch_shape places each block on pickup and
     // signals a stop by setting entered_drain when it enters a sync_start drain.
     bool entered_drain = false;
+
+    auto flush_local_bufs = [&]() {
+        for (int32_t s = 0; s < NUM_RESOURCE_SHAPES; s++) {
+            LocalReadyBuffer &local_buf = local_bufs[s];
+            while (local_buf.count > 0) {
+                ChipTaskSlotState *slot_state = local_buf.slot_states[--local_buf.count];
+                while (!sched_->ready_queues[s].push(slot_state)) {}
+            }
+        }
+    };
+    struct FlushGuard {
+        decltype(flush_local_bufs) &flush;
+        ~FlushGuard() { flush(); }
+    } flush_guard{flush_local_bufs};
 
     // Tier 0: ready sync_start cohorts take cores before any regular ready task
     // (sync_start > MIX > C/V within the normal source). Same order and machinery,
@@ -537,7 +554,7 @@ void SchedulerContext::dispatch_ready_tasks(
             thread_idx, pmu_active,
             [&](ResourceShape shape, CoreTracker::DispatchPhase phase) {
                 dispatch_shape(
-                    thread_idx, sched_->ready_sync_queues, shape, phase, tracker, entered_drain, made_progress,
+                    thread_idx, sched_->ready_sync_queues, shape, phase, nullptr, tracker, entered_drain, made_progress,
                     try_pushed
                 );
                 return entered_drain;
@@ -554,12 +571,13 @@ void SchedulerContext::dispatch_ready_tasks(
         thread_idx, pmu_active,
         [&](ResourceShape shape, CoreTracker::DispatchPhase phase) {
             dispatch_shape(
-                thread_idx, sched_->ready_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
+                thread_idx, sched_->ready_queues, shape, phase, &local_bufs[static_cast<int32_t>(shape)], tracker,
+                entered_drain, made_progress, try_pushed
             );
             return entered_drain;
         },
         [&] {
-            return has_residual_mix();
+            return has_residual_mix(&local_bufs[static_cast<int32_t>(ResourceShape::MIX)]);
         }
     );
 }
@@ -874,6 +892,12 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 
     ChipTaskSlotState *deferred_release_slot_states[DEFERRED_RELEASE_CAP];
     int32_t deferred_release_count = 0;
+    constexpr int LOCAL_READY_CAPACITY = 64;
+    ChipTaskSlotState *local_storage[NUM_RESOURCE_SHAPES][LOCAL_READY_CAPACITY];
+    LocalReadyBuffer local_bufs[NUM_RESOURCE_SHAPES];
+    for (int32_t shape = 0; shape < NUM_RESOURCE_SHAPES; shape++) {
+        local_bufs[shape].reset(local_storage[shape], LOCAL_READY_CAPACITY);
+    }
 
     // PMU runs require single-issue dispatch — overlapping in-flight tasks
     // pollute per-task PMU counters. Cached at function scope (parity with
@@ -997,7 +1021,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         if (try_completed) {
             check_running_cores_for_completion(
                 thread_idx, hank, completed_this_turn, cur_thread_completed, made_progress,
-                deferred_release_slot_states, deferred_release_count
+                deferred_release_slot_states, deferred_release_count, local_bufs
             );
         }
         if (completed_this_turn > 0) {
@@ -1052,7 +1076,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
-                rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_CAP
+                rt_->aicore_mailbox, sched_, deferred_release_slot_states, deferred_release_count, DEFERRED_RELEASE_CAP,
+                local_bufs
 #if SIMPLER_SCHED_PROFILING
                 ,
                 thread_idx
@@ -1153,9 +1178,9 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 #endif
 #if SIMPLER_SCHED_PROFILING
                 [[maybe_unused]] uint32_t consumers_resolved =
-                    sched_->on_task_complete(dummy_slot, thread_idx).fanout_edges;
+                    sched_->on_task_complete(dummy_slot, thread_idx, local_bufs).fanout_edges;
 #else
-                [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(dummy_slot);
+                [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(dummy_slot, local_bufs);
 #endif
 #if SIMPLER_DFX
                 if (dummy_resolve_t0 != 0) {
@@ -1224,7 +1249,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 #if SIMPLER_DFX
         uint64_t dispatch_t0 = (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
 #endif
-        dispatch_ready_tasks(thread_idx, tracker, pmu_active, made_progress, try_pushed);
+        dispatch_ready_tasks(thread_idx, tracker, local_bufs, pmu_active, made_progress, try_pushed);
 #if SIMPLER_DFX
         // Close normal Dispatch before speculative staging so the two sources
         // remain distinguishable in scheduler-phase traces.

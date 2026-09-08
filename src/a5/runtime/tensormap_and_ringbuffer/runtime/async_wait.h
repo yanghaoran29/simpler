@@ -25,6 +25,7 @@
 #include "runtime_types.h"
 
 struct SchedulerState;
+struct LocalReadyBuffer;
 struct CompletionStats;
 
 inline constexpr int32_t MAX_ASYNC_WAITS = 64;
@@ -189,6 +190,7 @@ struct AsyncWaitList {
         int32_t *deferred_release_count{nullptr};
         int32_t deferred_release_capacity{0};
         int32_t inline_completed{0};
+        LocalReadyBuffer *local_bufs{nullptr};
 #if SIMPLER_SCHED_PROFILING
         int32_t thread_idx{0};
 #endif
@@ -306,7 +308,7 @@ struct AsyncWaitList {
     AsyncPollResult poll_and_complete(
         AICoreCompletionMailbox *aicore_mailbox, SchedulerState *sched,
         ChipTaskSlotState **deferred_release_slot_states, int32_t &deferred_release_count,
-        int32_t deferred_release_capacity
+        int32_t deferred_release_capacity, LocalReadyBuffer *local_bufs
 #if SIMPLER_SCHED_PROFILING
         ,
         int thread_idx
