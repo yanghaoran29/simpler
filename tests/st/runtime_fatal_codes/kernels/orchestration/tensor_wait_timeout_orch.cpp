@@ -15,8 +15,9 @@
  * Submits an AIC kernel that spins forever, then reads its output with
  * get_tensor_data. Because the output has a producer in the TensorMap,
  * get_tensor_data spin-waits for that producer to complete — which never
- * happens — so after TENSOR_DATA_TIMEOUT_CYCLES (15e9 cycles == 15 s at the
- * 1 GHz AICPU counter) the orchestrator latches TENSOR_WAIT_TIMEOUT.
+ * happens — so after the platform tensor-data wait budget (15 s onboard; see
+ * inner_get_tensor_data_wait_timeout_ticks, issue #2278) the orchestrator
+ * latches TENSOR_WAIT_TIMEOUT.
  *
  * Onboard only (the hang kernel would spin the simulator forever). The test
  * raises the AICPU scheduler / STARS op / host stream-sync timeouts all above

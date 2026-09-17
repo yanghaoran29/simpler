@@ -164,9 +164,8 @@ CASES = {
         kernel="aic/kernel_hang.cpp",
         kernel_core="aic",
         onboard_only=True,  # a while(true) kernel would hang the simulator
-        # The data-wait timeout is 15 s on both arches now that it is frequency-
-        # scaled (TENSOR_DATA_TIMEOUT_MS, #1189) -- before that it was 15 s on
-        # a5 but 300 s on a2a3, so this case used to be a5-only. Raise every other
+        # The data-wait timeout is 15 s onboard (inner_get_tensor_data_wait_timeout_ticks,
+        # #2278; frequency-scaled since #1189). Raise every other
         # watchdog above 15 s so the tensor-data wait wins the race and latches
         # code 8 before they reap the hung core.
         env={

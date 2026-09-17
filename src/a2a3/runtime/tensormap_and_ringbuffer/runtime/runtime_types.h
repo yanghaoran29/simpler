@@ -111,15 +111,13 @@ inline constexpr int WAIT_REACH_WINDOW = 64;
 #define CHIP_TENSORMAP_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
 #define CHIP_DEP_POOL_CLEANUP_INTERVAL 64   // Cleanup every N retired tasks
 
-// get_tensor_data/set_tensor_data spin-wait timeout, expressed in time. The cycle
-// count (TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in runtime_core.cpp
-// — its only user — by scaling with the platform counter frequency, like
-// SCHEDULER_TIMEOUT_CYCLES, so it reaps at the same wall-clock on every arch (a
-// fixed raw cycle count would be 15 s on a5 at 1 GHz but 300 s on a2a3 at 50 MHz).
-// PLATFORM_PROF_SYS_CNT_FREQ is deliberately NOT pulled into this header: it is
-// included by orchestrations that define that constant locally, so doing so caused
-// a redefinition conflict. See issue #1189.
-constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
+// get_tensor_data/set_tensor_data spin-wait wall-clock policy.
+// The effective cycle budget is selected by the platform build via
+// inner_get_tensor_data_wait_timeout_ticks() (sim vs onboard; issue #2278).
+// Onboard remains 15 s; do not reintroduce a shared compile-time cycle count
+// here. PLATFORM_PROF_SYS_CNT_FREQ must stay out of this header: orchestrations
+// may define that constant locally (#1189).
+constexpr uint64_t TENSOR_DATA_TIMEOUT_MS = 15000;  // onboard default; sim uses platform query
 
 // =============================================================================
 // Task States

@@ -15,8 +15,8 @@
  * a2a3 sim and onboard share the same register layout, so read_reg /
  * write_reg live in the shared src/aicpu/platform_regs.cpp. This file holds
  * the variant-specific hooks: the reg_load_acquire / reg_store_release
- * handshake-gate accessors (plain MMIO here) and the deinit-timeout budget —
- * see platform_regs.h for the rationale of each.
+ * handshake-gate accessors (plain MMIO here), the deinit-timeout budget, and
+ * the tensor-data wait budget — see platform_regs.h for the rationale of each.
  */
 
 #include <cstdint>
@@ -41,3 +41,13 @@ void reg_store_release(volatile uint32_t *p, uint32_t v) { *p = v; }
  * @return Timeout in profiling system-counter ticks.
  */
 uint64_t inner_get_deinit_timeout_ticks() { return PLATFORM_PROF_SYS_CNT_FREQ; }
+
+/**
+ * @brief Tensor-data wait budget on real hardware: 15 s.
+ *
+ * Preserves the historical onboard producer/consumer deadline so hang
+ * detection stays unchanged (issue #2278).
+ *
+ * @return Timeout in profiling system-counter ticks.
+ */
+uint64_t inner_get_tensor_data_wait_timeout_ticks() { return uint64_t{15} * PLATFORM_PROF_SYS_CNT_FREQ; }

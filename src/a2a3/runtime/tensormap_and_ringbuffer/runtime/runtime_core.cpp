@@ -27,7 +27,7 @@
 #include <algorithm>
 
 #include "aicpu/device_time.h"
-#include "common/platform_config.h"  // PLATFORM_PROF_SYS_CNT_FREQ (data-wait deadline)
+#include "aicpu/platform_regs.h"
 #include "common/unified_log.h"
 #include "tensormap_and_ringbuffer/task_id.h"
 #if SIMPLER_DFX
@@ -38,12 +38,6 @@
 // The AICPU build links the strong symbol from platform/.../device_time.cpp.
 // Hidden visibility prevents HOST .so from polluting global symbol table.
 __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() { return 0; }
-
-// Derived here, not in runtime_types.h: that header is included by orchestrations
-// that define PLATFORM_PROF_SYS_CNT_FREQ locally, so pulling the platform header into
-// it caused a redefinition conflict (#1189). Scaling MS by the counter frequency (like
-// SCHEDULER_TIMEOUT_CYCLES) keeps the data-wait wall-clock identical across arches.
-static constexpr uint64_t TENSOR_DATA_TIMEOUT_CYCLES = (TENSOR_DATA_TIMEOUT_MS * PLATFORM_PROF_SYS_CNT_FREQ) / 1000;
 
 // =============================================================================
 // Orchestration Ops Table (function-pointer dispatch for orchestration .so)
@@ -93,7 +87,7 @@ void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, c
 // For writes: also wait until all consumers done reading
 //   (consumer low bits of fanout_refcount >= consumer count, excluding the
 //    bit31 scope reference).
-// Uses cycle-based timeout (checked every 1024 spins).
+// Uses a platform-selected cycle budget (checked every 1024 spins).
 // Returns false on timeout (sets orch.fatal).
 MAYBE_UNINITIALIZED_BEGIN
 static bool wait_for_tensor_ready(
@@ -101,6 +95,8 @@ static bool wait_for_tensor_ready(
 ) {
     TaskId owner = tensor.owner_task_id;
     OrchestratorState &orch = rt->orchestrator;
+    // Backend-specific finite budget (sim vs onboard); keep stable for this wait.
+    const uint64_t budget = inner_get_tensor_data_wait_timeout_ticks();
 
     // Segmented wait: collect up to kSegmentCap producer slots, then flush by
     // spinning on each. When the segment fills, we wait for the accumulated
@@ -126,11 +122,12 @@ static bool wait_for_tensor_ready(
                     failed = true;
                     return;
                 }
-                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
+                const uint64_t elapsed = get_sys_cnt_aicpu() - t0;
+                if (elapsed > budget) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
-                        "Timeout (%llu cycles): producer (ring=%d, local=%d) not completed",
-                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        "Timeout (budget=%llu cycles, elapsed=%llu): producer (ring=%d, local=%d) not completed",
+                        (unsigned long long)budget, (unsigned long long)elapsed, ring_id, local_id
                     );
                     failed = true;
                     return;
@@ -153,11 +150,12 @@ static bool wait_for_tensor_ready(
                     failed = true;
                     return;
                 }
-                if (get_sys_cnt_aicpu() - t0 > TENSOR_DATA_TIMEOUT_CYCLES) {
+                const uint64_t elapsed = get_sys_cnt_aicpu() - t0;
+                if (elapsed > budget) {
                     orch.report_fatal(
                         SIMPLER_ERROR_TENSOR_WAIT_TIMEOUT, caller,
-                        "Timeout (%llu cycles): consumers of producer (ring=%d, local=%d) not done",
-                        (unsigned long long)TENSOR_DATA_TIMEOUT_CYCLES, ring_id, local_id
+                        "Timeout (budget=%llu cycles, elapsed=%llu): consumers of producer (ring=%d, local=%d) not done",
+                        (unsigned long long)budget, (unsigned long long)elapsed, ring_id, local_id
                     );
                     failed = true;
                     return;

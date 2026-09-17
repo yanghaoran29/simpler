@@ -191,6 +191,24 @@ int32_t platform_deinit_aicore_regs(uint64_t reg_addr);
 uint64_t inner_get_deinit_timeout_ticks();
 
 /**
+ * Variant-specific get_tensor_data / set_tensor_data wait budget, in ticks of
+ * get_sys_cnt_aicpu.
+ *
+ * Implemented per-variant in:
+ *   sim/aicpu/inner_platform_regs.cpp    -- larger finite budget (CPU simulation)
+ *   onboard/aicpu/inner_platform_regs.cpp -- 15 s (hardware hang detection)
+ *
+ * Rationale: the producer/consumer spin in wait_for_tensor_ready measures
+ * wall-clock from when orchestration begins waiting on one dependency. Onboard
+ * keeps the historical 15 s deadline. CPU simulation is substantially slower,
+ * so the same finite producer can exceed 15 s without being deadlocked; the
+ * sim budget is a separate finite bound (issue #2278). Do not pull this into
+ * runtime_types.h — that header must stay free of PLATFORM_PROF_SYS_CNT_FREQ
+ * (#1189).
+ */
+uint64_t inner_get_tensor_data_wait_timeout_ticks();
+
+/**
  * Get physical core count for current platform
  *
  * This function returns the maximum valid physical_core_id value (exclusive upper bound).
